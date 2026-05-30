@@ -4,8 +4,9 @@ mod state;
 mod supabase;
 
 use contracts::{
-    AgentRegistration, ChatCompletionChoice, ChatCompletionChoiceMessage, ChatCompletionMundusX,
-    ChatCompletionRequest, ChatCompletionResponse, Heartbeat, JobCompletion, JobRequest,
+    is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
+    ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
+    ChatCompletionResponse, Heartbeat, JobCompletion, JobRequest,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::{applied_migrations, apply_migrations};
@@ -235,6 +236,16 @@ fn policy_badge(allowed: bool) -> (&'static str, &'static str, &'static str) {
     }
 }
 
+fn trust_badge(trust_path: &str) -> (&'static str, &'static str, &'static str) {
+    if is_trusted_identity_path(trust_path) {
+        ("#12351f", "#8ef0aa", trust_path_label(trust_path))
+    } else if trust_path == contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK {
+        ("#3a2610", "#ffbf7a", trust_path_label(trust_path))
+    } else {
+        ("#22304c", "#b8c7e8", trust_path_label(trust_path))
+    }
+}
+
 fn render_nodes(state: &ControlPlaneState) -> String {
     let nodes: Vec<_> = state.nodes.values().cloned().collect();
     if nodes.is_empty() {
@@ -257,6 +268,7 @@ fn render_nodes(state: &ControlPlaneState) -> String {
 
     for node in nodes {
         let (state_bg, state_fg) = state_badge(node.state.as_str());
+        let (trust_bg, trust_fg, trust_label) = trust_badge(&node.identity_trust_path);
         let (policy_bg, policy_fg, policy_label) = policy_badge(node.policy_allowed);
         let battery = node
             .battery_percent
@@ -308,8 +320,8 @@ fn render_nodes(state: &ControlPlaneState) -> String {
                 <div class="meta">signed device</div>
               </div>
               <div>
-                <div>{}</div>
-                <div class="meta">identity path</div>
+                <span class="pill" style="background:{};color:{};">{}</span>
+                <div class="meta">{}</div>
               </div>
               <div><span class="pill" style="background:{};color:{};">{}</span></div>
               <div>
@@ -332,6 +344,9 @@ fn render_nodes(state: &ControlPlaneState) -> String {
             node.contribution_percent,
             node.available_gpu_percent,
             escape_html(&node.hostname),
+            trust_bg,
+            trust_fg,
+            escape_html(trust_label),
             escape_html(&node.identity_trust_path),
             escape_html(&node.backend.to_string()),
             state_bg,
@@ -362,6 +377,7 @@ fn control_plane_home(
 ) -> String {
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
+    let trusted = snapshot["trusted_count"].as_u64().unwrap_or(0);
     let paused = snapshot["paused_count"].as_u64().unwrap_or(0);
     let policy_blocked = snapshot["policy_blocked_count"].as_u64().unwrap_or(0);
     let job_events = snapshot["job_events"].as_u64().unwrap_or(0);
@@ -667,6 +683,7 @@ fn control_plane_home(
 
         <div class="grid">
           <div class="card"><div class="card-label">Online nodes</div><div class="card-value">{nodes}</div></div>
+          <div class="card"><div class="card-label">Trusted nodes</div><div class="card-value">{trusted}</div></div>
           <div class="card"><div class="card-label">Paused nodes</div><div class="card-value">{paused}</div></div>
           <div class="card"><div class="card-label">Policy blocked</div><div class="card-value">{policy_blocked}</div></div>
           <div class="card"><div class="card-label">Job events</div><div class="card-value">{job_events}</div></div>

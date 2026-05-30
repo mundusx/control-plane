@@ -1,6 +1,7 @@
 use crate::contracts::{
-    AgentRegistration, AgentState, Backend, ControlPlaneSnapshot, CreditsLedgerRecord, Heartbeat,
-    JobClaimResponse, JobCompletion, JobEventRecord, JobRecord, JobRequest, JobStatus, NodeRecord,
+    is_trusted_identity_path, AgentRegistration, AgentState, Backend, ControlPlaneSnapshot,
+    CreditsLedgerRecord, Heartbeat, JobClaimResponse, JobCompletion, JobEventRecord, JobRecord,
+    JobRequest, JobStatus, NodeRecord,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -30,6 +31,10 @@ impl ControlPlaneState {
         let paused_count = nodes
             .iter()
             .filter(|node| node.state == AgentState::Paused)
+            .count();
+        let trusted_count = nodes
+            .iter()
+            .filter(|node| is_trusted_identity_path(&node.identity_trust_path))
             .count();
         let policy_blocked_count = nodes.iter().filter(|node| !node.policy_allowed).count();
         let stopped_count = nodes
@@ -62,6 +67,7 @@ impl ControlPlaneState {
             credits_by_node,
             storage_source: storage_source.to_string(),
             online_count,
+            trusted_count,
             paused_count,
             policy_blocked_count,
             stopped_count,
@@ -521,6 +527,26 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_counts_trusted_nodes_from_identity_trust_path() {
+        let mut state = ready_state();
+        state.register(AgentRegistration {
+            node_id: "node-2".to_string(),
+            public_key_fingerprint: "fingerprint-2".to_string(),
+            public_key_hex: "ddeeff".to_string(),
+            hostname: "host-2".to_string(),
+            identity_trust_path: "keychain".to_string(),
+            backend: Backend::M,
+            contribution_percent: 20,
+            agent_version: "0.1.0".to_string(),
+        });
+
+        let snapshot = state.snapshot("supabase");
+        assert_eq!(snapshot["trusted_count"].as_u64(), Some(1));
+        assert_eq!(snapshot["online_count"].as_u64(), Some(1));
+        assert_eq!(snapshot["storage_source"].as_str(), Some("supabase"));
+    }
+
+    #[test]
     fn does_not_claim_job_for_busy_node() {
         let mut state = ready_state();
         state.heartbeat(
@@ -573,7 +599,10 @@ mod tests {
 
         let claim = state.claim_job("node-1", "4".to_string());
         assert!(claim.job.is_none());
-        assert_eq!(state.jobs.get("job-1").map(|job| job.status), Some(JobStatus::Queued));
+        assert_eq!(
+            state.jobs.get("job-1").map(|job| job.status),
+            Some(JobStatus::Queued)
+        );
     }
 
     #[test]

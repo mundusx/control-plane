@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub const IDENTITY_TRUST_KEYCHAIN: &str = "keychain";
+pub const IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK: &str = "local-encrypted-fallback";
+
+pub fn is_trusted_identity_path(identity_trust_path: &str) -> bool {
+    identity_trust_path == IDENTITY_TRUST_KEYCHAIN
+}
+
+pub fn trust_path_label(identity_trust_path: &str) -> &'static str {
+    match identity_trust_path {
+        IDENTITY_TRUST_KEYCHAIN => "trusted",
+        IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK => "encrypted fallback",
+        _ => "unknown",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
@@ -296,6 +311,7 @@ pub struct ControlPlaneSnapshot {
     pub credits_by_node: BTreeMap<String, f64>,
     pub storage_source: String,
     pub online_count: usize,
+    pub trusted_count: usize,
     pub paused_count: usize,
     pub policy_blocked_count: usize,
     pub stopped_count: usize,

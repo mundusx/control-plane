@@ -9,6 +9,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::contracts::{IDENTITY_TRUST_KEYCHAIN, IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK};
+
 const IDENTITY_SECRET_SALT: &str = "com.opengpu.device.identity.secret";
 
 #[derive(Debug, Deserialize)]
@@ -47,9 +49,9 @@ pub fn ensure_identity(storage_dir: &Path) -> io::Result<SecureIdentity> {
             return Ok(SecureIdentity {
                 public_key_hex: existing.public_key_hex,
                 fingerprint: existing.fingerprint,
-                keychain_label_hex: existing
-                    .keychain_label_hex
-                    .unwrap_or_else(|| machine_label_hex().unwrap_or_else(|_| "unknown".to_string())),
+                keychain_label_hex: existing.keychain_label_hex.unwrap_or_else(|| {
+                    machine_label_hex().unwrap_or_else(|_| "unknown".to_string())
+                }),
                 encrypted_private_key_hex: existing.encrypted_private_key_hex,
                 nonce_hex: existing.nonce_hex,
                 created: false,
@@ -69,7 +71,8 @@ pub fn ensure_identity(storage_dir: &Path) -> io::Result<SecureIdentity> {
     let secret = machine_secret_key()?;
     let encrypted = xor_crypt(&private_key, &secret, &nonce);
     private_key.fill(0);
-    let label_hex = machine_label_hex().unwrap_or_else(|_| hex::encode(IDENTITY_SECRET_SALT.as_bytes()));
+    let label_hex =
+        machine_label_hex().unwrap_or_else(|_| hex::encode(IDENTITY_SECRET_SALT.as_bytes()));
 
     let persisted = PersistedIdentity {
         public_key_hex: public_key_hex.clone(),
@@ -107,14 +110,13 @@ pub fn sign_message(storage_dir: &Path, message: &[u8]) -> io::Result<String> {
         ));
     }
 
-    let encrypted_private = hex::decode(&stored.encrypted_private_key_hex).map_err(invalid_identity)?;
+    let encrypted_private =
+        hex::decode(&stored.encrypted_private_key_hex).map_err(invalid_identity)?;
     let private_key_bytes_vec = xor_crypt(&encrypted_private, &secret, nonce.as_slice());
-    let private_bytes: [u8; 32] = private_key_bytes_vec.clone().try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "private key must be 32 bytes",
-        )
-    })?;
+    let private_bytes: [u8; 32] = private_key_bytes_vec
+        .clone()
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "private key must be 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&private_bytes);
     let signature = signing_key.sign(message);
     let mut private_key_bytes = private_key_bytes_vec;
@@ -129,26 +131,24 @@ pub fn verify_message(
     signature_hex: &str,
 ) -> io::Result<bool> {
     let public_bytes = hex::decode(public_key_hex).map_err(invalid_identity)?;
-    let public_bytes: [u8; 32] = public_bytes.try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "public key must be 32 bytes",
-        )
-    })?;
+    let public_bytes: [u8; 32] = public_bytes
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "public key must be 32 bytes"))?;
     let verifying_key = VerifyingKey::from_bytes(&public_bytes).map_err(invalid_identity)?;
 
     let signature_bytes = hex::decode(signature_hex).map_err(invalid_identity)?;
-    let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).map_err(invalid_identity)?;
+    let signature =
+        ed25519_dalek::Signature::from_slice(&signature_bytes).map_err(invalid_identity)?;
     Ok(verifying_key.verify(message, &signature).is_ok())
 }
 
 pub fn trust_path(storage_dir: &Path) -> io::Result<&'static str> {
     if load_machine_secret_from_keychain()?.is_some() {
-        return Ok("keychain");
+        return Ok(IDENTITY_TRUST_KEYCHAIN);
     }
 
     let _ = storage_dir;
-    Ok("local-encrypted-fallback")
+    Ok(IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK)
 }
 
 fn load_stored_identity(storage_dir: &Path) -> io::Result<Option<StoredIdentity>> {
