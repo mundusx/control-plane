@@ -581,6 +581,43 @@ mod tests {
     use super::*;
     use crate::contracts::WorkerHealthReport;
 
+    fn demo_worker_health(model_path: &str, runtime_mode: &str) -> WorkerHealthReport {
+        WorkerHealthReport {
+            healthy: true,
+            model_dir: "/tmp/models".to_string(),
+            model_name: Some("demo".to_string()),
+            model_path: Some(model_path.to_string()),
+            llama_cli_available: true,
+            blas_device_available: true,
+            power_source: "AC Power".to_string(),
+            on_battery: false,
+            battery_percent: Some(90),
+            runtime_mode: runtime_mode.to_string(),
+            checked_at: "1".to_string(),
+            notes: vec![],
+        }
+    }
+
+    fn ready_heartbeat(node_id: &str, backend: Backend, updated_at: &str) -> Heartbeat {
+        Heartbeat {
+            node_id: node_id.to_string(),
+            backend,
+            agent_state: AgentState::Ready,
+            available_memory_mb: 16_000,
+            available_gpu_percent: 50,
+            updated_at: updated_at.to_string(),
+            contribution_percent: 50,
+            hostname: format!("host-{node_id}"),
+            identity_trust_path: "local-encrypted-fallback".to_string(),
+            power_source: "AC Power".to_string(),
+            on_battery: false,
+            battery_percent: Some(90),
+            policy_allowed: true,
+            policy_reason: None,
+            worker_health: demo_worker_health("/tmp/models/demo.gguf", "local"),
+        }
+    }
+
     fn ready_state() -> ControlPlaneState {
         let mut state = ControlPlaneState::default();
         let registration = AgentRegistration {
@@ -594,39 +631,7 @@ mod tests {
             agent_version: "0.1.0".to_string(),
         };
         state.register(registration);
-        state.heartbeat(
-            Heartbeat {
-                node_id: "node-1".to_string(),
-                backend: Backend::M,
-                agent_state: AgentState::Ready,
-                available_memory_mb: 16_000,
-                available_gpu_percent: 50,
-                updated_at: "1".to_string(),
-                contribution_percent: 50,
-                hostname: "host-1".to_string(),
-                identity_trust_path: "local-encrypted-fallback".to_string(),
-                power_source: "AC Power".to_string(),
-                on_battery: false,
-                battery_percent: Some(90),
-                policy_allowed: true,
-                policy_reason: None,
-                worker_health: WorkerHealthReport {
-                    healthy: true,
-                    model_dir: "/tmp/models".to_string(),
-                    model_name: Some("demo".to_string()),
-                    model_path: Some("/tmp/models/demo.gguf".to_string()),
-                    llama_cli_available: true,
-                    blas_device_available: true,
-                    power_source: "AC Power".to_string(),
-                    on_battery: false,
-                    battery_percent: Some(90),
-                    runtime_mode: "local".to_string(),
-                    checked_at: "1".to_string(),
-                    notes: vec![],
-                },
-            },
-            "1".to_string(),
-        );
+        state.heartbeat(ready_heartbeat("node-1", Backend::M, "1"), "1".to_string());
         state
     }
 
@@ -958,5 +963,148 @@ mod tests {
 
         assert_eq!(completed.status, JobStatus::Completed);
         assert_eq!(completed.output.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn covers_m_series_registration_through_completion_with_serialized_snapshots() {
+        let mut state = ControlPlaneState::default();
+        let registration = AgentRegistration {
+            node_id: "node-m".to_string(),
+            public_key_fingerprint: "fingerprint-m".to_string(),
+            public_key_hex: "ffeedd".to_string(),
+            hostname: "mbp-14".to_string(),
+            identity_trust_path: "local-encrypted-fallback".to_string(),
+            backend: Backend::M,
+            contribution_percent: 65,
+            agent_version: "0.1.0".to_string(),
+        };
+
+        let node = state.register(registration);
+        assert_eq!(node.state, AgentState::Starting);
+
+        state.heartbeat(ready_heartbeat("node-m", Backend::M, "2"), "2".to_string());
+        state.submit_job(
+            JobRequest {
+                request_id: "job-m".to_string(),
+                prompt: "run the m-series happy path".to_string(),
+                preferred_backend: Backend::M,
+                model: Some("demo".to_string()),
+                system_prompt: Some("You are concise.".to_string()),
+                max_tokens: Some(64),
+                temperature: Some(0.1),
+                top_p: Some(0.95),
+                seed: Some(7),
+            },
+            "3".to_string(),
+        );
+
+        let assigned = state
+            .claim_job("node-m", "4".to_string())
+            .job
+            .expect("m-series node claims job");
+        assert_eq!(assigned.status, JobStatus::Assigned);
+        assert_eq!(assigned.backend, Some(Backend::M));
+        assert_eq!(assigned.assigned_node_id.as_deref(), Some("node-m"));
+
+        let assigned_json = serde_json::to_value(&assigned).expect("assigned job json");
+        assert_eq!(assigned_json["job_id"].as_str(), Some("job-m"));
+        assert_eq!(assigned_json["status"].as_str(), Some("assigned"));
+        assert_eq!(assigned_json["backend"].as_str(), Some("m"));
+
+        let completed = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-m".to_string(),
+                    node_id: "node-m".to_string(),
+                    worker_id: "worker-m".to_string(),
+                    backend: Backend::M,
+                    status: JobStatus::Completed,
+                    output: Some("done".to_string()),
+                    error: None,
+                },
+                "5".to_string(),
+            )
+            .expect("completed job");
+
+        assert_eq!(completed.status, JobStatus::Completed);
+        assert_eq!(completed.worker_id.as_deref(), Some("worker-m"));
+        assert_eq!(completed.output.as_deref(), Some("done"));
+
+        let jobs = state.jobs_snapshot();
+        let job = jobs
+            .as_array()
+            .and_then(|entries| entries.first())
+            .expect("one serialized job");
+        assert_eq!(job["status"].as_str(), Some("completed"));
+        assert_eq!(job["backend"].as_str(), Some("m"));
+        assert_eq!(job["worker_id"].as_str(), Some("worker-m"));
+
+        let nodes = state.nodes_snapshot();
+        let node = nodes
+            .as_array()
+            .and_then(|entries| entries.first())
+            .expect("one serialized node");
+        assert_eq!(node["state"].as_str(), Some("ready"));
+        assert_eq!(node["backend"].as_str(), Some("m"));
+        assert_eq!(node["policy_allowed"].as_bool(), Some(true));
+        assert_eq!(
+            node["worker_health"]["runtime_mode"].as_str(),
+            Some("local")
+        );
+
+        let snapshot = state.snapshot("local-json");
+        assert_eq!(snapshot["queued_job_count"].as_u64(), Some(0));
+        assert_eq!(snapshot["assigned_job_count"].as_u64(), Some(0));
+        assert_eq!(snapshot["completed_job_count"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn blocked_policy_m_series_node_keeps_job_queued_and_exposes_reason() {
+        let mut state = ControlPlaneState::default();
+        state.register(AgentRegistration {
+            node_id: "node-blocked".to_string(),
+            public_key_fingerprint: "fingerprint-blocked".to_string(),
+            public_key_hex: "001122".to_string(),
+            hostname: "host-blocked".to_string(),
+            identity_trust_path: "local-encrypted-fallback".to_string(),
+            backend: Backend::M,
+            contribution_percent: 25,
+            agent_version: "0.1.0".to_string(),
+        });
+
+        let mut heartbeat = ready_heartbeat("node-blocked", Backend::M, "2");
+        heartbeat.worker_health = demo_worker_health("/opt/models/demo.gguf", "batch");
+        state.heartbeat(heartbeat, "2".to_string());
+        state.submit_job(
+            JobRequest {
+                request_id: "job-blocked".to_string(),
+                prompt: "should stay queued".to_string(),
+                preferred_backend: Backend::M,
+                model: Some("demo".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            "3".to_string(),
+        );
+
+        let claim = state.claim_job("node-blocked", "4".to_string());
+        assert!(claim.job.is_none());
+
+        let node = state.nodes.get("node-blocked").expect("blocked node present");
+        assert!(!node.policy_allowed);
+        let reason = node.policy_reason.as_deref().expect("policy reason");
+        assert!(reason.contains("outside model directory"));
+        assert!(reason.contains("runtime mode batch is not ready for local execution"));
+
+        let jobs = state.jobs_snapshot();
+        let job = jobs
+            .as_array()
+            .and_then(|entries| entries.first())
+            .expect("one queued job");
+        assert_eq!(job["status"].as_str(), Some("queued"));
+        assert_eq!(job["backend"], serde_json::Value::Null);
     }
 }
