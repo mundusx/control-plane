@@ -7,6 +7,7 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
     ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
     ChatCompletionResponse, Heartbeat, JobCompletion, JobRequest,
+    OperatorContributionPercentUpdate,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::{applied_migrations, apply_migrations};
@@ -809,6 +810,7 @@ fn requires_operator_auth(method: &str, path: &str) -> bool {
             | ("GET", "/v1/credits")
             | ("POST", "/v1/jobs")
             | ("POST", "/v1/chat/completions")
+            | ("POST", "/v1/nodes/contribution-cap")
     )
 }
 
@@ -1035,6 +1037,50 @@ fn handle_connection(
         ("GET", "/v1/nodes") => {
             let snapshot = state.lock().expect("state lock").nodes_snapshot();
             json_response("200 OK", snapshot)
+        }
+        ("POST", "/v1/nodes/contribution-cap") => {
+            match serde_json::from_str::<OperatorContributionPercentUpdate>(&request.body) {
+                Ok(update) => {
+                    let mut guard = state.lock().expect("state lock");
+                    match guard.set_operator_contribution_percent(
+                        &update.node_id,
+                        update.contribution_percent,
+                    ) {
+                        Ok(record) => {
+                            let event = guard.record_job_event(
+                                Some(record.node_id.clone()),
+                                None,
+                                "operator_contribution_percent_updated",
+                                serde_json::json!({
+                                    "node_id": record.node_id,
+                                    "contribution_percent": record.contribution_percent,
+                                    "reported_contribution_percent": record.reported_contribution_percent,
+                                    "operator_contribution_percent": record.operator_contribution_percent,
+                                }),
+                                now_unix_seconds(),
+                            );
+                            if let Err(error) = save_state(&guard) {
+                                eprintln!("failed to save control-plane state: {error}");
+                            }
+                            if let Some(db) = supabase.as_ref() {
+                                if let Err(error) = db.record_job_event(&event) {
+                                    eprintln!("database operator cap event skipped: {error}");
+                                    note_supabase_failure(&sync_status, error);
+                                }
+                            }
+                            json_response("200 OK", serde_json::to_value(record).expect("json"))
+                        }
+                        Err(error) => json_response(
+                            "400 Bad Request",
+                            serde_json::json!({ "error": error }),
+                        ),
+                    }
+                }
+                Err(error) => json_response(
+                    "400 Bad Request",
+                    serde_json::json!({ "error": error.to_string() }),
+                ),
+            }
         }
         ("GET", "/v1/jobs") => {
             let snapshot = state.lock().expect("state lock").jobs_snapshot();
@@ -1427,6 +1473,7 @@ fn main() {
     println!("health: GET /health");
     println!("status: GET /v1/status");
     println!("nodes: GET /v1/nodes");
+    println!("update cap: POST /v1/nodes/contribution-cap");
     println!("jobs: GET /v1/jobs");
     println!("register: POST /v1/register");
     println!("heartbeat: POST /v1/heartbeat");
@@ -1449,5 +1496,15 @@ fn main() {
             }
             Err(error) => eprintln!("incoming connection error: {error}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_operator_auth;
+
+    #[test]
+    fn protects_operator_cap_update_route() {
+        assert!(requires_operator_auth("POST", "/v1/nodes/contribution-cap"));
     }
 }

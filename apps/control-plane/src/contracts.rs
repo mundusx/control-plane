@@ -287,6 +287,10 @@ pub struct NodeRecord {
     pub hostname: String,
     pub backend: Backend,
     pub contribution_percent: u8,
+    #[serde(default)]
+    pub reported_contribution_percent: u8,
+    #[serde(default)]
+    pub operator_contribution_percent: Option<u8>,
     pub agent_version: String,
     pub state: AgentState,
     pub available_memory_mb: u32,
@@ -299,6 +303,12 @@ pub struct NodeRecord {
     pub policy_reason: Option<String>,
     pub worker_health: Option<WorkerHealthReport>,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperatorContributionPercentUpdate {
+    pub node_id: String,
+    pub contribution_percent: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

@@ -219,6 +219,8 @@ impl ControlPlaneState {
             identity_trust_path: registration.identity_trust_path,
             backend: registration.backend,
             contribution_percent: registration.contribution_percent,
+            reported_contribution_percent: registration.contribution_percent,
+            operator_contribution_percent: None,
             agent_version: registration.agent_version,
             state: AgentState::Starting,
             available_memory_mb: 0,
@@ -262,6 +264,27 @@ impl ControlPlaneState {
 
         self.jobs.insert(job_id, record.clone());
         record
+    }
+
+    pub fn set_operator_contribution_percent(
+        &mut self,
+        node_id: &str,
+        contribution_percent: Option<u8>,
+    ) -> Result<NodeRecord, String> {
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| "unknown node".to_string())?;
+
+        if let Some(percent) = contribution_percent {
+            if percent > 100 {
+                return Err("contribution_percent must be between 0 and 100".to_string());
+            }
+        }
+
+        node.operator_contribution_percent = contribution_percent;
+        node.contribution_percent = contribution_percent.unwrap_or(node.reported_contribution_percent);
+        Ok(node.clone())
     }
 
     fn node_backend_matches(
@@ -400,6 +423,11 @@ impl ControlPlaneState {
             heartbeat.battery_percent,
             &heartbeat.worker_health,
         );
+        let existing_override = self
+            .nodes
+            .get(&heartbeat.node_id)
+            .and_then(|node| node.operator_contribution_percent);
+        let reported_contribution_percent = heartbeat.contribution_percent;
         let record = NodeRecord {
             node_id: heartbeat.node_id.clone(),
             public_key_fingerprint: self
@@ -419,7 +447,9 @@ impl ControlPlaneState {
                 .unwrap_or_default(),
             identity_trust_path: heartbeat.identity_trust_path.clone(),
             backend: heartbeat.backend,
-            contribution_percent: heartbeat.contribution_percent,
+            contribution_percent: existing_override.unwrap_or(reported_contribution_percent),
+            reported_contribution_percent,
+            operator_contribution_percent: existing_override,
             agent_version: self
                 .nodes
                 .get(&heartbeat.node_id)
@@ -1093,5 +1123,50 @@ mod tests {
 
         assert_eq!(completed.status, JobStatus::Completed);
         assert_eq!(completed.output.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn preserves_operator_cap_override_across_heartbeats() {
+        let mut state = ready_state();
+
+        let updated = state
+            .set_operator_contribution_percent("node-1", Some(80))
+            .expect("operator override");
+        assert_eq!(updated.contribution_percent, 80);
+        assert_eq!(updated.reported_contribution_percent, 50);
+        assert_eq!(updated.operator_contribution_percent, Some(80));
+
+        let mut heartbeat = ready_heartbeat("node-1", "2");
+        heartbeat.contribution_percent = 35;
+        let updated = state.heartbeat(heartbeat, "2".to_string());
+
+        assert_eq!(updated.contribution_percent, 80);
+        assert_eq!(updated.reported_contribution_percent, 35);
+        assert_eq!(updated.operator_contribution_percent, Some(80));
+    }
+
+    #[test]
+    fn clearing_operator_cap_override_restores_reported_cap() {
+        let mut state = ready_state();
+        state
+            .set_operator_contribution_percent("node-1", Some(80))
+            .expect("operator override");
+
+        let updated = state
+            .set_operator_contribution_percent("node-1", None)
+            .expect("clear operator override");
+
+        assert_eq!(updated.contribution_percent, 50);
+        assert_eq!(updated.reported_contribution_percent, 50);
+        assert_eq!(updated.operator_contribution_percent, None);
+    }
+
+    #[test]
+    fn rejects_operator_cap_override_above_safe_range() {
+        let mut state = ready_state();
+        let error = state
+            .set_operator_contribution_percent("node-1", Some(101))
+            .expect_err("safe range validation");
+        assert_eq!(error, "contribution_percent must be between 0 and 100");
     }
 }

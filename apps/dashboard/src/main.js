@@ -200,6 +200,32 @@ function runtimeReadiness(node = {}) {
   };
 }
 
+function capStatus(node = {}) {
+  const effective = Number(node.contribution_percent ?? 0);
+  const reported = Number(node.reported_contribution_percent ?? effective);
+  const operator = node.operator_contribution_percent;
+  const operatorDefined = operator != null;
+
+  if (operatorDefined && Number(operator) !== reported) {
+    return {
+      summary: `operator cap ${operator}%`,
+      detail: `agent reported ${reported}%`,
+    };
+  }
+
+  if (operatorDefined) {
+    return {
+      summary: `operator cap ${operator}%`,
+      detail: "agent matches operator cap",
+    };
+  }
+
+  return {
+    summary: `cap ${effective}%`,
+    detail: `agent reported ${reported}%`,
+  };
+}
+
 function summarizeMSeries(snapshot = {}) {
   const nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
   const mNodes = nodes.filter((node) => String(node.backend ?? "").toLowerCase() === "m");
@@ -298,6 +324,7 @@ function renderMSeriesOperatorSummary(snapshot = {}) {
       ${mNodes
         .map((node) => {
           const readiness = runtimeReadiness(node);
+          const cap = capStatus(node);
           const trustTone = String(node.identity_trust_path ?? "") === "keychain" ? "green" : "amber";
           const policyTone = node.policy_allowed ? "green" : "red";
           const stateTone =
@@ -317,7 +344,8 @@ function renderMSeriesOperatorSummary(snapshot = {}) {
               <div class="panel-top">
                 <div>
                   <strong>${escapeHtml(node.node_id ?? "unknown node")}</strong>
-                  <div class="meta">${escapeHtml(node.hostname ?? "unknown host")} • cap ${escapeHtml(node.contribution_percent ?? 0)}%</div>
+                  <div class="meta">${escapeHtml(node.hostname ?? "unknown host")} • ${escapeHtml(cap.summary)}</div>
+                  <div class="meta">${escapeHtml(cap.detail)}</div>
                 </div>
                 <div class="job-badges">
                   ${badge(`trust: ${String(node.identity_trust_path ?? "unknown")}`, trustTone)}
@@ -359,6 +387,7 @@ function renderNodes(nodes = []) {
       </div>
       ${nodes
         .map((node) => {
+          const cap = capStatus(node);
           const battery = node.battery_percent == null ? "unknown" : `${node.battery_percent}%`;
           const power = `${node.power_source ?? "unknown"} • ${node.on_battery ? "battery" : "AC"} • ${battery}`;
           const workerHealth = node.worker_health ?? null;
@@ -373,7 +402,8 @@ function renderNodes(nodes = []) {
               <div>
                 <strong>${escapeHtml(node.node_id)}</strong>
                 <div class="meta">fingerprint ${escapeHtml(node.public_key_fingerprint ?? "unknown")}</div>
-                <div class="meta">cap ${escapeHtml(node.contribution_percent ?? 0)}%</div>
+                <div class="meta">${escapeHtml(cap.summary)}</div>
+                <div class="meta">${escapeHtml(cap.detail)}</div>
               </div>
               <div>
                 <div>${escapeHtml(node.hostname ?? "unknown")}</div>
