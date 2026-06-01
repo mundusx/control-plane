@@ -176,6 +176,47 @@ fn now_unix_seconds_u64() -> u64 {
     now_unix_seconds().parse::<u64>().unwrap_or(0)
 }
 
+fn control_plane_bind_addr_from_env(
+    port: Option<&str>,
+    host: Option<&str>,
+) -> Result<String, String> {
+    let trimmed_host = host
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let trimmed_port = port
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+
+    if trimmed_port.is_empty() {
+        let bind_host = if trimmed_host.is_empty() {
+            "127.0.0.1"
+        } else {
+            trimmed_host
+        };
+        return Ok(format!("{bind_host}:8787"));
+    }
+
+    let parsed_port = trimmed_port
+        .parse::<u16>()
+        .map_err(|_| format!("invalid PORT value: {trimmed_port}"))?;
+    let bind_host = if trimmed_host.is_empty() {
+        "0.0.0.0"
+    } else {
+        trimmed_host
+    };
+
+    Ok(format!("{bind_host}:{parsed_port}"))
+}
+
+fn control_plane_bind_addr() -> Result<String, String> {
+    control_plane_bind_addr_from_env(
+        std::env::var("PORT").ok().as_deref(),
+        std::env::var("MUNDUSX_CONTROL_PLANE_HOST").ok().as_deref(),
+    )
+}
+
 fn load_local_env() {
     let mut current = match std::env::current_dir() {
         Ok(dir) => dir,
@@ -1415,7 +1456,8 @@ fn main() {
     }
 
     let supabase = SupabaseMirror::from_env();
-    let listener = TcpListener::bind("127.0.0.1:8787").expect("bind control plane");
+    let bind_addr = control_plane_bind_addr().expect("resolve bind address");
+    let listener = TcpListener::bind(&bind_addr).expect("bind control plane");
     let (restored_state, storage_source, sync_status) = match supabase.as_ref() {
         Some(db) => match db.restore_state() {
             Ok(state) => {
@@ -1449,7 +1491,7 @@ fn main() {
     let state = Arc::new(Mutex::new(restored_state));
     let sync_status = Arc::new(Mutex::new(sync_status));
 
-    println!("NovusX control plane listening on http://127.0.0.1:8787");
+    println!("NovusX control plane listening on http://{bind_addr}");
     println!(
         "supabase: {}",
         sync_status.lock().expect("sync status lock").summary()
@@ -1501,7 +1543,32 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::requires_operator_auth;
+    use super::{control_plane_bind_addr_from_env, requires_operator_auth};
+
+    #[test]
+    fn defaults_to_localhost_when_port_is_missing() {
+        let bind_addr = control_plane_bind_addr_from_env(None, None).expect("bind addr");
+        assert_eq!(bind_addr, "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn uses_railway_friendly_bind_when_port_is_present() {
+        let bind_addr = control_plane_bind_addr_from_env(Some("3000"), None).expect("bind addr");
+        assert_eq!(bind_addr, "0.0.0.0:3000");
+    }
+
+    #[test]
+    fn honors_explicit_host_override() {
+        let bind_addr =
+            control_plane_bind_addr_from_env(Some("8787"), Some("127.0.0.1")).expect("bind addr");
+        assert_eq!(bind_addr, "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn rejects_invalid_port_values() {
+        let error = control_plane_bind_addr_from_env(Some("abc"), None).expect_err("invalid");
+        assert_eq!(error, "invalid PORT value: abc");
+    }
 
     #[test]
     fn protects_operator_cap_update_route() {
