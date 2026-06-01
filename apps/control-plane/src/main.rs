@@ -7,7 +7,7 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
     ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
     ChatCompletionResponse, Heartbeat, JobCompletion, JobRequest,
-    OperatorContributionPercentUpdate,
+    OperatorContributionPercentUpdate, RuntimeMode,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::{applied_migrations, apply_migrations};
@@ -1282,6 +1282,8 @@ fn handle_connection(
                         request_id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
                         prompt,
                         preferred_backend: crate::contracts::Backend::Auto,
+                        runtime_mode: RuntimeMode::Interactive,
+                        stream: false,
                         model: Some(request_body.model.clone()),
                         system_prompt,
                         max_tokens: request_body.max_tokens,

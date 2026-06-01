@@ -49,6 +49,34 @@ impl Default for Backend {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum RuntimeMode {
+    Local,
+    Interactive,
+}
+
+impl RuntimeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Interactive => "interactive",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Default for RuntimeMode {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AgentState {
     Starting,
     Ready,
@@ -137,6 +165,10 @@ pub struct JobRequest {
     pub request_id: String,
     pub prompt: String,
     pub preferred_backend: Backend,
+    #[serde(default)]
+    pub runtime_mode: RuntimeMode,
+    #[serde(default)]
+    pub stream: bool,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub max_tokens: Option<u32>,
@@ -203,6 +235,10 @@ pub struct JobRecord {
     pub request_id: String,
     pub prompt: String,
     pub preferred_backend: Backend,
+    #[serde(default)]
+    pub runtime_mode: RuntimeMode,
+    #[serde(default)]
+    pub stream: bool,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub max_tokens: Option<u32>,
@@ -247,9 +283,19 @@ pub struct WorkerHealthReport {
     pub power_source: String,
     pub on_battery: bool,
     pub battery_percent: Option<u8>,
+    #[serde(default = "default_true")]
+    pub runtime_ready: bool,
     pub runtime_mode: String,
+    #[serde(default)]
+    pub supported_runtime_modes: Vec<RuntimeMode>,
+    #[serde(default)]
+    pub streaming_supported: bool,
     pub checked_at: String,
     pub notes: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -329,4 +375,51 @@ pub struct ControlPlaneSnapshot {
     pub assigned_job_count: usize,
     pub completed_job_count: usize,
     pub failed_job_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_request_defaults_runtime_contract_for_legacy_payloads() {
+        let request: JobRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "job-1",
+            "prompt": "hello",
+            "preferred_backend": "m"
+        }))
+        .expect("legacy job request");
+
+        assert_eq!(request.runtime_mode, RuntimeMode::Local);
+        assert!(!request.stream);
+    }
+
+    #[test]
+    fn worker_health_report_serializes_runtime_capabilities() {
+        let report = WorkerHealthReport {
+            healthy: true,
+            model_dir: "/tmp/models".to_string(),
+            model_name: Some("demo".to_string()),
+            model_path: Some("/tmp/models/demo.gguf".to_string()),
+            llama_cli_available: true,
+            blas_device_available: true,
+            power_source: "AC Power".to_string(),
+            on_battery: false,
+            battery_percent: Some(90),
+            runtime_ready: true,
+            runtime_mode: "local".to_string(),
+            supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
+            streaming_supported: false,
+            checked_at: "1".to_string(),
+            notes: vec!["ready".to_string()],
+        };
+
+        let json = serde_json::to_value(report).expect("worker health json");
+        assert_eq!(json["runtime_ready"], true);
+        assert_eq!(
+            json["supported_runtime_modes"],
+            serde_json::json!(["local", "interactive"])
+        );
+        assert_eq!(json["streaming_supported"], false);
+    }
 }

@@ -1,7 +1,7 @@
 use crate::contracts::{
     is_trusted_identity_path, AgentRegistration, AgentState, Backend, ControlPlaneSnapshot,
     CreditsLedgerRecord, Heartbeat, JobClaimResponse, JobCompletion, JobEventRecord, JobRecord,
-    JobRequest, JobStatus, NodeRecord, WorkerHealthReport,
+    JobRequest, JobStatus, NodeRecord, RuntimeMode, WorkerHealthReport,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -245,6 +245,8 @@ impl ControlPlaneState {
             request_id: request.request_id,
             prompt: request.prompt,
             preferred_backend: request.preferred_backend,
+            runtime_mode: request.runtime_mode,
+            stream: request.stream,
             model: request.model,
             system_prompt: request.system_prompt,
             max_tokens: request.max_tokens,
@@ -320,6 +322,44 @@ impl ControlPlaneState {
         }
     }
 
+    fn reported_runtime_modes(worker_health: &WorkerHealthReport) -> Vec<RuntimeMode> {
+        if !worker_health.supported_runtime_modes.is_empty() {
+            return worker_health.supported_runtime_modes.clone();
+        }
+
+        match worker_health
+            .runtime_mode
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "local" => vec![RuntimeMode::Local],
+            "interactive" => vec![RuntimeMode::Interactive],
+            _ => Vec::new(),
+        }
+    }
+
+    fn node_can_run_job(node: &NodeRecord, job: &JobRecord) -> bool {
+        let Some(worker_health) = node.worker_health.as_ref() else {
+            return false;
+        };
+
+        if !worker_health.runtime_ready {
+            return false;
+        }
+
+        let runtime_modes = Self::reported_runtime_modes(worker_health);
+        if !runtime_modes.contains(&job.runtime_mode) {
+            return false;
+        }
+
+        if job.stream && !worker_health.streaming_supported {
+            return false;
+        }
+
+        true
+    }
+
     pub fn claim_job(&mut self, node_id: &str, claimed_at: String) -> JobClaimResponse {
         let Some(node) = self.nodes.get(node_id) else {
             return JobClaimResponse { job: None };
@@ -355,6 +395,7 @@ impl ControlPlaneState {
                         ready_m_exists,
                         ready_cuda_exists,
                     )
+                    && Self::node_can_run_job(node, job)
             })
             .map(|(job_id, _)| job_id.clone());
 
@@ -524,6 +565,10 @@ pub fn evaluate_policy(
         reasons.push("BLAS device acceleration is unavailable".to_string());
     }
 
+    if !worker_health.runtime_ready {
+        reasons.push("runtime capability report is not ready".to_string());
+    }
+
     if worker_health.model_dir.trim().is_empty() {
         reasons.push("model directory is missing".to_string());
     }
@@ -609,7 +654,9 @@ pub fn save_state(state: &ControlPlaneState) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{WorkerHealthReport, IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK};
+    use crate::contracts::{
+        RuntimeMode, WorkerHealthReport, IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK,
+    };
 
     fn m_series_registration(node_id: &str) -> AgentRegistration {
         AgentRegistration {
@@ -635,7 +682,10 @@ mod tests {
             power_source: "AC Power".to_string(),
             on_battery: false,
             battery_percent: Some(90),
+            runtime_ready: true,
             runtime_mode: "local".to_string(),
+            supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
+            streaming_supported: false,
             checked_at: checked_at.to_string(),
             notes: vec!["m-series ready".to_string()],
         }
@@ -692,6 +742,8 @@ mod tests {
                 request_id: "job-1".to_string(),
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: Some("You are a terse assistant.".to_string()),
                 max_tokens: Some(32),
@@ -765,6 +817,8 @@ mod tests {
                 request_id: "job-1".to_string(),
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
                 max_tokens: None,
@@ -803,6 +857,8 @@ mod tests {
                 request_id: "job-1".to_string(),
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
                 model: None,
                 system_prompt: Some("You are a terse assistant.".to_string()),
                 max_tokens: Some(32),
@@ -859,7 +915,10 @@ mod tests {
                     power_source: "AC Power".to_string(),
                     on_battery: false,
                     battery_percent: Some(90),
+                    runtime_ready: true,
                     runtime_mode: "local".to_string(),
+                    supported_runtime_modes: vec![RuntimeMode::Local],
+                    streaming_supported: false,
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -871,6 +930,8 @@ mod tests {
                 request_id: "job-1".to_string(),
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
                 model: None,
                 system_prompt: Some("You are a terse assistant.".to_string()),
                 max_tokens: Some(32),
@@ -939,7 +1000,10 @@ mod tests {
                     power_source: "AC Power".to_string(),
                     on_battery: false,
                     battery_percent: Some(90),
+                    runtime_ready: true,
                     runtime_mode: "local".to_string(),
+                    supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
+                    streaming_supported: false,
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -992,7 +1056,10 @@ mod tests {
                     power_source: "AC Power".to_string(),
                     on_battery: false,
                     battery_percent: Some(90),
+                    runtime_ready: true,
                     runtime_mode: "batch".to_string(),
+                    supported_runtime_modes: vec![RuntimeMode::Local],
+                    streaming_supported: false,
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -1057,7 +1124,10 @@ mod tests {
                     power_source: "AC Power".to_string(),
                     on_battery: false,
                     battery_percent: Some(90),
+                    runtime_ready: true,
                     runtime_mode: "local".to_string(),
+                    supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
+                    streaming_supported: false,
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -1069,6 +1139,8 @@ mod tests {
                 request_id: "job-1".to_string(),
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
                 model: None,
                 system_prompt: None,
                 max_tokens: None,
@@ -1095,6 +1167,8 @@ mod tests {
                 request_id: "job-1".to_string(),
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
                 model: None,
                 system_prompt: None,
                 max_tokens: None,
@@ -1168,5 +1242,79 @@ mod tests {
             .set_operator_contribution_percent("node-1", Some(101))
             .expect_err("safe range validation");
         assert_eq!(error, "contribution_percent must be between 0 and 100");
+    }
+
+    #[test]
+    fn does_not_claim_job_when_runtime_mode_is_unsupported() {
+        let mut state = ready_state();
+        let node = state.nodes.get_mut("node-1").expect("node exists");
+        let worker_health = node.worker_health.as_mut().expect("worker health");
+        worker_health.supported_runtime_modes = vec![RuntimeMode::Local];
+
+        state.submit_job(
+            JobRequest {
+                request_id: "job-1".to_string(),
+                prompt: "hello world".to_string(),
+                preferred_backend: Backend::M,
+                runtime_mode: RuntimeMode::Interactive,
+                stream: false,
+                model: Some("demo".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            "2".to_string(),
+        );
+
+        let claim = state.claim_job("node-1", "3".to_string());
+        assert!(claim.job.is_none());
+        assert_eq!(
+            state.jobs.get("job-1").map(|job| job.status),
+            Some(JobStatus::Queued)
+        );
+    }
+
+    #[test]
+    fn does_not_claim_streaming_job_when_node_cannot_stream() {
+        let mut state = ready_state();
+        state.submit_job(
+            JobRequest {
+                request_id: "job-1".to_string(),
+                prompt: "hello world".to_string(),
+                preferred_backend: Backend::M,
+                runtime_mode: RuntimeMode::Interactive,
+                stream: true,
+                model: Some("demo".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            "2".to_string(),
+        );
+
+        let claim = state.claim_job("node-1", "3".to_string());
+        assert!(claim.job.is_none());
+        assert_eq!(
+            state.jobs.get("job-1").map(|job| job.status),
+            Some(JobStatus::Queued)
+        );
+    }
+
+    #[test]
+    fn blocks_nodes_when_runtime_capability_report_is_not_ready() {
+        let mut state = ControlPlaneState::default();
+        state.register(m_series_registration("node-1"));
+        let mut heartbeat = ready_heartbeat("node-1", "1");
+        heartbeat.worker_health.runtime_ready = false;
+        state.heartbeat(heartbeat, "1".to_string());
+
+        let node = state.nodes.get("node-1").expect("node exists");
+        assert!(!node.policy_allowed);
+        let reason = node.policy_reason.as_deref().expect("policy reason");
+        assert!(reason.contains("runtime capability report is not ready"));
     }
 }
