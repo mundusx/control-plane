@@ -1,7 +1,8 @@
 use crate::contracts::{
     is_trusted_identity_path, AgentRegistration, AgentState, Backend, ControlPlaneSnapshot,
     CreditsLedgerRecord, Heartbeat, JobClaimResponse, JobCompletion, JobEventRecord, JobRecord,
-    JobRequest, JobStatus, NodeRecord, RuntimeMode, WorkerHealthReport,
+    JobRequest, JobStatus, NodePolicyOverride, NodePolicyOverrideInput,
+    NodePolicyOverrideTarget, NodeRecord, RuntimeMode, WorkerHealthReport,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -18,6 +19,28 @@ pub struct ControlPlaneState {
 }
 
 impl ControlPlaneState {
+    fn apply_policy_override(node: &mut NodeRecord) {
+        node.state = node.reported_state;
+        node.policy_allowed = node.computed_policy_allowed;
+        node.policy_reason = node.computed_policy_reason.clone();
+
+        if let Some(policy_override) = node.operator_policy_override.as_ref() {
+            node.policy_reason = Some(format!("operator override: {}", policy_override.reason));
+            match policy_override.target {
+                NodePolicyOverrideTarget::Allowed => {
+                    node.policy_allowed = true;
+                }
+                NodePolicyOverrideTarget::Paused => {
+                    node.state = AgentState::Paused;
+                    node.policy_allowed = false;
+                }
+                NodePolicyOverrideTarget::Blocked => {
+                    node.policy_allowed = false;
+                }
+            }
+        }
+    }
+
     pub fn snapshot(&self, storage_source: &str) -> serde_json::Value {
         let nodes: Vec<NodeRecord> = self.nodes.values().cloned().collect();
         let jobs: Vec<JobRecord> = self.jobs.values().cloned().collect();
@@ -223,6 +246,7 @@ impl ControlPlaneState {
             operator_contribution_percent: None,
             agent_version: registration.agent_version,
             state: AgentState::Starting,
+            reported_state: AgentState::Starting,
             available_memory_mb: 0,
             available_gpu_percent: 0,
             power_source: "unknown".to_string(),
@@ -230,6 +254,9 @@ impl ControlPlaneState {
             battery_percent: None,
             policy_allowed: false,
             policy_reason: None,
+            computed_policy_allowed: false,
+            computed_policy_reason: None,
+            operator_policy_override: None,
             worker_health: None,
             updated_at: String::new(),
         };
@@ -289,6 +316,26 @@ impl ControlPlaneState {
         Ok(node.clone())
     }
 
+    pub fn set_node_policy_override(
+        &mut self,
+        node_id: &str,
+        policy_override: Option<NodePolicyOverrideInput>,
+    ) -> Result<NodeRecord, String> {
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| "unknown node".to_string())?;
+
+        node.operator_policy_override = policy_override.map(|value| NodePolicyOverride {
+            target: value.target,
+            reason: value.reason.trim().to_string(),
+            actor: value.actor.trim().to_string(),
+            updated_at: value.updated_at,
+        });
+        Self::apply_policy_override(node);
+        Ok(node.clone())
+    }
+
     fn node_backend_matches(
         job: &JobRecord,
         node_backend: Backend,
@@ -340,6 +387,16 @@ impl ControlPlaneState {
     }
 
     fn node_can_run_job(node: &NodeRecord, job: &JobRecord) -> bool {
+        let allowed_override_active = node
+            .operator_policy_override
+            .as_ref()
+            .map(|value| value.target == NodePolicyOverrideTarget::Allowed)
+            .unwrap_or(false);
+
+        if allowed_override_active {
+            return true;
+        }
+
         let Some(worker_health) = node.worker_health.as_ref() else {
             return false;
         };
@@ -413,8 +470,9 @@ impl ControlPlaneState {
             job.error = None;
 
             if let Some(node) = self.nodes.get_mut(node_id) {
-                node.state = AgentState::Busy;
+                node.reported_state = AgentState::Busy;
                 node.updated_at = job.assigned_at.clone().unwrap_or_default();
+                Self::apply_policy_override(node);
             }
 
             return JobClaimResponse {
@@ -446,11 +504,12 @@ impl ControlPlaneState {
         };
 
         if let Some(node) = self.nodes.get_mut(&completion.node_id) {
-            if node.state == AgentState::Busy {
-                node.state = AgentState::Ready;
+            if node.reported_state == AgentState::Busy {
+                node.reported_state = AgentState::Ready;
             }
             node.backend = completion.backend;
             node.updated_at = completed_at;
+            Self::apply_policy_override(node);
         }
 
         Some(updated_job)
@@ -468,8 +527,12 @@ impl ControlPlaneState {
             .nodes
             .get(&heartbeat.node_id)
             .and_then(|node| node.operator_contribution_percent);
+        let existing_policy_override = self
+            .nodes
+            .get(&heartbeat.node_id)
+            .and_then(|node| node.operator_policy_override.clone());
         let reported_contribution_percent = heartbeat.contribution_percent;
-        let record = NodeRecord {
+        let mut record = NodeRecord {
             node_id: heartbeat.node_id.clone(),
             public_key_fingerprint: self
                 .nodes
@@ -497,16 +560,21 @@ impl ControlPlaneState {
                 .map(|node| node.agent_version.clone())
                 .unwrap_or_else(|| "0.1.0".to_string()),
             state: heartbeat.agent_state,
+            reported_state: heartbeat.agent_state,
             available_memory_mb: heartbeat.available_memory_mb,
             available_gpu_percent: heartbeat.available_gpu_percent,
             power_source: heartbeat.power_source,
             on_battery: heartbeat.on_battery,
             battery_percent: heartbeat.battery_percent,
             policy_allowed,
-            policy_reason,
+            policy_reason: policy_reason.clone(),
+            computed_policy_allowed: policy_allowed,
+            computed_policy_reason: policy_reason,
+            operator_policy_override: existing_policy_override,
             worker_health: Some(heartbeat.worker_health),
             updated_at: updated_at.clone(),
         };
+        Self::apply_policy_override(&mut record);
 
         self.nodes.insert(heartbeat.node_id, record.clone());
         record
@@ -1242,6 +1310,79 @@ mod tests {
             .set_operator_contribution_percent("node-1", Some(101))
             .expect_err("safe range validation");
         assert_eq!(error, "contribution_percent must be between 0 and 100");
+    }
+
+    #[test]
+    fn override_allowed_unblocks_claim_routing_immediately() {
+        let mut state = ControlPlaneState::default();
+        state.register(m_series_registration("node-1"));
+        let mut heartbeat = ready_heartbeat("node-1", "1");
+        heartbeat.worker_health.healthy = false;
+        heartbeat.worker_health.runtime_ready = false;
+        state.heartbeat(heartbeat, "1".to_string());
+        state.submit_job(
+            JobRequest {
+                request_id: "job-1".to_string(),
+                prompt: "hello world".to_string(),
+                preferred_backend: Backend::M,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
+                model: Some("demo".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            "2".to_string(),
+        );
+
+        state
+            .set_node_policy_override(
+                "node-1",
+                Some(NodePolicyOverrideInput {
+                    target: NodePolicyOverrideTarget::Allowed,
+                    reason: "operator verified local recovery".to_string(),
+                    actor: "automation".to_string(),
+                    updated_at: "3".to_string(),
+                }),
+            )
+            .expect("override");
+
+        let claim = state.claim_job("node-1", "4".to_string());
+        let job = claim.job.expect("claimed job");
+        assert_eq!(job.assigned_node_id.as_deref(), Some("node-1"));
+
+        let node = state.nodes.get("node-1").expect("node exists");
+        assert_eq!(node.operator_policy_override.as_ref().map(|value| value.target), Some(NodePolicyOverrideTarget::Allowed));
+        assert!(node.policy_allowed);
+        assert_eq!(node.policy_reason.as_deref(), Some("operator override: operator verified local recovery"));
+        assert!(!node.computed_policy_allowed);
+    }
+
+    #[test]
+    fn clearing_policy_override_restores_computed_policy_state() {
+        let mut state = ready_state();
+        state
+            .set_node_policy_override(
+                "node-1",
+                Some(NodePolicyOverrideInput {
+                    target: NodePolicyOverrideTarget::Paused,
+                    reason: "operator drained the node".to_string(),
+                    actor: "automation".to_string(),
+                    updated_at: "2".to_string(),
+                }),
+            )
+            .expect("override");
+
+        let updated = state
+            .set_node_policy_override("node-1", None)
+            .expect("clear override");
+
+        assert_eq!(updated.operator_policy_override, None);
+        assert_eq!(updated.state, AgentState::Ready);
+        assert!(updated.policy_allowed);
+        assert_eq!(updated.policy_reason, None);
     }
 
     #[test]

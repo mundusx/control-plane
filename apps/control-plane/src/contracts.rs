@@ -103,6 +103,12 @@ impl fmt::Display for AgentState {
     }
 }
 
+impl Default for AgentState {
+    fn default() -> Self {
+        Self::Starting
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobStatus {
@@ -323,6 +329,46 @@ pub struct CreditsLedgerRecord {
     pub created_at: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodePolicyOverrideTarget {
+    Allowed,
+    Paused,
+    Blocked,
+}
+
+impl NodePolicyOverrideTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Paused => "paused",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+impl fmt::Display for NodePolicyOverrideTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NodePolicyOverride {
+    pub target: NodePolicyOverrideTarget,
+    pub reason: String,
+    pub actor: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NodePolicyOverrideInput {
+    pub target: NodePolicyOverrideTarget,
+    pub reason: String,
+    pub actor: String,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeRecord {
     pub node_id: String,
@@ -339,6 +385,8 @@ pub struct NodeRecord {
     pub operator_contribution_percent: Option<u8>,
     pub agent_version: String,
     pub state: AgentState,
+    #[serde(default)]
+    pub reported_state: AgentState,
     pub available_memory_mb: u32,
     pub available_gpu_percent: u32,
     pub identity_trust_path: String,
@@ -347,6 +395,12 @@ pub struct NodeRecord {
     pub battery_percent: Option<u8>,
     pub policy_allowed: bool,
     pub policy_reason: Option<String>,
+    #[serde(default)]
+    pub computed_policy_allowed: bool,
+    #[serde(default)]
+    pub computed_policy_reason: Option<String>,
+    #[serde(default)]
+    pub operator_policy_override: Option<NodePolicyOverride>,
     pub worker_health: Option<WorkerHealthReport>,
     pub updated_at: String,
 }
@@ -355,6 +409,14 @@ pub struct NodeRecord {
 pub struct OperatorContributionPercentUpdate {
     pub node_id: String,
     pub contribution_percent: Option<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperatorNodePolicyOverrideUpdate {
+    pub node_id: String,
+    pub target: Option<NodePolicyOverrideTarget>,
+    pub reason: Option<String>,
+    pub actor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

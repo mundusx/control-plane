@@ -2,7 +2,7 @@ use crate::contracts::{
     AgentRegistration, CreditsLedgerRecord, Heartbeat, JobCompletion, JobEventRecord, JobRecord,
     NodeRecord,
 };
-use crate::state::{evaluate_policy, ControlPlaneState};
+use crate::state::ControlPlaneState;
 use serde_json::json;
 use std::collections::HashSet;
 use std::env;
@@ -63,6 +63,7 @@ impl SupabaseMirror {
             "contribution_percent": registration.contribution_percent,
             "agent_version": registration.agent_version,
             "state": "starting",
+            "reported_state": "starting",
             "available_memory_mb": 0_u64,
             "available_gpu_percent": 0_u64,
             "power_source": "unknown",
@@ -70,6 +71,12 @@ impl SupabaseMirror {
             "battery_percent": null,
             "policy_allowed": false,
             "policy_reason": null,
+            "computed_policy_allowed": false,
+            "computed_policy_reason": null,
+            "operator_policy_override_target": null,
+            "operator_policy_override_reason": null,
+            "operator_policy_override_actor": null,
+            "operator_policy_override_updated_at": null,
             "last_seen_at_epoch": now,
             "updated_at_epoch": now,
         });
@@ -82,34 +89,34 @@ impl SupabaseMirror {
         )
     }
 
-    pub fn record_heartbeat(&self, heartbeat: &Heartbeat) -> Result<(), String> {
-        let now = parse_epoch(&heartbeat.updated_at).unwrap_or_else(now_epoch);
-        let (policy_allowed, policy_reason) = evaluate_policy(
-            heartbeat.agent_state,
-            heartbeat.power_source.as_str(),
-            heartbeat.on_battery,
-            heartbeat.battery_percent,
-            &heartbeat.worker_health,
-        );
-        let source_heartbeat_key =
-            heartbeat_sync_key(heartbeat, now, policy_allowed, policy_reason.as_deref());
+    pub fn record_node_snapshot(&self, node: &NodeRecord) -> Result<(), String> {
+        let policy_override = node.operator_policy_override.as_ref();
         let payload = json!({
-            "source_heartbeat_key": source_heartbeat_key,
-            "node_id": heartbeat.node_id,
-            "backend": heartbeat.backend,
-            "state": heartbeat.agent_state,
-            "available_memory_mb": heartbeat.available_memory_mb,
-            "available_gpu_percent": heartbeat.available_gpu_percent,
-            "contribution_percent": heartbeat.contribution_percent,
-            "hostname": heartbeat.hostname,
-            "identity_trust_path": heartbeat.identity_trust_path,
-            "power_source": heartbeat.power_source,
-            "on_battery": heartbeat.on_battery,
-            "battery_percent": heartbeat.battery_percent,
-            "policy_allowed": policy_allowed,
-            "policy_reason": policy_reason,
-            "last_seen_at_epoch": now,
-            "updated_at_epoch": now,
+            "node_id": node.node_id,
+            "public_key_fingerprint": node.public_key_fingerprint,
+            "public_key_hex": node.public_key_hex,
+            "hostname": node.hostname,
+            "identity_trust_path": node.identity_trust_path,
+            "backend": node.backend,
+            "contribution_percent": node.contribution_percent,
+            "agent_version": node.agent_version,
+            "state": node.state,
+            "reported_state": node.reported_state,
+            "available_memory_mb": node.available_memory_mb,
+            "available_gpu_percent": node.available_gpu_percent,
+            "power_source": node.power_source,
+            "on_battery": node.on_battery,
+            "battery_percent": node.battery_percent,
+            "policy_allowed": node.policy_allowed,
+            "policy_reason": node.policy_reason,
+            "computed_policy_allowed": node.computed_policy_allowed,
+            "computed_policy_reason": node.computed_policy_reason,
+            "operator_policy_override_target": policy_override.map(|value| value.target),
+            "operator_policy_override_reason": policy_override.map(|value| value.reason.clone()),
+            "operator_policy_override_actor": policy_override.map(|value| value.actor.clone()),
+            "operator_policy_override_updated_at": policy_override.map(|value| value.updated_at.clone()),
+            "last_seen_at_epoch": parse_epoch(&node.updated_at).unwrap_or_else(now_epoch),
+            "updated_at_epoch": parse_epoch(&node.updated_at).unwrap_or_else(now_epoch),
         });
 
         self.post_json(
@@ -117,13 +124,23 @@ impl SupabaseMirror {
             Some("node_id"),
             "resolution=merge-duplicates,return=minimal",
             payload,
-        )?;
+        )
+    }
 
+    pub fn record_heartbeat(&self, heartbeat: &Heartbeat, node: &NodeRecord) -> Result<(), String> {
+        let now = parse_epoch(&heartbeat.updated_at).unwrap_or_else(now_epoch);
+        let source_heartbeat_key =
+            heartbeat_sync_key(heartbeat, now, node.policy_allowed, node.policy_reason.as_deref());
+
+        self.record_node_snapshot(node)?;
+
+        let policy_override = node.operator_policy_override.as_ref();
         let heartbeat_row = json!({
             "source_heartbeat_key": source_heartbeat_key,
             "node_id": heartbeat.node_id,
             "backend": heartbeat.backend,
             "agent_state": heartbeat.agent_state,
+            "reported_state": node.reported_state,
             "available_memory_mb": heartbeat.available_memory_mb,
             "available_gpu_percent": heartbeat.available_gpu_percent,
             "contribution_percent": heartbeat.contribution_percent,
@@ -132,8 +149,14 @@ impl SupabaseMirror {
             "power_source": heartbeat.power_source,
             "on_battery": heartbeat.on_battery,
             "battery_percent": heartbeat.battery_percent,
-            "policy_allowed": policy_allowed,
-            "policy_reason": policy_reason,
+            "policy_allowed": node.policy_allowed,
+            "policy_reason": node.policy_reason,
+            "computed_policy_allowed": node.computed_policy_allowed,
+            "computed_policy_reason": node.computed_policy_reason,
+            "operator_policy_override_target": policy_override.map(|value| value.target),
+            "operator_policy_override_reason": policy_override.map(|value| value.reason.clone()),
+            "operator_policy_override_actor": policy_override.map(|value| value.actor.clone()),
+            "operator_policy_override_updated_at": policy_override.map(|value| value.updated_at.clone()),
             "observed_at_epoch": now,
         });
 

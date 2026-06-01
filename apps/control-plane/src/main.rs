@@ -7,7 +7,8 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
     ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
     ChatCompletionResponse, Heartbeat, JobCompletion, JobRequest,
-    OperatorContributionPercentUpdate, RuntimeMode,
+    NodePolicyOverrideInput, OperatorContributionPercentUpdate,
+    OperatorNodePolicyOverrideUpdate, RuntimeMode,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::{applied_migrations, apply_migrations};
@@ -846,6 +847,7 @@ fn requires_operator_auth(method: &str, path: &str) -> bool {
         ("GET", "/")
             | ("GET", "/v1/status")
             | ("GET", "/v1/nodes")
+            | ("POST", "/v1/nodes/policy-override")
             | ("GET", "/v1/jobs")
             | ("GET", "/v1/job-events")
             | ("GET", "/v1/credits")
@@ -1196,6 +1198,92 @@ fn handle_connection(
                 ),
             }
         }
+        ("POST", "/v1/nodes/policy-override") => {
+            match serde_json::from_str::<OperatorNodePolicyOverrideUpdate>(&request.body) {
+                Ok(update) => {
+                    let actor = update
+                        .actor
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("operator")
+                        .to_string();
+                    let reason = update
+                        .reason
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string);
+                    let override_input = if let Some(target) = update.target {
+                        if let Some(reason) = reason.clone() {
+                            Some(NodePolicyOverrideInput {
+                                target,
+                                reason,
+                                actor: actor.clone(),
+                                updated_at: now_unix_seconds(),
+                            })
+                        } else {
+                            return stream.write_all(
+                                json_response(
+                                    "400 Bad Request",
+                                    serde_json::json!({ "error": "reason is required when setting a policy override" }),
+                                )
+                                .as_bytes(),
+                            ).unwrap_or(());
+                        }
+                    } else {
+                        None
+                    };
+
+                    let mut guard = state.lock().expect("state lock");
+                    match guard.set_node_policy_override(&update.node_id, override_input) {
+                        Ok(record) => {
+                            let event = guard.record_job_event(
+                                Some(record.node_id.clone()),
+                                None,
+                                "operator_policy_override_updated",
+                                serde_json::json!({
+                                    "node_id": record.node_id,
+                                    "target": record.operator_policy_override.as_ref().map(|value| value.target.as_str()),
+                                    "reason": reason,
+                                    "actor": actor,
+                                    "reported_state": record.reported_state,
+                                    "state": record.state,
+                                    "computed_policy_allowed": record.computed_policy_allowed,
+                                    "computed_policy_reason": record.computed_policy_reason,
+                                    "policy_allowed": record.policy_allowed,
+                                    "policy_reason": record.policy_reason,
+                                    "operator_policy_override": record.operator_policy_override,
+                                }),
+                                now_unix_seconds(),
+                            );
+                            if let Err(error) = save_state(&guard) {
+                                eprintln!("failed to save control-plane state: {error}");
+                            }
+                            if let Some(db) = supabase.as_ref() {
+                                if let Err(error) = db.record_node_snapshot(&record) {
+                                    eprintln!("database node override sync skipped: {error}");
+                                    note_supabase_failure(&sync_status, error);
+                                }
+                                if let Err(error) = db.record_job_event(&event) {
+                                    eprintln!("database node override event skipped: {error}");
+                                    note_supabase_failure(&sync_status, error);
+                                }
+                            }
+                            json_response("200 OK", serde_json::to_value(record).expect("json"))
+                        }
+                        Err(error) => json_response(
+                            "400 Bad Request",
+                            serde_json::json!({ "error": error }),
+                        ),
+                    }
+                }
+                Err(error) => json_response(
+                    "400 Bad Request",
+                    serde_json::json!({ "error": error.to_string() }),
+                ),
+            }
+        }
         ("POST", "/v1/heartbeat") => match serde_json::from_str::<Heartbeat>(&request.body) {
             Ok(heartbeat) => {
                 let heartbeat_clone = heartbeat.clone();
@@ -1212,7 +1300,7 @@ fn handle_connection(
                     eprintln!("failed to save control-plane state: {error}");
                 }
                 if let Some(db) = supabase.as_ref() {
-                    if let Err(error) = db.record_heartbeat(&heartbeat_clone) {
+                    if let Err(error) = db.record_heartbeat(&heartbeat_clone, &record) {
                         eprintln!("database heartbeat sync skipped: {error}");
                         note_supabase_failure(&sync_status, error);
                     }
@@ -1575,5 +1663,10 @@ mod tests {
     #[test]
     fn protects_operator_cap_update_route() {
         assert!(requires_operator_auth("POST", "/v1/nodes/contribution-cap"));
+    }
+
+    #[test]
+    fn protects_operator_policy_override_route() {
+        assert!(requires_operator_auth("POST", "/v1/nodes/policy-override"));
     }
 }
