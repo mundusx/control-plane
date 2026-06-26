@@ -6,27 +6,30 @@ mod supabase;
 use contracts::{
     is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
     ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
-    ChatCompletionResponse, Heartbeat, JobCompletion, JobRequest,
-    NodePolicyOverrideInput, OperatorContributionPercentUpdate,
-    OperatorNodePolicyOverrideUpdate, RuntimeMode,
+    ChatCompletionResponse, Heartbeat, JobCompletion, JobRecord, JobRequest,
+    NodePolicyOverrideInput, OperatorContributionPercentUpdate, OperatorNodePolicyOverrideUpdate,
+    RuntimeMode,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use subtle::ConstantTimeEq;
 use migrations::{applied_migrations, apply_migrations};
 use serde::Serialize;
-use state::{load_state, save_state, state_path, ControlPlaneState};
+use state::{load_state, save_state, ControlPlaneState};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use supabase::SupabaseMirror;
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 #[path = "../../../tools/macos_identity.rs"]
 mod macos_identity;
+#[cfg(target_os = "macos")]
+use state::state_path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StorageSource {
@@ -136,6 +139,26 @@ fn html_response(status: &str, body: &str) -> String {
         body.len(),
         body
     )
+}
+
+fn job_status_path(job_id: &str) -> String {
+    format!("/v1/jobs/{job_id}")
+}
+
+fn job_async_payload(record: &JobRecord) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": record.job_id,
+        "request_id": record.request_id,
+        "status": record.status,
+        "status_url": job_status_path(&record.job_id),
+        "polling": {
+            "method": "GET",
+            "url": job_status_path(&record.job_id),
+            "recommended_interval_seconds": 2,
+            "default_timeout_seconds": 300
+        },
+        "job": record,
+    })
 }
 
 fn chat_messages_to_prompt(messages: &[contracts::ChatMessage]) -> (Option<String>, String) {
@@ -874,6 +897,10 @@ fn requires_device_signature(method: &str, path: &str) -> bool {
 }
 
 fn requires_operator_auth(method: &str, path: &str) -> bool {
+    if method == "GET" && path.starts_with("/v1/jobs/") {
+        return true;
+    }
+
     matches!(
         (method, path),
         ("GET", "/")
@@ -1020,7 +1047,12 @@ fn authorize_operator_request(
         .unwrap_or(authorization)
         .trim();
 
-    if presented.as_bytes().ct_eq(expected_token.as_bytes()).unwrap_u8() == 0 {
+    if presented
+        .as_bytes()
+        .ct_eq(expected_token.as_bytes())
+        .unwrap_u8()
+        == 0
+    {
         return Err("invalid operator token".to_string());
     }
 
@@ -1147,10 +1179,9 @@ fn handle_connection(
                             }
                             json_response("200 OK", serde_json::to_value(record).expect("json"))
                         }
-                        Err(error) => json_response(
-                            "400 Bad Request",
-                            serde_json::json!({ "error": error }),
-                        ),
+                        Err(error) => {
+                            json_response("400 Bad Request", serde_json::json!({ "error": error }))
+                        }
                     }
                 }
                 Err(error) => json_response(
@@ -1162,6 +1193,24 @@ fn handle_connection(
         ("GET", "/v1/jobs") => {
             let snapshot = state.lock().expect("state lock").jobs_snapshot();
             json_response("200 OK", snapshot)
+        }
+        ("GET", path) if path.starts_with("/v1/jobs/") => {
+            let job_id = path.trim_start_matches("/v1/jobs/");
+            if job_id.is_empty() || job_id.contains('/') {
+                json_response(
+                    "404 Not Found",
+                    serde_json::json!({ "error": "job not found" }),
+                )
+            } else {
+                let record = state.lock().expect("state lock").jobs.get(job_id).cloned();
+                match record {
+                    Some(record) => json_response("200 OK", job_async_payload(&record)),
+                    None => json_response(
+                        "404 Not Found",
+                        serde_json::json!({ "error": "job not found" }),
+                    ),
+                }
+            }
         }
         ("GET", "/v1/job-events") => {
             let snapshot = state.lock().expect("state lock").job_events_snapshot();
@@ -1306,10 +1355,9 @@ fn handle_connection(
                             }
                             json_response("200 OK", serde_json::to_value(record).expect("json"))
                         }
-                        Err(error) => json_response(
-                            "400 Bad Request",
-                            serde_json::json!({ "error": error }),
-                        ),
+                        Err(error) => {
+                            json_response("400 Bad Request", serde_json::json!({ "error": error }))
+                        }
                     }
                 }
                 Err(error) => json_response(
@@ -1374,7 +1422,7 @@ fn handle_connection(
                         note_supabase_failure(&sync_status, error);
                     }
                 }
-                json_response("200 OK", serde_json::to_value(record).expect("json"))
+                json_response("202 Accepted", job_async_payload(&record))
             }
             Err(error) => json_response(
                 "400 Bad Request",
@@ -1668,8 +1716,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        control_plane_bind_addr_from_env, deploy_fingerprint_from_env, requires_operator_auth,
+        control_plane_bind_addr_from_env, deploy_fingerprint_from_env, job_async_payload,
+        requires_operator_auth,
     };
+    use crate::contracts::{Backend, JobRequest, RuntimeMode};
+    use crate::state::ControlPlaneState;
 
     #[test]
     fn defaults_to_localhost_when_port_is_missing() {
@@ -1732,5 +1783,45 @@ mod tests {
     #[test]
     fn protects_operator_policy_override_route() {
         assert!(requires_operator_auth("POST", "/v1/nodes/policy-override"));
+    }
+
+    #[test]
+    fn protects_single_job_status_route() {
+        assert!(requires_operator_auth("GET", "/v1/jobs/job-1"));
+    }
+
+    #[test]
+    fn async_job_payload_exposes_polling_contract() {
+        let mut state = ControlPlaneState::default();
+        let record = state.submit_job(
+            JobRequest {
+                request_id: "job-1".to_string(),
+                prompt: "summarize this".to_string(),
+                preferred_backend: Backend::Auto,
+                runtime_mode: RuntimeMode::Local,
+                stream: false,
+                model: Some("demo".to_string()),
+                system_prompt: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            "123".to_string(),
+        );
+
+        let payload = job_async_payload(&record);
+
+        assert_eq!(payload["job_id"], "job-1");
+        assert_eq!(payload["request_id"], "job-1");
+        assert_eq!(payload["status"], "queued");
+        assert_eq!(payload["status_url"], "/v1/jobs/job-1");
+        assert_eq!(payload["polling"]["method"], "GET");
+        assert_eq!(payload["polling"]["url"], "/v1/jobs/job-1");
+        assert_eq!(payload["polling"]["recommended_interval_seconds"], 2);
+        assert_eq!(payload["polling"]["default_timeout_seconds"], 300);
+        assert_eq!(payload["job"]["status"], "queued");
+        assert_eq!(payload["job"]["output"], serde_json::Value::Null);
+        assert_eq!(payload["job"]["error"], serde_json::Value::Null);
     }
 }
