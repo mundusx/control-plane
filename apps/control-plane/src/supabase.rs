@@ -3,11 +3,12 @@ use crate::contracts::{
     NodeRecord,
 };
 use crate::state::ControlPlaneState;
+use native_tls::TlsConnector;
 use serde_json::json;
 use std::collections::HashSet;
 use std::env;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
@@ -347,108 +348,219 @@ impl SupabaseMirror {
             url.push_str(&format!("?on_conflict={on_conflict}"));
         }
 
-        let mut command = Command::new("curl");
-        command.arg("--silent");
-        command.arg("--show-error");
-        command.arg("--fail");
-        command.arg("--request");
-        command.arg("POST");
-        command.arg("--header");
-        command.arg(format!("apikey: {}", self.api_key));
-        command.arg("--header");
-        command.arg(format!("Authorization: Bearer {}", self.api_key));
-        command.arg("--header");
-        command.arg("Content-Type: application/json");
-        command.arg("--header");
-        command.arg(format!("Prefer: {prefer}"));
-        command.arg(url);
-        command.stdin(Stdio::piped());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        let response = supabase_rest_request(
+            "POST",
+            &url,
+            &self.api_key,
+            &[("Content-Type", "application/json"), ("Prefer", prefer)],
+            Some(payload.to_string()),
+        )?;
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("failed to start curl: {error}"))?;
-
-        {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "curl stdin unavailable".to_string())?;
-            stdin
-                .write_all(payload.to_string().as_bytes())
-                .map_err(|error| format!("failed to send payload to curl: {error}"))?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("failed waiting for curl: {error}"))?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let details = if stderr.is_empty() {
-            stdout
-        } else if stdout.is_empty() {
-            stderr
+        if response.is_success() {
+            Ok(())
+        } else if response.body.trim().is_empty() {
+            Err(format!("supabase sync failed: HTTP {}", response.status))
         } else {
-            format!("{stderr}: {stdout}")
-        };
-        Err(if details.is_empty() {
-            "supabase sync failed".to_string()
-        } else {
-            format!("supabase sync failed: {details}")
-        })
+            Err(format!(
+                "supabase sync failed: HTTP {}: {}",
+                response.status,
+                response.body.trim()
+            ))
+        }
     }
 
     fn fetch_json<T>(&self, path: &str) -> Result<T, String>
     where
         T: serde::de::DeserializeOwned,
     {
-        let mut command = Command::new("curl");
-        command.arg("--silent");
-        command.arg("--show-error");
-        command.arg("--fail");
-        command.arg("--request");
-        command.arg("GET");
-        command.arg("--header");
-        command.arg(format!("apikey: {}", self.api_key));
-        command.arg("--header");
-        command.arg(format!("Authorization: Bearer {}", self.api_key));
-        command.arg("--header");
-        command.arg("Content-Type: application/json");
-        command.arg("--header");
-        command.arg("Accept: application/json");
-        command.arg(format!("{}/rest/v1/{}", self.base_url, path));
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        let response = supabase_rest_request(
+            "GET",
+            &format!("{}/rest/v1/{}", self.base_url, path),
+            &self.api_key,
+            &[
+                ("Content-Type", "application/json"),
+                ("Accept", "application/json"),
+            ],
+            None,
+        )?;
 
-        let output = command
-            .output()
-            .map_err(|error| format!("failed to start curl: {error}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let details = if stderr.is_empty() {
-                stdout
-            } else if stdout.is_empty() {
-                stderr
+        if !response.is_success() {
+            return Err(if response.body.trim().is_empty() {
+                format!("supabase fetch failed: HTTP {}", response.status)
             } else {
-                format!("{stderr}: {stdout}")
-            };
-            return Err(if details.is_empty() {
-                "supabase fetch failed".to_string()
-            } else {
-                format!("supabase fetch failed: {details}")
+                format!(
+                    "supabase fetch failed: HTTP {}: {}",
+                    response.status,
+                    response.body.trim()
+                )
             });
         }
 
-        serde_json::from_slice(&output.stdout)
+        serde_json::from_slice(response.body.as_bytes())
             .map_err(|error| format!("failed to parse supabase response: {error}"))
+    }
+}
+
+#[derive(Debug)]
+struct RestUrl {
+    host: String,
+    port: u16,
+    path_and_query: String,
+}
+
+#[derive(Debug)]
+struct RestResponse {
+    status: u16,
+    body: String,
+}
+
+impl RestResponse {
+    fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+fn supabase_rest_request(
+    method: &str,
+    url: &str,
+    api_key: &str,
+    headers: &[(&str, &str)],
+    body: Option<String>,
+) -> Result<RestResponse, String> {
+    let parsed = parse_https_url(url)?;
+    let body = body.unwrap_or_default();
+    let mut request = format!(
+        "{method} {} HTTP/1.1\r\nHost: {}\r\napikey: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        parsed.path_and_query,
+        parsed.host,
+        api_key,
+        api_key,
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+
+    let tcp = TcpStream::connect((parsed.host.as_str(), parsed.port))
+        .map_err(|error| format!("failed to connect to supabase REST API: {error}"))?;
+    let connector =
+        TlsConnector::new().map_err(|error| format!("failed to initialize TLS: {error}"))?;
+    let mut stream = connector
+        .connect(&parsed.host, tcp)
+        .map_err(|error| format!("failed to negotiate TLS with supabase REST API: {error}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("failed to send supabase REST request: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("failed to flush supabase REST request: {error}"))?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|error| format!("failed to read supabase REST response: {error}"))?;
+    parse_http_response(&raw)
+}
+
+fn parse_https_url(url: &str) -> Result<RestUrl, String> {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .ok_or_else(|| "supabase REST URL must start with https://".to_string())?;
+    let (authority, path) = without_scheme
+        .split_once('/')
+        .map(|(authority, path)| (authority, format!("/{path}")))
+        .unwrap_or((without_scheme, "/".to_string()));
+    if authority.is_empty() {
+        return Err("supabase REST URL is missing a host".to_string());
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| "supabase REST URL has an invalid port".to_string())?;
+            (host.to_string(), port)
+        }
+        _ => (authority.to_string(), 443),
+    };
+    Ok(RestUrl {
+        host,
+        port,
+        path_and_query: path,
+    })
+}
+
+fn parse_http_response(raw: &[u8]) -> Result<RestResponse, String> {
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "supabase REST response is missing headers".to_string())?;
+    let headers = std::str::from_utf8(&raw[..header_end])
+        .map_err(|_| "supabase REST response headers are not utf-8".to_string())?;
+    let mut header_lines = headers.split("\r\n");
+    let status_line = header_lines
+        .next()
+        .ok_or_else(|| "supabase REST response is missing a status line".to_string())?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "supabase REST response status is malformed".to_string())?
+        .parse::<u16>()
+        .map_err(|_| "supabase REST response status is invalid".to_string())?;
+    let transfer_encoding = header_lines.clone().find_map(|line| {
+        line.split_once(':').and_then(|(name, value)| {
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                Some(value.trim().to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
+    });
+    let mut body = raw[header_end + 4..].to_vec();
+    if transfer_encoding
+        .as_deref()
+        .is_some_and(|value| value.contains("chunked"))
+    {
+        body = decode_chunked_body(&body)?;
+    }
+    String::from_utf8(body)
+        .map(|body| RestResponse { status, body })
+        .map_err(|_| "supabase REST response body is not utf-8".to_string())
+}
+
+fn decode_chunked_body(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+    loop {
+        let line_end = raw[offset..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| "chunked response is missing a chunk size terminator".to_string())?
+            + offset;
+        let size_line = std::str::from_utf8(&raw[offset..line_end])
+            .map_err(|_| "chunked response size is not utf-8".to_string())?;
+        let size_hex = size_line.split(';').next().unwrap_or(size_line).trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| "chunked response has an invalid chunk size".to_string())?;
+        offset = line_end + 2;
+        if size == 0 {
+            return Ok(decoded);
+        }
+        let chunk_end = offset
+            .checked_add(size)
+            .ok_or_else(|| "chunked response size overflowed".to_string())?;
+        if raw.len() < chunk_end + 2 {
+            return Err("chunked response ended before the declared chunk size".to_string());
+        }
+        decoded.extend_from_slice(&raw[offset..chunk_end]);
+        if &raw[chunk_end..chunk_end + 2] != b"\r\n" {
+            return Err("chunked response chunk is missing trailing CRLF".to_string());
+        }
+        offset = chunk_end + 2;
     }
 }
 
@@ -566,5 +678,45 @@ mod tests {
     #[test]
     fn rejects_non_supabase_database_urls() {
         assert!(derive_supabase_url("postgresql://user:pass@localhost:5432/postgres").is_none());
+    }
+
+    #[test]
+    fn parses_supabase_rest_https_url() {
+        let parsed =
+            parse_https_url("https://example.supabase.co/rest/v1/jobs?select=*&order=id.asc")
+                .expect("parsed url");
+
+        assert_eq!(parsed.host, "example.supabase.co");
+        assert_eq!(parsed.port, 443);
+        assert_eq!(parsed.path_and_query, "/rest/v1/jobs?select=*&order=id.asc");
+    }
+
+    #[test]
+    fn rejects_non_https_supabase_rest_url() {
+        let error = parse_https_url("http://example.supabase.co/rest/v1/jobs")
+            .expect_err("http url should be rejected");
+
+        assert_eq!(error, "supabase REST URL must start with https://");
+    }
+
+    #[test]
+    fn parses_chunked_supabase_rest_response() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let response = parse_http_response(raw).expect("parsed response");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "hello world");
+        assert!(response.is_success());
+    }
+
+    #[test]
+    fn reports_non_success_rest_response_body() {
+        let raw =
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 24\r\n\r\n{\"message\":\"bad token\"}";
+        let response = parse_http_response(raw).expect("parsed response");
+
+        assert_eq!(response.status, 401);
+        assert_eq!(response.body, "{\"message\":\"bad token\"}");
+        assert!(!response.is_success());
     }
 }
