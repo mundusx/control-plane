@@ -2577,23 +2577,12 @@ fn handle_connection(
                 let heartbeat_clone = heartbeat.clone();
                 let mut guard = state.lock().expect("state lock");
                 let record = guard.heartbeat(heartbeat, now_unix_seconds());
-                let event = guard.record_job_event(
-                    Some(record.node_id.clone()),
-                    None,
-                    "heartbeat",
-                    serde_json::to_value(&record).expect("json"),
-                    now_unix_seconds(),
-                );
                 if let Err(error) = save_state(&guard) {
                     eprintln!("failed to save control-plane state: {error}");
                 }
                 if let Some(db) = supabase.as_ref() {
                     if let Err(error) = db.record_heartbeat(&heartbeat_clone, &record) {
                         eprintln!("database heartbeat sync skipped: {error}");
-                        note_supabase_failure(&sync_status, error);
-                    }
-                    if let Err(error) = db.record_job_event(&event) {
-                        eprintln!("database heartbeat event skipped: {error}");
                         note_supabase_failure(&sync_status, error);
                     }
                 }
@@ -2929,7 +2918,7 @@ fn main() {
 mod tests {
     use super::{
         auth_disabled_flag_enabled, control_plane_bind_addr_from_env, control_plane_home,
-        deploy_fingerprint_from_env, handle_connection, job_async_payload,
+        deploy_fingerprint_from_env, handle_connection, job_async_payload, now_unix_seconds,
         operator_auth_mode_from_env, operator_auth_startup_config_error,
         operator_auth_token_from_env, parse_request, read_http_request, requires_operator_auth,
         status_snapshot_with_deploy_fingerprint, HttpRequestReadError, OperatorAuthMode,
@@ -2941,6 +2930,7 @@ mod tests {
         WorkerHealthReport,
     };
     use crate::state::ControlPlaneState;
+    use ed25519_dalek::{Signer, SigningKey};
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
@@ -3153,6 +3143,91 @@ mod tests {
         assert_eq!(
             job.prompt,
             "user: Who is the current Philippines president?"
+        );
+    }
+
+    #[test]
+    fn heartbeat_updates_node_without_creating_job_event() {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        let mut initial_state = ControlPlaneState::default();
+        initial_state.register(AgentRegistration {
+            node_id: "node-heartbeat".to_string(),
+            public_key_fingerprint: "fingerprint-node-heartbeat".to_string(),
+            public_key_hex,
+            hostname: "heartbeat-host".to_string(),
+            identity_trust_path: crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK
+                .to_string(),
+            backend: Backend::Cuda,
+            contribution_percent: 30,
+            agent_version: "0.1.0".to_string(),
+        });
+        let state = Arc::new(Mutex::new(initial_state));
+        let sync_status = Arc::new(Mutex::new(SupabaseSyncStatus::disabled(
+            StorageSource::LocalJsonOnly,
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let handler_state = Arc::clone(&state);
+        let handler_sync_status = Arc::clone(&sync_status);
+
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            handle_connection(
+                stream,
+                handler_state,
+                handler_sync_status,
+                None,
+                StorageSource::LocalJsonOnly,
+            );
+        });
+
+        let body = serde_json::to_string(&Heartbeat {
+            node_id: "node-heartbeat".to_string(),
+            backend: Backend::Cuda,
+            agent_state: AgentState::Ready,
+            available_memory_mb: 8192,
+            available_gpu_percent: 70,
+            updated_at: "12345".to_string(),
+            contribution_percent: 30,
+            hostname: "heartbeat-host".to_string(),
+            identity_trust_path: crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK
+                .to_string(),
+            power_source: "AC Power".to_string(),
+            on_battery: false,
+            battery_percent: None,
+            policy_allowed: true,
+            policy_reason: None,
+            worker_health: healthy_worker_health("12345"),
+        })
+        .expect("heartbeat json");
+        let timestamp = now_unix_seconds();
+        let timestamp = timestamp.to_string();
+        let message = format!("POST\n/v1/heartbeat\n{timestamp}\n{body}");
+        let signature = signing_key.sign(message.as_bytes());
+        let signature_hex = hex::encode(signature.to_bytes());
+        let request = format!(
+            "POST /v1/heartbeat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-MundusX-Node-Id: node-heartbeat\r\nX-MundusX-Timestamp: {timestamp}\r\nX-MundusX-Signature: {signature_hex}\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let mut client = TcpStream::connect(address).expect("connect to test listener");
+        client.write_all(request.as_bytes()).expect("write request");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown write");
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read response");
+        handler.join().expect("handler completes");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let guard = state.lock().expect("state lock");
+        assert_eq!(guard.nodes.len(), 1);
+        assert_eq!(guard.job_events.len(), 0);
+        assert_eq!(
+            guard.nodes["node-heartbeat"].reported_state,
+            AgentState::Ready
         );
     }
 
