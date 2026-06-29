@@ -35,8 +35,7 @@ impl SupabaseMirror {
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
         let devices: Vec<NodeRecord> = self.fetch_json("devices?select=*")?;
         let jobs: Vec<JobRecord> = self.fetch_json("jobs?select=*")?;
-        let job_events: Vec<JobEventRecord> =
-            self.fetch_json("job_events?select=*&order=source_event_id.asc.nullslast,id.asc")?;
+        let job_events = self.fetch_job_events()?;
         let credits_ledger: Vec<CreditsLedgerRecord> =
             self.fetch_json("credits_ledger?select=*&order=created_at.asc")?;
 
@@ -398,6 +397,19 @@ impl SupabaseMirror {
 
         serde_json::from_slice(response.body.as_bytes())
             .map_err(|error| format!("failed to parse supabase response: {error}"))
+    }
+
+    fn fetch_job_events(&self) -> Result<Vec<JobEventRecord>, String> {
+        match self.fetch_json("job_events?select=*&order=source_event_id.asc.nullslast,id.asc") {
+            Ok(events) => Ok(events),
+            Err(error) if error.contains("source_event_id") => {
+                eprintln!(
+                    "supabase job_events restore using legacy id ordering because source_event_id is unavailable: {error}"
+                );
+                self.fetch_json("job_events?select=*&order=id.asc")
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
