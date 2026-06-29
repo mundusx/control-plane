@@ -2658,7 +2658,7 @@ fn handle_connection(
                         request_id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
                         prompt,
                         preferred_backend: crate::contracts::Backend::Auto,
-                        runtime_mode: RuntimeMode::Interactive,
+                        runtime_mode: RuntimeMode::Local,
                         stream: false,
                         model: Some(request_body.model.clone()),
                         system_prompt,
@@ -2929,19 +2929,22 @@ fn main() {
 mod tests {
     use super::{
         auth_disabled_flag_enabled, control_plane_bind_addr_from_env, control_plane_home,
-        deploy_fingerprint_from_env, job_async_payload, operator_auth_mode_from_env,
-        operator_auth_startup_config_error, operator_auth_token_from_env, parse_request,
-        read_http_request, requires_operator_auth, status_snapshot_with_deploy_fingerprint,
-        HttpRequestReadError, OperatorAuthMode, StorageSource, SupabaseSyncStatus,
-        AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
-        LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
+        deploy_fingerprint_from_env, handle_connection, job_async_payload,
+        operator_auth_mode_from_env, operator_auth_startup_config_error,
+        operator_auth_token_from_env, parse_request, read_http_request, requires_operator_auth,
+        status_snapshot_with_deploy_fingerprint, HttpRequestReadError, OperatorAuthMode,
+        StorageSource, SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
+        CONTROL_PLANE_LOGO_PATH, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
     use crate::contracts::{
         AgentRegistration, AgentState, Backend, Heartbeat, JobRequest, RuntimeMode,
         WorkerHealthReport,
     };
     use crate::state::ControlPlaneState;
-    use std::io::{self, Read};
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
     struct ChunkedReader {
         chunks: Vec<Vec<u8>>,
@@ -3092,6 +3095,65 @@ mod tests {
 
         assert_eq!(snapshot["deploy_fingerprint"], "abcdef1234567890");
         assert_eq!(snapshot["storage_source"], "supabase");
+    }
+
+    #[test]
+    fn non_streaming_chat_completions_queue_local_runtime_jobs() {
+        let state = Arc::new(Mutex::new(ControlPlaneState::default()));
+        let sync_status = Arc::new(Mutex::new(SupabaseSyncStatus::disabled(
+            StorageSource::LocalJsonOnly,
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let handler_state = Arc::clone(&state);
+        let handler_sync_status = Arc::clone(&sync_status);
+
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            handle_connection(
+                stream,
+                handler_state,
+                handler_sync_status,
+                None,
+                StorageSource::LocalJsonOnly,
+            );
+        });
+
+        let body = serde_json::json!({
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Who is the current Philippines president?"
+                }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 64
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(address).expect("connect to test listener");
+        client.write_all(request.as_bytes()).expect("write request");
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read response");
+        handler.join().expect("handler completes");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(r#""finish_reason":"queued""#));
+
+        let guard = state.lock().expect("state lock");
+        let job = guard.jobs.values().next().expect("queued chat job");
+        assert_eq!(job.runtime_mode, RuntimeMode::Local);
+        assert_eq!(job.scheduling_requirements.runtime_mode, RuntimeMode::Local);
+        assert_eq!(
+            job.prompt,
+            "user: Who is the current Philippines president?"
+        );
     }
 
     #[test]
