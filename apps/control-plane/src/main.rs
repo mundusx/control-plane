@@ -7,8 +7,8 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
     ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
     ChatCompletionResponse, Heartbeat, JobCompletion, JobRecord, JobRequest,
-    NodePolicyOverrideInput, OperatorContributionPercentUpdate, OperatorNodePolicyOverrideUpdate,
-    RuntimeMode,
+    NodePolicyOverrideInput, NodeRecord, OperatorContributionPercentUpdate,
+    OperatorNodePolicyOverrideUpdate, RuntimeMode,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::{applied_migrations, apply_migrations};
@@ -377,6 +377,19 @@ fn escape_html(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn escape_query_value(input: &str) -> String {
+    let mut escaped = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                escaped.push(byte as char)
+            }
+            _ => escaped.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    escaped
+}
+
 fn state_badge(state: &str) -> (&'static str, &'static str) {
     match state {
         "ready" => ("#12351f", "#8ef0aa"),
@@ -412,6 +425,72 @@ fn trust_badge(trust_path: &str) -> (&'static str, &'static str, &'static str) {
     } else {
         ("#22304c", "#b8c7e8", trust_path_label(trust_path))
     }
+}
+
+const TOPOLOGY_SLOTS: [(&str, &str); 8] = [
+    ("50%", "12%"),
+    ("70%", "22%"),
+    ("85%", "50%"),
+    ("71%", "78%"),
+    ("50%", "88%"),
+    ("29%", "78%"),
+    ("15%", "50%"),
+    ("30%", "22%"),
+];
+
+const TOPOLOGY_NODE_ICON: &str = r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/><path d="M8 7.5h5"/><path d="M8 16.5h5"/></svg>"#;
+
+fn is_topology_live_node(node: &NodeRecord) -> bool {
+    node.policy_allowed && matches!(node.state.as_str(), "ready" | "busy")
+}
+
+fn topology_node_tone(node: &NodeRecord) -> &'static str {
+    if is_trusted_identity_path(&node.identity_trust_path) {
+        "trusted"
+    } else {
+        "online"
+    }
+}
+
+fn render_topology_slots(state: &ControlPlaneState) -> String {
+    let mut live_nodes: Vec<&NodeRecord> = state
+        .nodes
+        .values()
+        .filter(|node| is_topology_live_node(node))
+        .collect();
+    live_nodes.sort_by(|left, right| {
+        let left_updated = left.updated_at.parse::<u64>().unwrap_or(0);
+        let right_updated = right.updated_at.parse::<u64>().unwrap_or(0);
+        right_updated.cmp(&left_updated)
+    });
+
+    let mut html = String::new();
+    for (index, (left, top)) in TOPOLOGY_SLOTS.iter().enumerate() {
+        if let Some(node) = live_nodes.get(index) {
+            let label = if node.hostname.trim().is_empty() {
+                node.node_id.as_str()
+            } else {
+                node.hostname.as_str()
+            };
+            html.push_str(&format!(
+                r#"<a class="topo-node {tone}" href="/nodes?search={query}" style="left:{left};top:{top};" title="Open {title} in Nodes"><div class="node-hex">{icon}</div><span class="topo-label">{label}</span><span class="topo-id">{state} - {backend}</span></a>"#,
+                tone = topology_node_tone(node),
+                query = escape_query_value(&node.node_id),
+                title = escape_html(&node.node_id),
+                icon = TOPOLOGY_NODE_ICON,
+                label = escape_html(label),
+                state = escape_html(node.state.as_str()),
+                backend = escape_html(node.backend.as_str()),
+            ));
+        } else {
+            html.push_str(&format!(
+                r#"<div class="topo-node offline" style="left:{left};top:{top};" aria-label="Offline topology slot {slot}"><div class="node-hex">{icon}</div><span class="topo-label">Offline</span><span class="topo-id">slot {slot}</span></div>"#,
+                slot = index + 1,
+                icon = TOPOLOGY_NODE_ICON,
+            ));
+        }
+    }
+    html
 }
 
 fn render_nodes(state: &ControlPlaneState) -> String {
@@ -606,6 +685,7 @@ fn control_plane_operator_page(
     storage_source: StorageSource,
     sync_status: &SupabaseSyncStatus,
     page: OperatorPage,
+    nodes_search: Option<&str>,
 ) -> String {
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
@@ -620,10 +700,11 @@ fn control_plane_operator_page(
     let credits_ledger = snapshot["credits_ledger"].as_u64().unwrap_or(0);
     let supabase = sync_status.summary();
     let deploy_fingerprint = deploy_fingerprint().unwrap_or_else(|| "unavailable".to_string());
+    let nodes_search_value = nodes_search.map(escape_html).unwrap_or_default();
     let body = match page {
         OperatorPage::Nodes => format!(
             r#"<section class="toolbar" aria-label="Node fleet controls">
-              <input aria-label="Search nodes" placeholder="Search node id, host, model, backend" />
+              <input aria-label="Search nodes" placeholder="Search node id, host, model, backend" value="{nodes_search_value}" />
               <select aria-label="Filter node state"><option>All states</option><option>Online</option><option>Trusted</option><option>Paused</option><option>Policy blocked</option></select>
               <select aria-label="Sort nodes"><option>Sort by last heartbeat</option><option>Sort by assigned jobs</option><option>Sort by credits</option><option>Sort by trust</option></select>
               <a class="button" href="/v1/nodes">Nodes JSON</a>
@@ -811,6 +892,7 @@ fn control_plane_home(
         .unwrap_or_else(|| {
             r#"<span class="pill pill-amber">deploy: unavailable</span>"#.to_string()
         });
+    let topology_slots = render_topology_slots(state);
 
     format!(
         r##"<!doctype html>
@@ -1302,6 +1384,9 @@ fn control_plane_home(
         gap: 7px;
         color: #cad6e7;
         font-size: 12px;
+        min-width: 112px;
+        text-align: center;
+        text-decoration: none;
       }}
       .node-hex {{
         position: relative;
@@ -1329,7 +1414,38 @@ fn control_plane_home(
         position: relative;
         z-index: 1;
       }}
-      .topo-node:hover .node-hex {{
+      .topo-label,
+      .topo-id {{
+        max-width: 112px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .topo-label {{
+        font-weight: 700;
+      }}
+      .topo-id {{
+        color: var(--muted);
+        font-size: 11px;
+      }}
+      .topo-node.trusted .node-hex {{
+        background: linear-gradient(135deg, rgba(117, 198, 255, 0.96), rgba(58, 139, 218, 0.48));
+        box-shadow: 0 0 19px rgba(111, 183, 255, 0.34);
+      }}
+      .topo-node.offline {{
+        color: #70839b;
+        pointer-events: none;
+      }}
+      .topo-node.offline .node-hex {{
+        background: linear-gradient(135deg, rgba(101, 116, 139, 0.42), rgba(31, 41, 55, 0.22));
+        color: #7f8da3;
+        box-shadow: none;
+        opacity: 0.58;
+      }}
+      .topo-node.offline .node-hex::before {{
+        background: rgba(5, 13, 24, 0.98);
+      }}
+      a.topo-node:hover .node-hex {{
         transform: translateY(-3px) scale(1.04);
         background: linear-gradient(135deg, rgba(37, 215, 255, 0.98), rgba(116, 91, 255, 0.68));
         box-shadow: 0 0 26px rgba(41, 163, 255, 0.48);
@@ -1610,14 +1726,7 @@ fn control_plane_home(
                 <div class="orbit"></div><div class="grid-ring"></div>
                 <div class="radial"></div><div class="radial r2"></div><div class="radial r3"></div><div class="radial r4"></div><div class="radial r5"></div><div class="radial r6"></div><div class="radial r7"></div><div class="radial r8"></div>
                 <div class="topology-center motion-glow"><span class="logo-signal s1" aria-hidden="true"></span><span class="logo-signal s2" aria-hidden="true"></span><span class="logo-signal s3" aria-hidden="true"></span><img class="center-logo" alt="NovusX topology logo" src="{logo_path}" /></div>
-                <div class="topo-node" style="left:50%;top:12%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/><path d="M8 7.5h5"/><path d="M8 16.5h5"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:70%;top:22%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:85%;top:50%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:71%;top:78%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:50%;top:88%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:29%;top:78%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:15%;top:50%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
-                <div class="topo-node" style="left:30%;top:22%;"><div class="node-hex"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/></svg></div>No nodes</div>
+                {topology_slots}
               </div>
               <div class="panel-footer">{nodes} nodes registered</div>
             </div>
@@ -2192,9 +2301,16 @@ fn handle_connection(
             let page = OperatorPage::from_path(path).expect("operator page");
             let snapshot = state.lock().expect("state lock");
             let sync_snapshot = sync_status.lock().expect("sync status lock").clone();
+            let nodes_search = query_param(query, "search");
             html_response(
                 "200 OK",
-                &control_plane_operator_page(&snapshot, storage_source, &sync_snapshot, page),
+                &control_plane_operator_page(
+                    &snapshot,
+                    storage_source,
+                    &sync_snapshot,
+                    page,
+                    nodes_search,
+                ),
             )
         }
         ("GET", "/health") => {
@@ -2820,7 +2936,10 @@ mod tests {
         AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
         LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
-    use crate::contracts::{Backend, JobRequest, RuntimeMode};
+    use crate::contracts::{
+        AgentRegistration, AgentState, Backend, Heartbeat, JobRequest, RuntimeMode,
+        WorkerHealthReport,
+    };
     use crate::state::ControlPlaneState;
     use std::io::{self, Read};
 
@@ -2849,6 +2968,69 @@ mod tests {
             self.index += 1;
             Ok(len)
         }
+    }
+
+    fn healthy_worker_health(checked_at: &str) -> WorkerHealthReport {
+        WorkerHealthReport {
+            healthy: true,
+            model_dir: "/tmp/models".to_string(),
+            model_name: Some("demo".to_string()),
+            model_path: Some("/tmp/models/demo.gguf".to_string()),
+            llama_cli_available: true,
+            blas_device_available: true,
+            cuda_device_available: false,
+            cuda_driver_available: false,
+            cuda_device_name: None,
+            power_source: "AC Power".to_string(),
+            on_battery: false,
+            battery_percent: Some(90),
+            runtime_ready: true,
+            runtime_mode: "local".to_string(),
+            supported_runtime_modes: vec![RuntimeMode::Local],
+            streaming_supported: false,
+            checked_at: checked_at.to_string(),
+            notes: vec!["local runtime ready".to_string()],
+        }
+    }
+
+    fn register_ready_node(
+        state: &mut ControlPlaneState,
+        node_id: &str,
+        hostname: &str,
+        updated_at: &str,
+    ) {
+        state.register(AgentRegistration {
+            node_id: node_id.to_string(),
+            public_key_fingerprint: format!("fingerprint-{node_id}"),
+            public_key_hex: format!("hex-{node_id}"),
+            hostname: hostname.to_string(),
+            identity_trust_path: crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK
+                .to_string(),
+            backend: Backend::M,
+            contribution_percent: 50,
+            agent_version: "0.1.0".to_string(),
+        });
+        state.heartbeat(
+            Heartbeat {
+                node_id: node_id.to_string(),
+                backend: Backend::M,
+                agent_state: AgentState::Ready,
+                available_memory_mb: 16_000,
+                available_gpu_percent: 50,
+                updated_at: updated_at.to_string(),
+                contribution_percent: 50,
+                hostname: hostname.to_string(),
+                identity_trust_path: crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK
+                    .to_string(),
+                power_source: "AC Power".to_string(),
+                on_battery: false,
+                battery_percent: Some(90),
+                policy_allowed: true,
+                policy_reason: None,
+                worker_health: healthy_worker_health(updated_at),
+            },
+            updated_at.to_string(),
+        );
     }
 
     #[test]
@@ -2962,8 +3144,30 @@ mod tests {
         assert!(html.contains("node-hex::before"));
         assert!(html.contains("logo-signal-wave"));
         assert!(html.contains("logo-signal s1"));
+        assert!(html.contains(r#"class="topo-node offline""#));
+        assert!(html.contains("slot 8"));
+        assert!(!html.contains(">No nodes</div>"));
         assert!(!html.contains("Search nodes..."));
         assert!(!html.contains("Control Plane</div></div></div>"));
+    }
+
+    #[test]
+    fn home_topology_links_latest_live_nodes_to_nodes_search() {
+        let mut state = ControlPlaneState::default();
+        register_ready_node(&mut state, "node-old", "OLD", "10");
+        register_ready_node(&mut state, "node-new", "DAVE", "20");
+
+        let html = control_plane_home(
+            &state,
+            StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+        );
+
+        assert!(html.contains(r#"href="/nodes?search=node-new""#));
+        assert!(html.contains(r#"href="/nodes?search=node-old""#));
+        assert!(html.contains(">DAVE</span>"));
+        assert!(html.contains(">OLD</span>"));
+        assert!(html.contains(r#"class="topo-node offline""#));
     }
 
     #[test]
@@ -2974,10 +3178,12 @@ mod tests {
             StorageSource::LocalJsonFallback,
             &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
             crate::OperatorPage::Nodes,
+            Some("node-new"),
         );
 
         assert!(html.contains("Fleet Browser"));
         assert!(html.contains("Search node id, host, model, backend"));
+        assert!(html.contains(r#"value="node-new""#));
         assert!(html.contains("Sort by last heartbeat"));
         assert!(html.contains("Large fleets should be controlled here"));
         assert!(html.contains("Developer APIs"));
