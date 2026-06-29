@@ -2834,6 +2834,31 @@ fn main() {
     }
 
     let supabase = SupabaseMirror::from_env();
+    if supabase.is_some() {
+        match std::env::var("DATABASE_URL") {
+            Ok(database_url) => match apply_migrations(&database_url) {
+                Ok(applied) => {
+                    if applied.is_empty() {
+                        println!("startup migrations: no migrations to apply");
+                    } else {
+                        println!("startup migrations: {} applied", applied.len());
+                        for migration in applied {
+                            println!(
+                                "applied {}_{} ({})",
+                                migration.version,
+                                migration.name,
+                                migration.path.display()
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("startup migrations skipped: {error}");
+                }
+            },
+            Err(_) => eprintln!("startup migrations skipped: DATABASE_URL is not set"),
+        }
+    }
     let bind_addr = control_plane_bind_addr().expect("resolve bind address");
     let listener = TcpListener::bind(&bind_addr).expect("bind control plane");
     let (restored_state, storage_source, sync_status) = match supabase.as_ref() {

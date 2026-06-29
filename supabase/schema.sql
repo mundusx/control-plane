@@ -80,6 +80,9 @@ create table if not exists public.heartbeats (
   created_at timestamptz not null default now()
 );
 
+alter table if exists public.heartbeats
+  add column if not exists source_heartbeat_key text;
+
 create table if not exists public.jobs (
   job_id text primary key,
   request_id text not null unique,
@@ -117,6 +120,9 @@ create table if not exists public.job_events (
   payload jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
+
+alter table if exists public.job_events
+  add column if not exists source_event_id bigint;
 
 create table if not exists public.policy_rules (
   id uuid primary key default gen_random_uuid(),
