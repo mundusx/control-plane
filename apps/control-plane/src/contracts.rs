@@ -137,6 +137,20 @@ impl fmt::Display for JobStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum JobExecutionMode {
+    Single,
+    Auto,
+    Decompose,
+}
+
+impl Default for JobExecutionMode {
+    fn default() -> Self {
+        Self::Single
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequestTaskType {
     Chat,
     Coding,
@@ -510,6 +524,8 @@ pub struct JobRequest {
     #[serde(default)]
     pub runtime_mode: RuntimeMode,
     #[serde(default)]
+    pub execution_mode: JobExecutionMode,
+    #[serde(default)]
     pub stream: bool,
     pub model: Option<String>,
     pub system_prompt: Option<String>,
@@ -599,6 +615,14 @@ pub struct JobRecord {
     pub plan: JobPlan,
     #[serde(default)]
     pub graph: JobGraph,
+    #[serde(default)]
+    pub execution_mode: JobExecutionMode,
+    #[serde(default)]
+    pub graph_execution_enabled: bool,
+    #[serde(default)]
+    pub active_graph_node_id: Option<String>,
+    #[serde(default)]
+    pub last_completed_graph_node_id: Option<String>,
     pub status: JobStatus,
     pub submitted_at: String,
     pub assigned_node_id: Option<String>,

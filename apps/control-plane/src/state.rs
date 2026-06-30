@@ -2,11 +2,11 @@ use crate::contracts::{
     is_trusted_identity_path, AgentRegistration, AgentState, Backend, ContextSize,
     ControlPlaneSnapshot, CreditsLedgerRecord, ExpectedOutputFormat, FallbackDecision,
     FallbackDecisionStatus, FallbackPolicy, Heartbeat, JobClaimResponse, JobCompletion,
-    JobEventRecord, JobGraph, JobGraphNode, JobGraphNodeStatus, JobGraphStatus, JobPlan, JobRecord,
-    JobRequest, JobResultRecord, JobResultVerificationStatus, JobSchedulingRequirements, JobStatus,
-    NodePolicyOverride, NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, PlannedJob,
-    PrivacyLevel, RequestClassification, RequestComplexity, RequestTaskType, RuntimeMode,
-    SchedulerDecision, WorkerHealthReport,
+    JobEventRecord, JobExecutionMode, JobGraph, JobGraphNode, JobGraphNodeStatus, JobGraphStatus,
+    JobPlan, JobRecord, JobRequest, JobResultRecord, JobResultVerificationStatus,
+    JobSchedulingRequirements, JobStatus, NodePolicyOverride, NodePolicyOverrideInput,
+    NodePolicyOverrideTarget, NodeRecord, PlannedJob, PrivacyLevel, RequestClassification,
+    RequestComplexity, RequestTaskType, RuntimeMode, SchedulerDecision, WorkerHealthReport,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -276,12 +276,16 @@ impl ControlPlaneState {
         let fallback_decision = fallback_decision_for(&scheduling_requirements);
         let plan = plan_job_request(&request, &classification);
         let graph = build_job_graph(&request.request_id, &plan, &submitted_at);
+        let ready_node_count = self.ready_executable_node_count(&request);
+        let graph_execution_enabled =
+            graph_execution_allowed(&request, &classification, &plan, ready_node_count);
         let record = JobRecord {
             job_id: job_id.clone(),
             request_id: request.request_id,
             prompt: request.prompt,
             preferred_backend: request.preferred_backend,
             runtime_mode: request.runtime_mode,
+            execution_mode: request.execution_mode,
             stream: request.stream,
             model: request.model,
             system_prompt: request.system_prompt,
@@ -295,6 +299,9 @@ impl ControlPlaneState {
             fallback_decision,
             plan,
             graph,
+            graph_execution_enabled,
+            active_graph_node_id: None,
+            last_completed_graph_node_id: None,
             status: JobStatus::Queued,
             submitted_at,
             assigned_node_id: None,
@@ -593,7 +600,7 @@ impl ControlPlaneState {
         let updates: Vec<(String, SchedulerDecision)> = self
             .jobs
             .iter()
-            .filter(|(_, job)| job.status == JobStatus::Queued)
+            .filter(|(_, job)| job.status == JobStatus::Queued && self.job_has_claimable_work(job))
             .map(|(job_id, job)| (job_id.clone(), self.best_scheduler_decision_for_job(job)))
             .collect();
 
@@ -633,6 +640,7 @@ impl ControlPlaneState {
             .iter()
             .filter_map(|(job_id, job)| {
                 if job.status == JobStatus::Queued
+                    && self.job_has_claimable_work(job)
                     && Self::node_backend_matches(
                         job,
                         node_backend,
@@ -658,6 +666,23 @@ impl ControlPlaneState {
         };
 
         if let Some(job) = self.jobs.get_mut(&job_id) {
+            let active_graph_node_id = if job.graph_execution_enabled {
+                next_ready_graph_node_id(&job.graph)
+            } else {
+                None
+            };
+            if let Some(active_node_id) = active_graph_node_id.as_ref() {
+                if let Some(graph_node) = job
+                    .graph
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id == *active_node_id)
+                {
+                    graph_node.status = JobGraphNodeStatus::Running;
+                    graph_node.blocked_by.clear();
+                }
+            }
+
             job.status = JobStatus::Assigned;
             job.assigned_node_id = Some(node_id.to_string());
             job.assigned_at = Some(claimed_at);
@@ -665,6 +690,8 @@ impl ControlPlaneState {
             job.worker_id = None;
             job.output = None;
             job.error = None;
+            job.active_graph_node_id = active_graph_node_id.clone();
+            job.last_completed_graph_node_id = None;
             job.scheduler_decision = Some(scheduler_decision);
             job.graph.status = JobGraphStatus::InProgress;
             job.graph.updated_at = job.assigned_at.clone().unwrap_or_default();
@@ -675,8 +702,14 @@ impl ControlPlaneState {
                 Self::apply_policy_override(node);
             }
 
+            refresh_job_graph(&mut job.graph);
+            let mut claim_job = job.clone();
+            if let Some(active_node_id) = active_graph_node_id.as_deref() {
+                claim_job.prompt = graph_node_execution_prompt(job, active_node_id);
+            }
+
             let claimed = JobClaimResponse {
-                job: Some(job.clone()),
+                job: Some(claim_job),
             };
             self.reevaluate_queued_jobs();
             return claimed;
@@ -696,15 +729,19 @@ impl ControlPlaneState {
                 return Some(job.clone());
             }
 
-            job.status = completion.status;
-            job.worker_id = Some(completion.worker_id.clone());
-            job.backend = Some(completion.backend);
-            job.output = completion.output.clone();
-            job.error = completion.error.clone();
-            job.completed_at = Some(completed_at.clone());
-            apply_job_completion_to_graph(job, &completion);
-            job.graph.updated_at = completed_at.clone();
-            job.clone()
+            if job.graph_execution_enabled {
+                complete_graph_execution_job(job, completion.clone(), completed_at.clone())
+            } else {
+                job.status = completion.status;
+                job.worker_id = Some(completion.worker_id.clone());
+                job.backend = Some(completion.backend);
+                job.output = completion.output.clone();
+                job.error = completion.error.clone();
+                job.completed_at = Some(completed_at.clone());
+                apply_job_completion_to_graph(job, &completion);
+                job.graph.updated_at = completed_at.clone();
+                job.clone()
+            }
         };
 
         if let Some(node) = self.nodes.get_mut(&completion.node_id) {
@@ -718,6 +755,74 @@ impl ControlPlaneState {
 
         self.reevaluate_queued_jobs();
         Some(updated_job)
+    }
+
+    fn ready_executable_node_count(&self, request: &JobRequest) -> usize {
+        let probe = JobRecord {
+            job_id: request.request_id.clone(),
+            request_id: request.request_id.clone(),
+            prompt: request.prompt.clone(),
+            preferred_backend: request.preferred_backend,
+            runtime_mode: request.runtime_mode,
+            execution_mode: request.execution_mode,
+            stream: request.stream,
+            model: request.model.clone(),
+            system_prompt: request.system_prompt.clone(),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            top_p: request.top_p,
+            seed: request.seed,
+            classification: classify_job_request(request),
+            scheduling_requirements: scheduling_requirements_for(
+                request,
+                &classify_job_request(request),
+            ),
+            scheduler_decision: None,
+            fallback_decision: FallbackDecision::default(),
+            plan: JobPlan::default(),
+            graph: JobGraph::default(),
+            graph_execution_enabled: false,
+            active_graph_node_id: None,
+            last_completed_graph_node_id: None,
+            status: JobStatus::Queued,
+            submitted_at: String::new(),
+            assigned_node_id: None,
+            assigned_at: None,
+            completed_at: None,
+            worker_id: None,
+            backend: None,
+            output: None,
+            error: None,
+        };
+        let ready_m_exists = self.nodes.values().any(|candidate| {
+            candidate.state == AgentState::Ready
+                && candidate.policy_allowed
+                && candidate.backend == Backend::M
+        });
+        let ready_cuda_exists = self.nodes.values().any(|candidate| {
+            candidate.state == AgentState::Ready
+                && candidate.policy_allowed
+                && candidate.backend == Backend::Cuda
+        });
+
+        self.nodes
+            .values()
+            .filter(|node| {
+                node.state == AgentState::Ready
+                    && node.policy_allowed
+                    && Self::node_backend_matches(
+                        &probe,
+                        node.backend,
+                        ready_m_exists,
+                        ready_cuda_exists,
+                    )
+                    && Self::node_can_run_job(node, &probe)
+            })
+            .count()
+    }
+
+    fn job_has_claimable_work(&self, job: &JobRecord) -> bool {
+        !job.graph_execution_enabled || next_ready_graph_node_id(&job.graph).is_some()
     }
 
     pub fn update_graph_node(
@@ -829,6 +934,151 @@ impl ControlPlaneState {
         self.reevaluate_queued_jobs();
         record
     }
+}
+
+fn graph_execution_allowed(
+    request: &JobRequest,
+    classification: &RequestClassification,
+    plan: &JobPlan,
+    ready_node_count: usize,
+) -> bool {
+    if request.stream || plan.jobs.len() <= 1 {
+        return false;
+    }
+
+    match request.execution_mode {
+        JobExecutionMode::Single => false,
+        JobExecutionMode::Decompose => true,
+        JobExecutionMode::Auto => {
+            ready_node_count >= 2
+                && classification.privacy_level != PrivacyLevel::Sensitive
+                && (classification.complexity == RequestComplexity::High
+                    || looks_sectionable_prompt(&request.prompt))
+        }
+    }
+}
+
+fn looks_sectionable_prompt(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "history of",
+            "explain",
+            "comprehensive",
+            "detailed",
+            "report",
+            "overview",
+            "timeline",
+            "compare",
+            "research",
+            "analyze",
+        ],
+    )
+}
+
+fn next_ready_graph_node_id(graph: &JobGraph) -> Option<String> {
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.status == JobGraphNodeStatus::Ready)
+        .map(|node| node.id.clone())
+}
+
+fn complete_graph_execution_job(
+    job: &mut JobRecord,
+    completion: JobCompletion,
+    completed_at: String,
+) -> JobRecord {
+    let active_node_id = job.active_graph_node_id.clone();
+    if let Some(active_node_id) = active_node_id.as_deref() {
+        if let Some(graph_node) = job
+            .graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == active_node_id)
+        {
+            graph_node.status = match completion.status {
+                JobStatus::Completed => JobGraphNodeStatus::Completed,
+                JobStatus::Failed => JobGraphNodeStatus::Failed,
+                _ => graph_node.status,
+            };
+            graph_node.output = completion.output.clone();
+            graph_node.error = completion.error.clone();
+        }
+    }
+
+    refresh_job_graph(&mut job.graph);
+    refresh_graph_results(
+        &mut job.graph,
+        job.classification.output_format,
+        Some(completion.worker_id.as_str()),
+        Some(completion.node_id.as_str()),
+        completion.latency_ms,
+    );
+
+    job.worker_id = Some(completion.worker_id);
+    job.backend = Some(completion.backend);
+    job.output = completion.output;
+    job.error = completion.error.or_else(|| job.graph.merge_error.clone());
+    job.last_completed_graph_node_id = active_node_id.clone();
+    job.active_graph_node_id = None;
+
+    if completion.status == JobStatus::Failed || job.graph.status == JobGraphStatus::Failed {
+        job.status = JobStatus::Failed;
+        job.completed_at = Some(completed_at.clone());
+    } else if job.graph.status == JobGraphStatus::Completed {
+        job.status = JobStatus::Completed;
+        job.output = job
+            .graph
+            .final_output
+            .clone()
+            .or_else(|| job.output.clone());
+        job.completed_at = Some(completed_at.clone());
+    } else {
+        job.status = JobStatus::Queued;
+        job.completed_at = None;
+    }
+
+    job.graph.updated_at = completed_at;
+    job.clone()
+}
+
+fn graph_node_execution_prompt(job: &JobRecord, active_node_id: &str) -> String {
+    let Some(node) = job
+        .graph
+        .nodes
+        .iter()
+        .find(|node| node.id == active_node_id)
+    else {
+        return job.prompt.clone();
+    };
+
+    if node.responsibility == "merge" {
+        let sections = job
+            .graph
+            .nodes
+            .iter()
+            .filter(|candidate| candidate.id != node.id)
+            .filter_map(|candidate| {
+                candidate
+                    .output
+                    .as_ref()
+                    .map(|output| format!("## {}\n{}", candidate.name, output.trim()))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        return format!(
+            "Original user request:\n{}\n\nCompleted subjob outputs:\n{}\n\nProduce the final answer. Preserve useful details, remove duplication, and return only the final response.",
+            job.prompt, sections
+        );
+    }
+
+    format!(
+        "Original user request:\n{}\n\nYou are executing one validated MundusX subjob.\nSubjob: {}\nResponsibility: {}\nRequired output: {}\n\nReturn only this subjob's useful output. Do not solve unrelated sections.",
+        job.prompt, node.name, node.responsibility, node.required_output
+    )
 }
 
 fn normalize_amount(value: f64) -> f64 {
@@ -1014,6 +1264,7 @@ pub fn plan_job_request(request: &JobRequest, classification: &RequestClassifica
     .to_ascii_lowercase();
 
     let decomposition_needed = classification.complexity == RequestComplexity::High
+        || looks_sectionable_prompt(&request.prompt)
         || contains_any(
             &lower,
             &[
@@ -1045,6 +1296,69 @@ pub fn plan_job_request(request: &JobRequest, classification: &RequestClassifica
                     "Request is low or medium complexity without separate responsibility areas."
                         .to_string(),
             }],
+        };
+    }
+
+    if looks_sectionable_prompt(&request.prompt)
+        && classification.task_type != RequestTaskType::Coding
+    {
+        let mut jobs = Vec::new();
+        push_planned_job(
+            &mut jobs,
+            "job.origins",
+            "Origins and founders",
+            "section",
+            Vec::new(),
+            "Explain the origins, founders, and historical setup for the requested topic.",
+            "Sectionable research prompts benefit from parallel source-area drafting.",
+        );
+        push_planned_job(
+            &mut jobs,
+            "job.early_development",
+            "Early development",
+            "section",
+            Vec::new(),
+            "Cover the early brand, product, or organizational development.",
+            "The planner separated early chronology from later expansion.",
+        );
+        push_planned_job(
+            &mut jobs,
+            "job.expansion",
+            "Expansion and milestones",
+            "section",
+            Vec::new(),
+            "Cover major growth periods, milestones, and changes in scale or influence.",
+            "Milestones can be drafted independently before final synthesis.",
+        );
+        push_planned_job(
+            &mut jobs,
+            "job.modern_era",
+            "Modern era",
+            "section",
+            Vec::new(),
+            "Cover recent developments, current positioning, and future-facing themes.",
+            "Modern context should be isolated from historical background before reduction.",
+        );
+
+        let final_dependencies = jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>();
+        push_planned_job(
+            &mut jobs,
+            "job.final_merge",
+            "Final synthesis",
+            "merge",
+            final_dependencies,
+            "Merge section outputs into one coherent final answer for the original prompt.",
+            "A reducer is required to remove duplication and produce the user-facing answer.",
+        );
+
+        return JobPlan {
+            plan_id: format!("plan-{}", request.request_id),
+            strategy: "sectioned_research".to_string(),
+            summary: format!(
+                "Planned {} sectioned research units plus a final reducer.",
+                jobs.len()
+            ),
+            jobs,
         };
     }
 
@@ -1873,6 +2187,7 @@ mod tests {
             prompt: prompt.to_string(),
             preferred_backend: Backend::Auto,
             runtime_mode: RuntimeMode::Local,
+            execution_mode: JobExecutionMode::Single,
             stream: false,
             model: Some("demo".to_string()),
             system_prompt: None,
@@ -2009,6 +2324,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
@@ -2103,6 +2419,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Interactive,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("missing-model".to_string()),
                 system_prompt: None,
@@ -2317,6 +2634,149 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ready_ids.contains(&"job.backend"));
         assert!(ready_ids.contains(&"job.frontend"));
+    }
+
+    #[test]
+    fn default_single_mode_keeps_graph_advisory_only() {
+        let mut state = ready_state();
+        let record = state.submit_job(
+            classification_request(
+                "Design and implement a backend API plus frontend dashboard and add tests.",
+            ),
+            "1".to_string(),
+        );
+
+        assert_eq!(record.execution_mode, JobExecutionMode::Single);
+        assert!(!record.graph_execution_enabled);
+
+        let claim = state.claim_job("node-1", "2".to_string());
+        let claimed = claim.job.expect("claimed job");
+        assert_eq!(claimed.prompt, record.prompt);
+        assert_eq!(
+            state
+                .jobs
+                .get("job-1")
+                .and_then(|job| job.active_graph_node_id.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn forced_decompose_executes_validated_graph_nodes_sequentially_with_one_node() {
+        let mut state = ready_state();
+        let mut request = classification_request(
+            "Design and implement a backend API plus frontend dashboard and add tests.",
+        );
+        request.execution_mode = JobExecutionMode::Decompose;
+
+        let record = state.submit_job(request, "1".to_string());
+        assert!(record.graph_execution_enabled);
+
+        let first_claim = state
+            .claim_job("node-1", "2".to_string())
+            .job
+            .expect("scope claim");
+        assert!(first_claim.prompt.contains("validated MundusX subjob"));
+        assert!(first_claim.prompt.contains("Subjob: Scope and constraints"));
+        assert_eq!(
+            state
+                .jobs
+                .get("job-1")
+                .and_then(|job| job.active_graph_node_id.as_deref()),
+            Some("job.scope")
+        );
+
+        let partial = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-1".to_string(),
+                    node_id: "node-1".to_string(),
+                    worker_id: "worker-1".to_string(),
+                    backend: Backend::M,
+                    status: JobStatus::Completed,
+                    output: Some("scope complete".to_string()),
+                    error: None,
+                    latency_ms: Some(10),
+                },
+                "3".to_string(),
+            )
+            .expect("partial completion");
+
+        assert_eq!(partial.status, JobStatus::Queued);
+        assert_eq!(
+            partial.last_completed_graph_node_id.as_deref(),
+            Some("job.scope")
+        );
+
+        let second_claim = state
+            .claim_job("node-1", "4".to_string())
+            .job
+            .expect("implementation claim");
+        assert!(second_claim.prompt.contains("Original user request"));
+        assert!(
+            second_claim
+                .prompt
+                .contains("Subjob: Backend implementation")
+                || second_claim
+                    .prompt
+                    .contains("Subjob: Frontend implementation")
+        );
+    }
+
+    #[test]
+    fn auto_decompose_requires_multiple_ready_nodes_and_sectionable_work() {
+        let mut one_node_state = ready_state();
+        let mut request = classification_request(
+            "Write a detailed history of Mercedes-Benz with major eras and milestones.",
+        );
+        request.execution_mode = JobExecutionMode::Auto;
+        let one_node_record = one_node_state.submit_job(request.clone(), "1".to_string());
+        assert!(!one_node_record.graph_execution_enabled);
+
+        let mut two_node_state = ready_state();
+        two_node_state.register(m_series_registration("node-2"));
+        two_node_state.heartbeat(ready_heartbeat("node-2", "1"), "1".to_string());
+        let two_node_record = two_node_state.submit_job(request, "2".to_string());
+        assert!(two_node_record.graph_execution_enabled);
+    }
+
+    #[test]
+    fn reducer_prompt_receives_completed_subjob_outputs() {
+        let mut state = ready_state();
+        let mut request = classification_request(
+            "Design and implement a backend API plus frontend dashboard and add tests.",
+        );
+        request.execution_mode = JobExecutionMode::Decompose;
+        state.submit_job(request, "1".to_string());
+
+        for (node_id, output, updated_at) in [
+            ("job.scope", "scope accepted", "2"),
+            ("job.backend", "backend complete", "3"),
+            ("job.frontend", "frontend complete", "4"),
+            ("job.tests", "tests complete", "5"),
+        ] {
+            state
+                .update_graph_node(
+                    "job-1",
+                    node_id,
+                    JobGraphNodeStatus::Completed,
+                    Some(output.to_string()),
+                    None,
+                    updated_at.to_string(),
+                )
+                .expect("complete graph node");
+        }
+
+        let claim = state
+            .claim_job("node-1", "6".to_string())
+            .job
+            .expect("final claim");
+        assert!(claim.prompt.contains("Completed subjob outputs"));
+        assert!(claim.prompt.contains("scope accepted"));
+        assert!(claim.prompt.contains("backend complete"));
+        assert!(claim.prompt.contains("frontend complete"));
+        assert!(claim.prompt.contains("tests complete"));
+        assert!(claim.prompt.contains("Produce the final answer"));
     }
 
     #[test]
@@ -2591,6 +3051,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: Some("You are a terse assistant.".to_string()),
@@ -2668,6 +3129,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
@@ -2708,6 +3170,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: None,
                 system_prompt: Some("You are a terse assistant.".to_string()),
@@ -2784,6 +3247,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: None,
                 system_prompt: Some("You are a terse assistant.".to_string()),
@@ -2818,6 +3282,7 @@ mod tests {
                 prompt: "Estimate this public sequence: 2, 4, 8.".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: None,
                 system_prompt: None,
@@ -2834,6 +3299,7 @@ mod tests {
                 prompt: "Draft a markdown operator report for this internal rollout.".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
@@ -2871,6 +3337,7 @@ mod tests {
                     prompt: "hello world".to_string(),
                     preferred_backend: Backend::M,
                     runtime_mode: RuntimeMode::Local,
+                    execution_mode: JobExecutionMode::Single,
                     stream: false,
                     model: None,
                     system_prompt: None,
@@ -3196,6 +3663,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: None,
                 system_prompt: None,
@@ -3224,6 +3692,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: None,
                 system_prompt: None,
@@ -3315,6 +3784,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
@@ -3396,6 +3866,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
@@ -3428,6 +3899,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Interactive,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
@@ -3456,6 +3928,7 @@ mod tests {
                 prompt: "hello world".to_string(),
                 preferred_backend: Backend::M,
                 runtime_mode: RuntimeMode::Interactive,
+                execution_mode: JobExecutionMode::Single,
                 stream: true,
                 model: Some("demo".to_string()),
                 system_prompt: None,

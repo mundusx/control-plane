@@ -6,7 +6,7 @@ mod supabase;
 use contracts::{
     is_trusted_identity_path, trust_path_label, AgentRegistration, ChatCompletionChoice,
     ChatCompletionChoiceMessage, ChatCompletionMundusX, ChatCompletionRequest,
-    ChatCompletionResponse, Heartbeat, JobCompletion, JobRecord, JobRequest,
+    ChatCompletionResponse, Heartbeat, JobCompletion, JobExecutionMode, JobRecord, JobRequest,
     NodePolicyOverrideInput, NodeRecord, OperatorContributionPercentUpdate,
     OperatorNodePolicyOverrideUpdate, RuntimeMode,
 };
@@ -2648,6 +2648,7 @@ fn handle_connection(
                         prompt,
                         preferred_backend: crate::contracts::Backend::Auto,
                         runtime_mode: RuntimeMode::Local,
+                        execution_mode: JobExecutionMode::Single,
                         stream: false,
                         model: Some(request_body.model.clone()),
                         system_prompt,
@@ -2716,8 +2717,14 @@ fn handle_connection(
                 let record = guard.complete_job(completion, now_unix_seconds());
                 if let Some(job) = record.as_ref() {
                     let completed_at = job.completed_at.clone().unwrap_or_else(now_unix_seconds);
-                    let event_type = if matches!(job.status, crate::contracts::JobStatus::Completed)
-                    {
+                    let event_type = if job.last_completed_graph_node_id.is_some()
+                        && !matches!(
+                            job.status,
+                            crate::contracts::JobStatus::Completed
+                                | crate::contracts::JobStatus::Failed
+                        ) {
+                        "graph_node_completed"
+                    } else if matches!(job.status, crate::contracts::JobStatus::Completed) {
                         "job_completed"
                     } else {
                         "job_failed"
@@ -2735,7 +2742,9 @@ fn handle_connection(
                             note_supabase_failure(&sync_status, error);
                         }
                     }
-                    if matches!(job.status, crate::contracts::JobStatus::Completed) {
+                    if matches!(job.status, crate::contracts::JobStatus::Completed)
+                        || job.last_completed_graph_node_id.is_some()
+                    {
                         if let Some(award) = guard.award_job_reward(job, completed_at) {
                             let award_event = guard.record_job_event(
                                 award.device_id.clone(),
@@ -2762,9 +2771,15 @@ fn handle_connection(
                 }
                 if let Some(db) = supabase.as_ref() {
                     if let Some(job) = record.as_ref() {
-                        if let Err(error) = db.record_job_completion(&completion_clone, job) {
-                            eprintln!("database completion sync skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
+                        if matches!(
+                            job.status,
+                            crate::contracts::JobStatus::Completed
+                                | crate::contracts::JobStatus::Failed
+                        ) {
+                            if let Err(error) = db.record_job_completion(&completion_clone, job) {
+                                eprintln!("database completion sync skipped: {error}");
+                                note_supabase_failure(&sync_status, error);
+                            }
                         }
                     }
                 }
@@ -2926,8 +2941,8 @@ mod tests {
         CONTROL_PLANE_LOGO_PATH, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
     use crate::contracts::{
-        AgentRegistration, AgentState, Backend, Heartbeat, JobRequest, RuntimeMode,
-        WorkerHealthReport,
+        AgentRegistration, AgentState, Backend, Heartbeat, JobExecutionMode, JobRequest,
+        RuntimeMode, WorkerHealthReport,
     };
     use crate::state::ControlPlaneState;
     use ed25519_dalek::{Signer, SigningKey};
@@ -3240,6 +3255,7 @@ mod tests {
                 prompt: "Summarize operator state".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("HuggingFaceTB/SmolLM2-135M-Instruct".to_string()),
                 system_prompt: None,
@@ -3506,6 +3522,7 @@ mod tests {
                 prompt: "summarize this".to_string(),
                 preferred_backend: Backend::Auto,
                 runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
                 stream: false,
                 model: Some("demo".to_string()),
                 system_prompt: None,
