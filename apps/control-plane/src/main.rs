@@ -428,14 +428,14 @@ fn trust_badge(trust_path: &str) -> (&'static str, &'static str, &'static str) {
 }
 
 const TOPOLOGY_SLOTS: [(&str, &str); 8] = [
-    ("50%", "12%"),
-    ("70%", "22%"),
+    ("50%", "15%"),
+    ("70%", "24%"),
     ("85%", "50%"),
-    ("71%", "78%"),
-    ("50%", "88%"),
-    ("29%", "78%"),
+    ("71%", "76%"),
+    ("50%", "84%"),
+    ("29%", "76%"),
     ("15%", "50%"),
-    ("30%", "22%"),
+    ("30%", "24%"),
 ];
 
 const TOPOLOGY_NODE_ICON: &str = r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="5" rx="1"/><rect x="5" y="14" width="14" height="5" rx="1"/><path d="M8 7.5h5"/><path d="M8 16.5h5"/></svg>"#;
@@ -1262,19 +1262,19 @@ fn control_plane_home(
       }}
       .topology {{
         position: relative;
-        height: 360px;
+        height: 420px;
         border-bottom: 1px solid rgba(73, 159, 255, 0.12);
         overflow: hidden;
       }}
       .orbit {{
         position: absolute;
-        inset: 42px 86px 28px;
+        inset: 62px 86px 58px;
         border: 1px dashed rgba(51, 168, 255, 0.44);
         border-radius: 50%;
       }}
       .grid-ring {{
         position: absolute;
-        inset: 82px 170px 68px;
+        inset: 108px 170px 104px;
         border: 1px solid rgba(51, 168, 255, 0.1);
         border-radius: 50%;
       }}
@@ -1477,7 +1477,7 @@ fn control_plane_home(
         min-height: 38px;
         display: grid;
         place-items: center;
-        margin-top: 16px;
+        margin-top: 20px;
       }}
       .credits-layout {{
         display: grid;
@@ -1615,9 +1615,9 @@ fn control_plane_home(
         .credits-layout,
         .node-details-body {{ grid-template-columns: 1fr; }}
         h1 {{ font-size: 30px; }}
-        .topology {{ height: 430px; }}
-        .orbit {{ inset: 90px 20px 58px; }}
-        .grid-ring {{ inset: 130px 74px 96px; }}
+        .topology {{ height: 470px; }}
+        .orbit {{ inset: 112px 20px 82px; }}
+        .grid-ring {{ inset: 154px 74px 124px; }}
         .topo-node {{ font-size: 11px; }}
         .node-summary {{ width: 100%; }}
         .table .thead {{ display: none; }}
