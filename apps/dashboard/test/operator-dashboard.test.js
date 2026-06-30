@@ -195,6 +195,56 @@ test("renders the live deploy fingerprint from health", () => {
   assert.match(html, /deploy:\s*abcdef1234567890/i);
 });
 
+test("renders chunk plan progress for decomposed jobs", () => {
+  const html = page({
+    health: {
+      status: "ok",
+      storage_source: "supabase",
+      supabase: "enabled",
+    },
+    status: {
+      storage_source: "supabase",
+      queued_job_count: 1,
+      nodes: [],
+      jobs: [
+        {
+          job_id: "job-history",
+          request_id: "job-history",
+          prompt: "Write a history of Mercedes-Benz",
+          status: "queued",
+          execution_mode: "decompose",
+          graph_execution_enabled: true,
+          preferred_backend: "auto",
+          submitted_at: "1",
+          assigned_at: null,
+          completed_at: null,
+          plan: {
+            strategy: "sectioned_research",
+            summary: "Planned sectioned research units plus a final reducer.",
+          },
+          graph: {
+            nodes: [
+              { name: "Origins and founders", status: "completed", blocked_by: [] },
+              { name: "Modern era", status: "running", blocked_by: [] },
+              { name: "Final synthesis", status: "waiting", blocked_by: ["job.modern_era"] },
+            ],
+          },
+        },
+      ],
+    },
+    events: [],
+    credits: {},
+    error: null,
+  });
+
+  assert.match(html, /mode decompose/i);
+  assert.match(html, /graph enabled/i);
+  assert.match(html, /1\/3 chunks complete/i);
+  assert.match(html, /Origins and founders/i);
+  assert.match(html, /Modern era/i);
+  assert.match(html, /Blocked by job\.modern_era/i);
+});
+
 test("renders the high-impact command deck shell with replacement logo and live metrics", () => {
   const html = page({
     health: {

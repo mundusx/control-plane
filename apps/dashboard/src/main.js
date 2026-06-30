@@ -505,15 +505,27 @@ function jobStatusTone(status) {
   switch (String(status ?? "").toLowerCase()) {
     case "completed":
       return "green";
+    case "running":
+      return "amber";
     case "assigned":
       return "amber";
     case "failed":
       return "red";
     case "queued":
+    case "ready":
       return "blue";
+    case "waiting":
+      return "neutral";
     default:
       return "neutral";
   }
+}
+
+function graphProgress(graph) {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const completed = nodes.filter((node) => String(node.status ?? "").toLowerCase() === "completed").length;
+  const running = nodes.filter((node) => String(node.status ?? "").toLowerCase() === "running").length;
+  return { nodes, completed, running, total: nodes.length };
 }
 
 function renderJobs(jobs = []) {
@@ -539,6 +551,10 @@ function renderJobs(jobs = []) {
           const planJobs = Array.isArray(plan.jobs) ? plan.jobs : [];
           const planSummary = String(plan.summary ?? "No planner summary recorded.");
           const planStrategy = String(plan.strategy ?? "unplanned");
+          const executionMode = String(job.execution_mode ?? "single");
+          const graphExecution = job.graph_execution_enabled ? "enabled" : "advisory";
+          const graph = graphProgress(job.graph);
+          const graphNodes = graph.nodes.length ? graph.nodes : planJobs;
           return `
             <article class="job-card">
               <div class="job-head">
@@ -548,6 +564,8 @@ function renderJobs(jobs = []) {
                 </div>
                 <div class="job-badges">
                   ${badge(String(job.status ?? "unknown"), jobStatusTone(job.status))}
+                  ${badge(`mode ${executionMode}`, executionMode === "single" ? "neutral" : "blue")}
+                  ${badge(`graph ${graphExecution}`, job.graph_execution_enabled ? "green" : "neutral")}
                   ${badge(`preferred ${preferredBackend}`, backendTone(preferredBackend))}
                   ${badge(`assigned ${assignedBackend}`, backendTone(assignedBackend))}
                 </div>
@@ -579,11 +597,21 @@ function renderJobs(jobs = []) {
                 </div>
                 <div>${escapeHtml(planSummary)}</div>
                 ${
-                  planJobs.length
-                    ? `<ol>${planJobs
+                  graph.total
+                    ? `<div class="job-progress"><strong>${graph.completed}/${graph.total} chunks complete</strong><span>${graph.running} running</span></div>`
+                    : ""
+                }
+                ${
+                  graphNodes.length
+                    ? `<ol>${graphNodes
                         .map(
-                          (plannedJob) =>
-                            `<li><strong>${escapeHtml(plannedJob.name ?? plannedJob.id ?? "planned job")}</strong><span>${escapeHtml(plannedJob.required_output ?? plannedJob.responsibility ?? "")}</span></li>`,
+                          (plannedJob) => {
+                            const status = String(plannedJob.status ?? "planned");
+                            const blockedBy = Array.isArray(plannedJob.blocked_by) && plannedJob.blocked_by.length
+                              ? `Blocked by ${plannedJob.blocked_by.join(", ")}`
+                              : "";
+                            return `<li><div class="job-plan-row"><strong>${escapeHtml(plannedJob.name ?? plannedJob.id ?? "planned job")}</strong>${badge(status, jobStatusTone(status))}</div><span>${escapeHtml(blockedBy || plannedJob.required_output || plannedJob.responsibility || "")}</span></li>`;
+                          },
                         )
                         .join("")}</ol>`
                     : ""
@@ -2561,6 +2589,24 @@ export function page({ health, status, events, credits, error }) {
       }
       .job-plan li {
         margin-top: 6px;
+      }
+      .job-plan-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .job-progress {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .job-progress span {
+        color: var(--muted);
       }
       .job-plan span {
         display: block;
