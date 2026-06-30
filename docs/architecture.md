@@ -1,4 +1,4 @@
-# NovusX Architecture
+# MundusX Architecture
 
 How M-series and CUDA nodes work together through the control plane, and how consumers use it.
 

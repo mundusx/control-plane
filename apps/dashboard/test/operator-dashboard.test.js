@@ -215,9 +215,9 @@ test("renders the high-impact command deck shell with replacement logo and live 
     error: null,
   });
 
-  assert.match(html, /NovusX Command Deck/i);
+  assert.match(html, /MundusX Command Deck/i);
   assert.match(html, /Control Plane/i);
-  assert.match(html, /NovusX control plane logo/i);
+  assert.match(html, /MundusX control plane logo/i);
   assert.match(html, /\/assets\/mundusx-logo\.png/);
   assert.match(html, /motion-lift/);
   assert.match(html, /motion-glow/);

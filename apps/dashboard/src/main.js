@@ -17,7 +17,7 @@ const sampleCompletedJobs = [
   {
     id: "job_8f21f3",
     model: "HuggingFaceTB/SmolLM2-135M-Instruct",
-    prompt: "Summarize NovusX in one sentence.",
+    prompt: "Summarize MundusX in one sentence.",
     status: "completed",
     credits: 0.5,
     duration: "11s",
@@ -734,7 +734,7 @@ function renderContributorJobHistoryPage(requestUrl, basePath = "/portal") {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NovusX Contributor Job History</title>
+    <title>MundusX Contributor Job History</title>
     <style>
       :root {
         color-scheme: light;
@@ -990,7 +990,7 @@ function renderContributorJobHistoryPage(requestUrl, basePath = "/portal") {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Contributor Portal</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Contributor Portal</div>
         <div class="badge">localhost preview • job history</div>
       </div>
 
@@ -1129,7 +1129,7 @@ function renderContributorPortal() {
   const sampleEvents = [
     {
       title: "job_completed",
-      detail: "prompt: summarize NovusX in one sentence",
+      detail: "prompt: summarize MundusX in one sentence",
       time: "2m ago",
     },
     {
@@ -1149,7 +1149,7 @@ function renderContributorPortal() {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NovusX Contributor Portal</title>
+    <title>MundusX Contributor Portal</title>
     <style>
       :root {
         color-scheme: light;
@@ -1581,7 +1581,7 @@ function renderContributorPortal() {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Contributor Portal</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Contributor Portal</div>
         <div class="badge">localhost preview • contributor view</div>
       </div>
 
@@ -1738,7 +1738,7 @@ function renderInstallPage(installPath = "/install") {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NovusX Install</title>
+    <title>MundusX Install</title>
     <style>
       :root {
         color-scheme: light;
@@ -2018,14 +2018,14 @@ function renderInstallPage(installPath = "/install") {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Install</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Install</div>
         <div class="chip">localhost preview • Mac-first</div>
       </div>
 
       <div class="hero">
         <div>
           <div class="eyebrow">Local-first install flow</div>
-          <h1>Install NovusX on your Mac</h1>
+          <h1>Install MundusX on your Mac</h1>
           <div class="sub">
             A simple, Mac-first install page for Apple Silicon. Copy one command, verify the
             signed release binary when available, then move straight into onboarding, cap
@@ -2244,7 +2244,7 @@ export function page({ health, status, events, credits, error }) {
   const isHealthy = health?.status === "ok";
   const activeJobs = Number(snapshot.queued_job_count ?? 0) + Number(snapshot.assigned_job_count ?? 0);
   const nodeCount = Array.isArray(snapshot.nodes) ? snapshot.nodes.length : 0;
-  const title = "NovusX Dashboard";
+  const title = "MundusX Dashboard";
 
   return `<!doctype html>
 <html lang="en">
@@ -2717,7 +2717,7 @@ export function page({ health, status, events, credits, error }) {
       <div class="hero">
         <div class="topline command-center">
           <div>
-            <div class="brand motion-glow"><img class="brand-mark" alt="NovusX control plane logo" src="${escapeHtml(controlPlaneLogoUrl)}" /> NovusX Command Deck</div>
+            <div class="brand motion-glow"><img class="brand-mark" alt="MundusX control plane logo" src="${escapeHtml(controlPlaneLogoUrl)}" /> MundusX Command Deck</div>
             <h1>Control Plane</h1>
             <div class="sub">High-signal operator view for fleet readiness, routing pressure, policy gates, storage source, and audit trail.</div>
             <div class="statusline">
@@ -2990,7 +2990,7 @@ function docsShell({ title, subtitle, active, body, basePath = "/docs" }) {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Docs</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Docs</div>
         <div class="badge">localhost preview • local layout</div>
       </div>
       <div class="layout">
@@ -3024,7 +3024,7 @@ function docsShell({ title, subtitle, active, body, basePath = "/docs" }) {
 
 function renderDocsHome(basePath = "/docs") {
   return docsShell({
-    title: "NovusX Docs",
+    title: "MundusX Docs",
     subtitle:
       "A Mac-first public docs surface for install, identity, onboarding, credits, and release flow. This preview is local, but the copy is written as the public source of truth.",
     active: "overview",
@@ -3085,7 +3085,7 @@ function renderDocsHome(basePath = "/docs") {
 
 function renderDocsInstall(basePath = "/docs") {
   return docsShell({
-    title: "Install NovusX",
+    title: "Install MundusX",
     subtitle:
       "The install page is the first touch for contributors. It stays localhost-only, keeps the command identical everywhere, and points to onboarding, identity trust, and cap selection immediately after install.",
     active: "install",
@@ -3201,7 +3201,7 @@ function renderDocsCredits(basePath = "/docs") {
         </div>
         <div class="card">
           <h2>What users should expect</h2>
-          <p>NovusX should show earned credits clearly and make the contributor balance easy to inspect in the dashboard.</p>
+          <p>MundusX should show earned credits clearly and make the contributor balance easy to inspect in the dashboard.</p>
         </div>
       </div>
     `,
@@ -3416,7 +3416,7 @@ const isEntrypoint =
 if (isEntrypoint) {
   createAppServer().listen(port, "127.0.0.1", () => {
     process.stdout.write(
-      `NovusX dashboard listening on http://127.0.0.1:${port} (proxying ${controlPlaneUrl})\n`,
+      `MundusX dashboard listening on http://127.0.0.1:${port} (proxying ${controlPlaneUrl})\n`,
     );
   });
 }
