@@ -651,6 +651,48 @@ test("routes weather questions to wttr without queuing an LLM job", async () => 
   assert.match(result.output, /Partly cloudy, 31C\/88F/);
 });
 
+test("does not let one direct tool hijack a compound chat prompt", async () => {
+  const calls = [];
+  const prompt =
+    "Hey Atlas kindly introduce yourself and let me know what is the weather today in Newfing Germany and then tell me who is David Battalia";
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    assert.notEqual(url, "https://wttr.in/Newfing%20Germany?format=j1");
+    if (url === "https://uat.mundusx.ai/v1/nodes?page=1&page_size=25") {
+      return jsonResponse({ items: [] });
+    }
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+    const body = JSON.parse(init.body);
+    assert.equal(body.prompt, prompt);
+    return jsonResponse({
+      job_id: "compound-1",
+      status: "queued",
+      job: {
+        job_id: "compound-1",
+        status: "queued",
+        model: "Qwen/Test",
+        execution_mode: "auto",
+        graph_execution_enabled: false,
+        plan: { strategy: "single_job" },
+      },
+    });
+  };
+
+  const result = await submitChatJob(
+    { message: prompt },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(result.status, "queued");
+  assert.equal(result.execution_mode, "auto");
+  assert.equal(result.job_id, "compound-1");
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["https://uat.mundusx.ai/v1/nodes?page=1&page_size=25", "https://uat.mundusx.ai/v1/jobs"],
+  );
+});
+
 test("routes factual history questions to a grounded summary source", async () => {
   const calls = [];
   const fetchImpl = async (url) => {
