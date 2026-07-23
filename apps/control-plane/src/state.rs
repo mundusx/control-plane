@@ -607,7 +607,9 @@ impl ControlPlaneState {
     }
 
     fn worker_runtime_dependencies_ready(worker_health: &WorkerHealthReport) -> bool {
-        worker_health.runtime_mode.eq_ignore_ascii_case("mlx") || worker_health.llama_cli_available
+        worker_health.runtime_mode.eq_ignore_ascii_case("mlx")
+            || worker_health.runtime_mode.eq_ignore_ascii_case("vllm")
+            || worker_health.llama_cli_available
     }
 
     fn compatible_ready_node_count_for_request(&self, request: &JobRequest) -> usize {
@@ -4965,11 +4967,24 @@ mod tests {
         let mut state = ControlPlaneState::default();
         state.register(vllm_registration("node-vllm"));
 
-        let node =
-            state.heartbeat(ready_vllm_heartbeat("node-vllm", "1"), "1".to_string());
+        let node = state.heartbeat(ready_vllm_heartbeat("node-vllm", "1"), "1".to_string());
 
         assert!(node.policy_allowed, "{:?}", node.policy_reason);
         assert_eq!(node.backend, Backend::Vllm);
+    }
+
+    #[test]
+    fn ready_vllm_node_can_claim_default_job_without_llama_cli() {
+        let mut state = ControlPlaneState::default();
+        let mut request = classification_request("hello world");
+        request.model = None;
+        state.submit_job(request, "1".to_string());
+        state.register(vllm_registration("node-vllm"));
+        state.heartbeat(ready_vllm_heartbeat("node-vllm", "2"), "2".to_string());
+
+        let claim = state.claim_job("node-vllm", "3".to_string()).job;
+
+        assert!(claim.is_some());
     }
 
     #[test]
