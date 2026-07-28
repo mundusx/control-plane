@@ -5682,6 +5682,7 @@ mod tests {
             parallel_slots: 1,
             supported_runtime_modes: vec![RuntimeMode::Local],
             streaming_supported: false,
+            capabilities: Default::default(),
             checked_at: checked_at.to_string(),
             notes: vec!["local runtime ready".to_string()],
         }

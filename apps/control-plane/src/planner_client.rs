@@ -1,4 +1,9 @@
-use serde::Serialize;
+use crate::contracts::{
+    JobPlan, JobRequest, JobSchedulingRequirements, NodeRole, PlannedJob, RequestClassification,
+    RequestTaskType,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -25,6 +30,46 @@ enum UrlScheme {
 struct PlannerProbeConfig {
     url: String,
     timeout: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlannerPlanResult {
+    pub plan: JobPlan,
+    pub requirements: JobSchedulingRequirements,
+    pub provider: String,
+    pub status: String,
+    pub degraded_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PlannerResponseWire {
+    planner_provider: Option<String>,
+    planner_status: Option<String>,
+    degraded_reason: Option<String>,
+    plan: Option<PlanWire>,
+    graph: Option<GraphWire>,
+    scheduling_requirements: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PlanWire {
+    summary: Option<String>,
+    steps: Option<Vec<PlanStepWire>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GraphWire {
+    nodes: Option<Vec<PlanStepWire>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PlanStepWire {
+    id: String,
+    name: Option<String>,
+    responsibility: Option<String>,
+    depends_on: Option<Vec<String>>,
+    required_output: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -58,6 +103,18 @@ impl PlannerProbeConfig {
     }
 }
 
+pub fn plan_from_env(
+    request: &JobRequest,
+    classification: &RequestClassification,
+    base_requirements: &JobSchedulingRequirements,
+) -> Result<Option<PlannerPlanResult>, String> {
+    let Some(config) = PlannerProbeConfig::from_env() else {
+        return Ok(None);
+    };
+    let response = request_plan(&config, request, classification)?;
+    Ok(Some(response_to_plan(response, request, base_requirements)))
+}
+
 pub fn planner_service_status_from_env() -> PlannerServiceStatus {
     let Some(config) = PlannerProbeConfig::from_env() else {
         return PlannerServiceStatus {
@@ -73,18 +130,38 @@ pub fn planner_service_status_from_env() -> PlannerServiceStatus {
         };
     };
 
+    let request = JobRequest {
+        request_id: "planner-status-probe".to_string(),
+        prompt: "Answer health probe.".to_string(),
+        preferred_backend: crate::contracts::Backend::Auto,
+        runtime_mode: crate::contracts::RuntimeMode::Local,
+        execution_mode: crate::contracts::JobExecutionMode::Single,
+        stream: false,
+        model: None,
+        system_prompt: None,
+        max_tokens: Some(1),
+        max_tokens_source: Some("planner_status_probe".to_string()),
+        temperature: None,
+        top_p: None,
+        seed: None,
+    };
+    let classification = RequestClassification::default();
     let started = Instant::now();
-    match probe_http_url(&config.url, config.timeout) {
-        Ok(()) => PlannerServiceStatus {
+    match request_plan(&config, &request, &classification) {
+        Ok(response) => PlannerServiceStatus {
             enabled: true,
             url_configured: true,
             url: Some(config.url),
             reachable: true,
-            provider: "planner-service".to_string(),
-            status: "ready".to_string(),
+            provider: response
+                .planner_provider
+                .unwrap_or_else(|| "planner-service".to_string()),
+            status: response
+                .planner_status
+                .unwrap_or_else(|| "planned".to_string()),
             fallback_mode: false,
             latency_ms: Some(started.elapsed().as_millis()),
-            last_error: None,
+            last_error: response.degraded_reason,
         },
         Err(error) => PlannerServiceStatus {
             enabled: true,
@@ -100,35 +177,180 @@ pub fn planner_service_status_from_env() -> PlannerServiceStatus {
     }
 }
 
-fn probe_http_url(url: &str, timeout: Duration) -> Result<(), String> {
-    let parsed = parse_planner_url(url)?;
-    let stream = connect_with_timeout(parsed.host.as_str(), parsed.port, timeout)?;
+fn request_plan(
+    config: &PlannerProbeConfig,
+    request: &JobRequest,
+    classification: &RequestClassification,
+) -> Result<PlannerResponseWire, String> {
+    let parsed = parse_planner_url(&config.url)?;
+    let body = json!({
+        "request_id": request.request_id,
+        "prompt": request.prompt,
+        "model": request.model,
+        "classification": classification,
+        "available_capability_summary": {},
+        "policy": {
+            "preferred_backend": request.preferred_backend,
+            "runtime_mode": request.runtime_mode,
+            "execution_mode": request.execution_mode,
+            "stream": request.stream
+        }
+    })
+    .to_string();
+    let stream = connect_with_timeout(parsed.host.as_str(), parsed.port, config.timeout)?;
     stream
-        .set_read_timeout(Some(timeout))
+        .set_read_timeout(Some(config.timeout))
         .map_err(|error| format!("planner_read_timeout_setup_failed: {error}"))?;
     stream
-        .set_write_timeout(Some(timeout))
+        .set_write_timeout(Some(config.timeout))
         .map_err(|error| format!("planner_write_timeout_setup_failed: {error}"))?;
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        parsed.path, parsed.host
+    let request_text = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        parsed.path,
+        parsed.host,
+        body.len(),
+        body
     );
-    let read = match parsed.scheme {
-        UrlScheme::Http => probe_stream(stream, request.as_bytes()),
+    let response = match parsed.scheme {
+        UrlScheme::Http => exchange_http(stream, request_text.as_bytes()),
         UrlScheme::Https => {
             let connector = native_tls::TlsConnector::new()
                 .map_err(|error| format!("planner_tls_setup_failed: {error}"))?;
             let tls_stream = connector
                 .connect(parsed.host.as_str(), stream)
                 .map_err(|error| format!("planner_tls_connect_failed: {error}"))?;
-            probe_stream(tls_stream, request.as_bytes())
+            exchange_http(tls_stream, request_text.as_bytes())
         }
     }?;
-    if read == 0 {
-        return Err("planner_empty_response".to_string());
+    serde_json::from_str(&response)
+        .map_err(|error| format!("planner_response_decode_failed: {error}"))
+}
+
+fn exchange_http<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<String, String> {
+    stream
+        .write_all(request)
+        .map_err(|error| format!("planner_write_failed: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("planner_read_failed: {error}"))?;
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "planner_invalid_http_response".to_string())?;
+    let status = head.lines().next().unwrap_or("unknown status");
+    if !status.contains(" 200 ") {
+        return Err(format!("planner_http_error: {status}"));
     }
-    Ok(())
+    Ok(body.to_string())
+}
+
+fn response_to_plan(
+    response: PlannerResponseWire,
+    request: &JobRequest,
+    base_requirements: &JobSchedulingRequirements,
+) -> PlannerPlanResult {
+    let provider = response
+        .planner_provider
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "planner-service".to_string());
+    let status = response
+        .planner_status
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "planned".to_string());
+    let steps = response
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.steps.clone())
+        .or_else(|| {
+            response
+                .graph
+                .as_ref()
+                .and_then(|graph| graph.nodes.clone())
+        })
+        .unwrap_or_default();
+    let jobs = steps
+        .into_iter()
+        .filter_map(|step| {
+            let id = step.id.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some(PlannedJob {
+                id: id.to_string(),
+                name: step.name.unwrap_or_else(|| id.to_string()),
+                responsibility: step
+                    .responsibility
+                    .unwrap_or_else(|| "execution".to_string()),
+                depends_on: step.depends_on.unwrap_or_default(),
+                required_output: step.required_output.unwrap_or_else(|| {
+                    "Return the completed work for this planner step.".to_string()
+                }),
+                reason: step
+                    .reason
+                    .unwrap_or_else(|| "Planner service selected this step.".to_string()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let plan = JobPlan {
+        plan_id: format!("plan-{}", request.request_id),
+        strategy: provider.clone(),
+        summary: response
+            .plan
+            .and_then(|plan| plan.summary)
+            .unwrap_or_else(|| format!("{provider} returned {} execution units.", jobs.len())),
+        jobs,
+    };
+    PlannerPlanResult {
+        plan,
+        requirements: merge_requirements(base_requirements, response.scheduling_requirements),
+        provider,
+        status,
+        degraded_reason: response.degraded_reason,
+    }
+}
+
+fn merge_requirements(
+    base: &JobSchedulingRequirements,
+    value: Option<Value>,
+) -> JobSchedulingRequirements {
+    let Some(value) = value else {
+        return base.clone();
+    };
+    let mut requirements = base.clone();
+    if let Some(task_type) = value.get("task_type").and_then(Value::as_str) {
+        requirements.task_type = match task_type {
+            "chat" => RequestTaskType::Chat,
+            "coding" => RequestTaskType::Coding,
+            "document" => RequestTaskType::Document,
+            _ => RequestTaskType::Inference,
+        };
+    }
+    if let Some(model) = value.get("model").and_then(Value::as_str) {
+        requirements.model = Some(model.to_string());
+    }
+    if let Some(roles) = value.get("preferred_roles").and_then(Value::as_array) {
+        requirements.preferred_roles = roles
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(parse_node_role)
+            .collect();
+    }
+    requirements
+}
+
+fn parse_node_role(value: &str) -> Option<NodeRole> {
+    match value {
+        "chat" => Some(NodeRole::Chat),
+        "coding" => Some(NodeRole::Coding),
+        "vision" => Some(NodeRole::Vision),
+        "embedding" => Some(NodeRole::Embedding),
+        "tool_use" => Some(NodeRole::ToolUse),
+        "chunk_analysis" => Some(NodeRole::ChunkAnalysis),
+        "reducer" => Some(NodeRole::Reducer),
+        "synthesizer" => Some(NodeRole::Synthesizer),
+        "batch" => Some(NodeRole::Batch),
+        _ => None,
+    }
 }
 
 fn connect_with_timeout(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
@@ -154,17 +376,6 @@ fn connect_with_timeout(host: &str, port: u16, timeout: Duration) -> Result<TcpS
             .map(|error| error.to_string())
             .unwrap_or_else(|| "no_addresses".to_string())
     ))
-}
-
-fn probe_stream<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<usize, String> {
-    stream
-        .write_all(request)
-        .map_err(|error| format!("planner_write_failed: {error}"))?;
-
-    let mut buffer = [0_u8; 16];
-    stream
-        .read(&mut buffer)
-        .map_err(|error| format!("planner_read_failed: {error}"))
 }
 
 fn parse_planner_url(url: &str) -> Result<PlannerUrl, String> {

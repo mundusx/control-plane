@@ -5,9 +5,9 @@ use crate::contracts::{
     JobClaimResponse, JobCompletion, JobEventRecord, JobExecutionMode, JobGraph, JobGraphNode,
     JobGraphNodeStatus, JobGraphStatus, JobPlan, JobRecord, JobRequest, JobResultRecord,
     JobResultVerificationStatus, JobSchedulingRequirements, JobStatus, NodePolicyOverride,
-    NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, NodeTrustRecord, PlannedJob,
-    PrivacyLevel, RequestClassification, RequestComplexity, RequestTaskType, RuntimeMode,
-    SchedulerDecision, ToolRewardRequest, WorkerHealthReport,
+    NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, NodeRole, NodeTrustRecord,
+    PlannedJob, PrivacyLevel, RequestClassification, RequestComplexity, RequestTaskType,
+    RuntimeMode, SchedulerDecision, ToolRewardRequest, WorkerHealthReport,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -386,11 +386,38 @@ impl ControlPlaneState {
     pub fn submit_job(&mut self, request: JobRequest, submitted_at: String) -> JobRecord {
         let job_id = request.request_id.clone();
         let classification = classify_job_request(&request);
-        let scheduling_requirements = scheduling_requirements_for(&request, &classification);
-        let fallback_decision = fallback_decision_for(&scheduling_requirements);
+        let mut scheduling_requirements = scheduling_requirements_for(&request, &classification);
         let compatible_ready_nodes = self.compatible_ready_node_count_for_request(&request);
         let mut plan =
             plan_job_request_for_submission(&request, &classification, compatible_ready_nodes);
+        if request.execution_mode != JobExecutionMode::Single {
+            match crate::planner_client::plan_from_env(
+                &request,
+                &classification,
+                &scheduling_requirements,
+            ) {
+                Ok(Some(external)) if !external.plan.jobs.is_empty() => {
+                    scheduling_requirements = external.requirements;
+                    scheduling_requirements
+                        .constraints
+                        .push(format!("planner_provider:{}", external.provider));
+                    scheduling_requirements
+                        .constraints
+                        .push(format!("planner_status:{}", external.status));
+                    if let Some(reason) = external.degraded_reason {
+                        scheduling_requirements
+                            .constraints
+                            .push(format!("planner_degraded:{reason}"));
+                    }
+                    plan = external.plan;
+                }
+                Ok(_) => {}
+                Err(error) => scheduling_requirements
+                    .constraints
+                    .push(format!("planner_fallback:{error}")),
+            }
+        }
+        let fallback_decision = fallback_decision_for(&scheduling_requirements);
         if request.execution_mode == JobExecutionMode::Single
             && plan.strategy == "complete_code_generation"
         {
@@ -868,6 +895,53 @@ impl ControlPlaneState {
         true
     }
 
+    fn graph_node_role(job: &JobRecord, active_graph_node_id: Option<&str>) -> Option<NodeRole> {
+        let graph_node_id = active_graph_node_id?;
+        let node = job
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_node_id)?;
+        let role_hint =
+            format!("{} {} {}", node.id, node.name, node.responsibility).to_ascii_lowercase();
+        if contains_any(
+            &role_hint,
+            &["synth", "final answer", "final_merge", "final merge"],
+        ) {
+            Some(NodeRole::Synthesizer)
+        } else if contains_any(&role_hint, &["reduce", "merge"]) {
+            Some(NodeRole::Reducer)
+        } else if contains_any(&role_hint, &["chunk", "section", "analysis"]) {
+            Some(NodeRole::ChunkAnalysis)
+        } else {
+            None
+        }
+    }
+
+    fn capability_has_role(worker_health: &WorkerHealthReport, required: NodeRole) -> bool {
+        let roles = &worker_health.capabilities.roles;
+        if roles.is_empty() {
+            return true;
+        }
+        roles.contains(&required)
+            || (required == NodeRole::ChunkAnalysis && roles.contains(&NodeRole::Batch))
+            || (required == NodeRole::Synthesizer && roles.contains(&NodeRole::Reducer))
+    }
+
+    fn node_can_run_graph_role(
+        node: &NodeRecord,
+        job: &JobRecord,
+        active_graph_node_id: Option<&str>,
+    ) -> bool {
+        let Some(required) = Self::graph_node_role(job, active_graph_node_id) else {
+            return true;
+        };
+        node.worker_health
+            .as_ref()
+            .map(|health| Self::capability_has_role(health, required))
+            .unwrap_or(false)
+    }
+
     fn scheduler_score(
         &self,
         node: &NodeRecord,
@@ -937,6 +1011,12 @@ impl ControlPlaneState {
         }
 
         if let Some(worker_health) = node.worker_health.as_ref() {
+            if let Some(required_role) = Self::graph_node_role(job, active_graph_node_id) {
+                if Self::capability_has_role(worker_health, required_role) {
+                    score += 12;
+                    reasons.push(format!("graph_role:{}", required_role.as_str()));
+                }
+            }
             if requirements
                 .model
                 .as_deref()
@@ -1035,6 +1115,11 @@ impl ControlPlaneState {
                         ready_vllm_exists,
                     )
                     && Self::node_can_run_job(node, job)
+                    && Self::node_can_run_graph_role(
+                        node,
+                        job,
+                        active_graph_node_id.as_deref(),
+                    )
             })
             .map(|node| {
                 let active_graph_node_id = if job.graph_execution_enabled {
@@ -1131,6 +1216,7 @@ impl ControlPlaneState {
                         ready_vllm_exists,
                     )
                     && Self::node_can_run_job(node, job)
+                    && Self::node_can_run_graph_role(node, job, active_graph_node_id.as_deref())
                 {
                     let mut decision =
                         self.scheduler_score(node, job, active_graph_node_id.as_deref());
@@ -2582,7 +2668,7 @@ fn graph_node_execution_prompt(
         return job.prompt.clone();
     };
 
-    if node.responsibility == "merge" {
+    if graph_node_is_merge(&job.graph, Some(active_node_id)) {
         let max_section_chars = assigned_node
             .map(reducer_section_char_limit)
             .unwrap_or(REDUCER_SECTION_CHARS_STANDARD);
@@ -2971,9 +3057,13 @@ fn graph_node_is_merge(graph: &JobGraph, graph_node_id: Option<&str>) -> bool {
         return false;
     };
     graph.nodes.iter().any(|node| {
-        node.id == graph_node_id
-            && (node.responsibility == "merge"
-                || graph.final_node_id.as_deref() == Some(graph_node_id))
+        if node.id != graph_node_id {
+            return false;
+        }
+        let hint =
+            format!("{} {} {}", node.id, node.name, node.responsibility).to_ascii_lowercase();
+        contains_any(&hint, &["merge", "reduce", "synth"])
+            || graph.final_node_id.as_deref() == Some(graph_node_id)
     })
 }
 
@@ -3007,6 +3097,11 @@ fn best_reducer_node_id_for_job(state: &ControlPlaneState, job: &JobRecord) -> O
                     ready_vllm_exists,
                 )
                 && ControlPlaneState::node_can_run_job(candidate, job)
+                && ControlPlaneState::node_can_run_graph_role(
+                    candidate,
+                    job,
+                    next_ready_graph_node_id_for_node(&job.graph, &candidate.node_id).as_deref(),
+                )
                 && next_ready_graph_node_id_for_node(&job.graph, &candidate.node_id).is_some()
         })
         .map(|candidate| {
@@ -3816,7 +3911,12 @@ pub fn build_job_graph(request_id: &str, plan: &JobPlan, created_at: &str) -> Jo
         final_node_id: plan
             .jobs
             .iter()
-            .find(|job| job.responsibility == "merge")
+            .rev()
+            .find(|job| {
+                let hint =
+                    format!("{} {} {}", job.id, job.name, job.responsibility).to_ascii_lowercase();
+                contains_any(&hint, &["merge", "synth"])
+            })
             .map(|job| job.id.clone()),
         results: Vec::new(),
         final_output: None,
@@ -4460,6 +4560,11 @@ pub fn scheduling_requirements_for(
         stream: request.stream,
         model: request.model.clone(),
         language,
+        preferred_roles: match classification.task_type {
+            RequestTaskType::Chat => vec![NodeRole::Chat],
+            RequestTaskType::Coding => vec![NodeRole::Coding],
+            RequestTaskType::Document | RequestTaskType::Inference => vec![NodeRole::Batch],
+        },
         constraints: classification.execution_constraints.clone(),
     }
 }
@@ -4866,6 +4971,7 @@ mod tests {
             parallel_slots: 1,
             supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
             streaming_supported: false,
+            capabilities: Default::default(),
             checked_at: checked_at.to_string(),
             notes: vec!["m-series ready".to_string()],
         }
@@ -8244,6 +8350,7 @@ mod tests {
                     parallel_slots: 1,
                     supported_runtime_modes: vec![RuntimeMode::Local],
                     streaming_supported: false,
+                    capabilities: Default::default(),
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -8968,6 +9075,7 @@ mod tests {
                     parallel_slots: 1,
                     supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
                     streaming_supported: false,
+                    capabilities: Default::default(),
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -9049,6 +9157,7 @@ mod tests {
                     parallel_slots: 1,
                     supported_runtime_modes: vec![RuntimeMode::Local],
                     streaming_supported: false,
+                    capabilities: Default::default(),
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -9230,6 +9339,7 @@ mod tests {
                     parallel_slots: 1,
                     supported_runtime_modes: Vec::new(),
                     streaming_supported: false,
+                    capabilities: Default::default(),
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -9303,6 +9413,7 @@ mod tests {
                     parallel_slots: 1,
                     supported_runtime_modes: vec![RuntimeMode::Local, RuntimeMode::Interactive],
                     streaming_supported: false,
+                    capabilities: Default::default(),
                     checked_at: "2".to_string(),
                     notes: vec![],
                 },
@@ -9819,5 +9930,24 @@ mod tests {
         assert!(!node.policy_allowed);
         let reason = node.policy_reason.as_deref().expect("policy reason");
         assert!(reason.contains("runtime capability report is not ready"));
+    }
+
+    #[test]
+    fn explicit_roles_support_chunk_and_synthesis_rollout_fallbacks() {
+        let mut health = healthy_worker_health("1");
+        health.capabilities.roles = vec![NodeRole::Batch, NodeRole::Reducer];
+
+        assert!(ControlPlaneState::capability_has_role(
+            &health,
+            NodeRole::ChunkAnalysis
+        ));
+        assert!(ControlPlaneState::capability_has_role(
+            &health,
+            NodeRole::Synthesizer
+        ));
+        assert!(!ControlPlaneState::capability_has_role(
+            &health,
+            NodeRole::Vision
+        ));
     }
 }
