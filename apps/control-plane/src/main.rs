@@ -1,6 +1,7 @@
 mod contracts;
 mod migrations;
 mod planner_client;
+mod postgres_store;
 mod state;
 mod supabase;
 
@@ -15,6 +16,7 @@ use contracts::{
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::apply_migrations;
 use planner_client::planner_service_status_from_env;
+use postgres_store::PostgresStore;
 use serde::Serialize;
 use state::{load_state, save_state, ControlPlaneState};
 use std::collections::BTreeMap;
@@ -37,6 +39,7 @@ use state::state_path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StorageSource {
+    Postgres,
     Supabase,
     LocalJsonFallback,
     LocalJsonOnly,
@@ -149,9 +152,127 @@ impl OperatorAuthMode {
 impl StorageSource {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Postgres => "postgres",
             Self::Supabase => "supabase",
             Self::LocalJsonFallback => "local-json-fallback",
             Self::LocalJsonOnly => "local-json-only",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum DatabaseMirror {
+    Postgres(PostgresStore),
+    Supabase(SupabaseMirror),
+}
+
+impl DatabaseMirror {
+    fn from_env() -> Option<Self> {
+        let postgres = PostgresStore::from_env(
+            std::env::var(DATABASE_POOL_URL_ENV).ok().as_deref(),
+            std::env::var(DATABASE_DIRECT_URL_ENV).ok().as_deref(),
+        )
+        .map(Self::Postgres);
+        postgres.or_else(|| SupabaseMirror::from_env().map(Self::Supabase))
+    }
+
+    fn storage_source(&self) -> StorageSource {
+        match self {
+            Self::Postgres(_) => StorageSource::Postgres,
+            Self::Supabase(_) => StorageSource::Supabase,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        self.storage_source().as_str()
+    }
+
+    fn restore_state(&self) -> Result<ControlPlaneState, String> {
+        match self {
+            Self::Postgres(store) => store.restore_state(),
+            Self::Supabase(store) => store.restore_state(),
+        }
+    }
+
+    fn record_registration(&self, registration: &AgentRegistration) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_registration(registration),
+            Self::Supabase(store) => store.record_registration(registration),
+        }
+    }
+
+    fn record_node_snapshot(&self, node: &NodeRecord) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_node_snapshot(node),
+            Self::Supabase(store) => store.record_node_snapshot(node),
+        }
+    }
+
+    fn record_heartbeat(&self, heartbeat: &Heartbeat, node: &NodeRecord) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_heartbeat(heartbeat, node),
+            Self::Supabase(store) => store.record_heartbeat(heartbeat, node),
+        }
+    }
+
+    fn record_job(&self, job: &JobRecord) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_job(job),
+            Self::Supabase(store) => store.record_job(job),
+        }
+    }
+
+    fn record_job_completion(
+        &self,
+        completion: &JobCompletion,
+        job: &JobRecord,
+    ) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_job_completion(completion, job),
+            Self::Supabase(store) => store.record_job_completion(completion, job),
+        }
+    }
+
+    fn record_credit_award(&self, entry: &CreditsLedgerRecord) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_credit_award(entry),
+            Self::Supabase(store) => store.record_credit_award(entry),
+        }
+    }
+
+    fn record_job_event(&self, event: &contracts::JobEventRecord) -> Result<(), String> {
+        match self {
+            Self::Postgres(store) => store.record_job_event(event),
+            Self::Supabase(store) => store.record_job_event(event),
+        }
+    }
+
+    fn append_chat_message(
+        &self,
+        conversation_id: &str,
+        payload: &AppendChatMessageRequest,
+    ) -> Result<contracts::ChatMessageRecord, String> {
+        match self {
+            Self::Postgres(store) => store.append_chat_message(conversation_id, payload),
+            Self::Supabase(store) => store.append_chat_message(conversation_id, payload),
+        }
+    }
+
+    fn fetch_chat_messages(
+        &self,
+        conversation_id: &str,
+        limit: u32,
+    ) -> Result<Vec<contracts::ChatMessageRecord>, String> {
+        match self {
+            Self::Postgres(store) => store.fetch_chat_messages(conversation_id, limit),
+            Self::Supabase(store) => store.fetch_chat_messages(conversation_id, limit),
+        }
+    }
+
+    fn delete_chat_conversation(&self, conversation_id: &str) -> Result<bool, String> {
+        match self {
+            Self::Postgres(store) => store.delete_chat_conversation(conversation_id),
+            Self::Supabase(store) => store.delete_chat_conversation(conversation_id),
         }
     }
 }
@@ -4808,7 +4929,7 @@ fn note_supabase_failure(sync_status: &Arc<Mutex<SupabaseSyncStatus>>, error: St
 fn apply_admission_policy_update(
     state: &Arc<Mutex<ControlPlaneState>>,
     sync_status: &Arc<Mutex<SupabaseSyncStatus>>,
-    supabase: Option<&SupabaseMirror>,
+    supabase: Option<&DatabaseMirror>,
     update: AdmissionPolicyUpdate,
 ) -> Result<serde_json::Value, String> {
     let mut guard = state.lock().expect("state lock");
@@ -4851,7 +4972,7 @@ fn handle_connection(
     mut stream: TcpStream,
     state: Arc<Mutex<ControlPlaneState>>,
     sync_status: Arc<Mutex<SupabaseSyncStatus>>,
-    supabase: Option<&SupabaseMirror>,
+    supabase: Option<&DatabaseMirror>,
     storage_source: StorageSource,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -5802,21 +5923,22 @@ fn main() {
         }
     }
 
-    let supabase = SupabaseMirror::from_env();
+    let supabase = DatabaseMirror::from_env();
     let bind_addr = control_plane_bind_addr().expect("resolve bind address");
     let listener = TcpListener::bind(&bind_addr).expect("bind control plane");
     let (restored_state, storage_source, sync_status) = match supabase.as_ref() {
         Some(db) => match db.restore_state() {
             Ok(state) => {
-                println!("restore: supabase");
+                println!("restore: {}", db.label());
+                let storage_source = db.storage_source();
                 (
                     state,
-                    StorageSource::Supabase,
-                    SupabaseSyncStatus::enabled(StorageSource::Supabase),
+                    storage_source,
+                    SupabaseSyncStatus::enabled(storage_source),
                 )
             }
             Err(error) => {
-                eprintln!("supabase restore skipped: {error}");
+                eprintln!("database restore skipped: {error}");
                 let mut status = SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback);
                 status.note_failure(format!("restore failed: {error}"));
                 (
@@ -5840,7 +5962,7 @@ fn main() {
 
     println!("control plane listening on http://{bind_addr}");
     println!(
-        "supabase: {}",
+        "database sync: {}",
         sync_status.lock().expect("sync status lock").summary()
     );
     println!("storage_source: {}", storage_source.as_str());
@@ -7637,7 +7759,7 @@ mod tests {
     #[test]
     fn database_health_reports_managed_postgres_configuration() {
         let health = database_health_from_values(
-            StorageSource::LocalJsonFallback,
+            StorageSource::Postgres,
             Some("postgresql://admin@db.example/mundusx"),
             Some("postgresql://app@pool.example/mundusx"),
             Some("transaction"),
@@ -7645,7 +7767,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(health.storage_source, "local-json-fallback");
+        assert_eq!(health.storage_source, "postgres");
         assert!(health.runtime_pool.configured);
         assert_eq!(health.runtime_pool.env_var, DATABASE_POOL_URL_ENV);
         assert_eq!(health.runtime_pool.status, "configured");

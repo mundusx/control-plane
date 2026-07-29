@@ -17,7 +17,7 @@ Apple Silicon job routing now uses an explicit runtime contract between submitte
 
 ## Planner Service Status
 
-The control plane can report whether an optional stateless planner service is configured and reachable. The Rust control plane remains the source of truth for job state, retries, scheduling, audit, and Supabase persistence.
+The control plane can report whether an optional stateless planner service is configured and reachable. The Rust control plane remains the source of truth for job state, retries, scheduling, audit, and database persistence. Managed Postgres is selected when `MUNDUSX_DATABASE_POOL_URL` or `MUNDUSX_DATABASE_URL` is configured; the Supabase mirror remains a legacy fallback during migration.
 
 - Configure with `MUNDUSX_PLANNER_URL=http://127.0.0.1:8091/v1/plan`.
 - Tune the call timeout with `MUNDUSX_PLANNER_TIMEOUT_MS`; the default is `1500`.

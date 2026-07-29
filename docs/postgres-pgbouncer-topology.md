@@ -199,7 +199,8 @@ health, once the new path exists.
 
 Suggested health fields for #242:
 
-- `storage_source`: `postgres`, `local-json-fallback`, or `local-json-only`
+- `storage_source`: `postgres`, `supabase` during legacy fallback,
+  `local-json-fallback`, or `local-json-only`
 - `database.runtime_pool`: configured, healthy/degraded, and last error summary
 - `database.admin_direct`: configured/unconfigured only; do not test admin
   credentials on every request
@@ -217,7 +218,8 @@ Recommended rollout:
 
 1. Add config and generic health fields without changing runtime storage.
 2. Add managed PostgreSQL migrations and schema verification.
-3. Add plain Postgres runtime backend behind a feature/config switch.
+3. Add plain Postgres runtime backend selected by `MUNDUSX_DATABASE_POOL_URL`
+   with `MUNDUSX_DATABASE_URL` as local-development fallback.
 4. Run UAT parity smoke against managed PostgreSQL.
 5. Keep the previous Supabase mirror disabled but available for one rollback
    window if operationally necessary.
