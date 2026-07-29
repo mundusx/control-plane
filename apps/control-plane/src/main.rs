@@ -4692,6 +4692,75 @@ fn database_health_from_values(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MigrationDatabaseUrl {
+    env_var: &'static str,
+    url: String,
+    legacy: bool,
+}
+
+fn migration_database_url_from_env() -> Result<Option<MigrationDatabaseUrl>, String> {
+    migration_database_url_from_values(
+        std::env::var(DATABASE_DIRECT_URL_ENV).ok().as_deref(),
+        std::env::var(DATABASE_POOL_URL_ENV).ok().as_deref(),
+        std::env::var(LEGACY_DATABASE_URL_ENV).ok().as_deref(),
+    )
+}
+
+fn migration_database_url_from_values(
+    direct_url: Option<&str>,
+    pool_url: Option<&str>,
+    legacy_database_url: Option<&str>,
+) -> Result<Option<MigrationDatabaseUrl>, String> {
+    let direct_url = trimmed_env(direct_url);
+    let pool_url = trimmed_env(pool_url);
+    let legacy_database_url = trimmed_env(legacy_database_url);
+
+    let selected = if let Some(url) = direct_url {
+        Some(MigrationDatabaseUrl {
+            env_var: DATABASE_DIRECT_URL_ENV,
+            url,
+            legacy: false,
+        })
+    } else {
+        legacy_database_url.map(|url| MigrationDatabaseUrl {
+            env_var: LEGACY_DATABASE_URL_ENV,
+            url,
+            legacy: true,
+        })
+    };
+
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+
+    if pool_url
+        .as_deref()
+        .is_some_and(|pool_url| pool_url == selected.url)
+    {
+        return Err(format!(
+            "{} must be a direct PostgreSQL URL for migrations and must not equal {}",
+            selected.env_var, DATABASE_POOL_URL_ENV
+        ));
+    }
+
+    if selected.url.to_ascii_lowercase().contains("pgbouncer") {
+        return Err(format!(
+            "{} appears to point at PgBouncer; migrations must use {} direct PostgreSQL",
+            selected.env_var, DATABASE_DIRECT_URL_ENV
+        ));
+    }
+
+    Ok(Some(selected))
+}
+
+fn trimmed_env(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn authorize_operator_request(
     method: &str,
     route_path: &str,
@@ -5653,9 +5722,15 @@ fn main() {
     load_local_env();
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|arg| arg.as_str()) == Some("migrate") {
-        match std::env::var("DATABASE_URL") {
-            Ok(database_url) => match apply_migrations(&database_url) {
+        match migration_database_url_from_env() {
+            Ok(Some(database_url)) => match apply_migrations(&database_url.url) {
                 Ok(applied) => {
+                    if database_url.legacy {
+                        eprintln!(
+                            "migrations: using legacy {}; prefer {} for managed database mode",
+                            LEGACY_DATABASE_URL_ENV, DATABASE_DIRECT_URL_ENV
+                        );
+                    }
                     if applied.is_empty() {
                         println!("no migrations to apply");
                     } else {
@@ -5674,36 +5749,57 @@ fn main() {
                     std::process::exit(1);
                 }
             },
-            Err(_) => {
-                eprintln!("DATABASE_URL is required for migrate");
+            Ok(None) => {
+                eprintln!(
+                    "{} is required for migrate; legacy {} is accepted during migration",
+                    DATABASE_DIRECT_URL_ENV, LEGACY_DATABASE_URL_ENV
+                );
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("migration config invalid: {error}");
                 std::process::exit(1);
             }
         }
         return;
     }
 
-    if let Ok(database_url) = std::env::var("DATABASE_URL") {
-        thread::spawn(move || match apply_migrations(&database_url) {
-            Ok(applied) => {
-                if applied.is_empty() {
-                    println!("migrations: no pending migrations");
-                } else {
-                    for migration in &applied {
-                        println!(
-                            "applied {}_{} ({})",
-                            migration.version,
-                            migration.name,
-                            migration.path.display()
+    match migration_database_url_from_env() {
+        Ok(Some(database_url)) => {
+            thread::spawn(move || match apply_migrations(&database_url.url) {
+                Ok(applied) => {
+                    if database_url.legacy {
+                        eprintln!(
+                            "migrations: using legacy {}; prefer {} for managed database mode",
+                            LEGACY_DATABASE_URL_ENV, DATABASE_DIRECT_URL_ENV
                         );
                     }
-                    println!("migrations: {} applied in background", applied.len());
+                    if applied.is_empty() {
+                        println!("migrations: no pending migrations");
+                    } else {
+                        for migration in &applied {
+                            println!(
+                                "applied {}_{} ({})",
+                                migration.version,
+                                migration.name,
+                                migration.path.display()
+                            );
+                        }
+                        println!("migrations: {} applied in background", applied.len());
+                    }
                 }
-            }
-            Err(error) => {
-                eprintln!("background migration failed; continuing with existing schema: {error}");
-            }
-        });
-        println!("migrations: background startup check queued");
+                Err(error) => {
+                    eprintln!(
+                        "background migration failed; continuing with existing schema: {error}"
+                    );
+                }
+            });
+            println!("migrations: background startup check queued");
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("background migration skipped; migration config invalid: {error}");
+        }
     }
 
     let supabase = SupabaseMirror::from_env();
@@ -5797,15 +5893,15 @@ mod tests {
     use super::{
         auth_disabled_flag_enabled, completion_event_type, control_plane_bind_addr_from_env,
         control_plane_home, control_plane_operator_page, database_health_from_values,
-        deploy_fingerprint_from_env, handle_connection, job_async_payload, now_unix_seconds,
-        operator_auth_mode_from_env, operator_auth_startup_config_error,
-        operator_auth_token_from_env, parse_conversation_messages_path, parse_conversation_path,
-        parse_request, read_http_request, requires_operator_auth,
-        status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
-        HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource, SupabaseSyncStatus,
-        AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
-        DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV, LEGACY_DATABASE_URL_ENV,
-        LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
+        deploy_fingerprint_from_env, handle_connection, job_async_payload,
+        migration_database_url_from_values, now_unix_seconds, operator_auth_mode_from_env,
+        operator_auth_startup_config_error, operator_auth_token_from_env,
+        parse_conversation_messages_path, parse_conversation_path, parse_request,
+        read_http_request, requires_operator_auth, status_snapshot_with_deploy_fingerprint,
+        trust_grade, trust_grade_badge, HttpRequestReadError, OperatorAuthMode, OperatorPage,
+        StorageSource, SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
+        CONTROL_PLANE_LOGO_PATH, DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV,
+        LEGACY_DATABASE_URL_ENV, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
     use crate::contracts::{
         AgentRegistration, AgentState, Backend, Heartbeat, JobCompletion, JobExecutionMode,
@@ -7599,6 +7695,70 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("legacy Supabase mirror path")));
+    }
+
+    #[test]
+    fn migration_database_url_prefers_direct_managed_url() {
+        let selected = migration_database_url_from_values(
+            Some(" postgresql://admin@db.example/mundusx "),
+            Some("postgresql://app@pool.example/mundusx"),
+            Some("postgresql://legacy@example/postgres"),
+        )
+        .expect("migration url")
+        .expect("configured url");
+
+        assert_eq!(selected.env_var, DATABASE_DIRECT_URL_ENV);
+        assert_eq!(selected.url, "postgresql://admin@db.example/mundusx");
+        assert!(!selected.legacy);
+    }
+
+    #[test]
+    fn migration_database_url_falls_back_to_legacy_database_url() {
+        let selected = migration_database_url_from_values(
+            None,
+            Some("postgresql://app@pool.example/mundusx"),
+            Some(" postgresql://legacy@example/postgres "),
+        )
+        .expect("migration url")
+        .expect("configured url");
+
+        assert_eq!(selected.env_var, LEGACY_DATABASE_URL_ENV);
+        assert_eq!(selected.url, "postgresql://legacy@example/postgres");
+        assert!(selected.legacy);
+    }
+
+    #[test]
+    fn migration_database_url_rejects_pooled_runtime_url() {
+        let error = migration_database_url_from_values(
+            Some("postgresql://app@pool.example/mundusx"),
+            Some("postgresql://app@pool.example/mundusx"),
+            None,
+        )
+        .expect_err("pooled URL should be rejected");
+
+        assert!(error.contains(DATABASE_DIRECT_URL_ENV));
+        assert!(error.contains(DATABASE_POOL_URL_ENV));
+    }
+
+    #[test]
+    fn migration_database_url_rejects_detectable_pgbouncer_url() {
+        let error = migration_database_url_from_values(
+            Some("postgresql://migration@pgbouncer.example/mundusx"),
+            None,
+            None,
+        )
+        .expect_err("PgBouncer URL should be rejected");
+
+        assert!(error.contains("PgBouncer"));
+        assert!(error.contains(DATABASE_DIRECT_URL_ENV));
+    }
+
+    #[test]
+    fn migration_database_url_reports_missing_configuration() {
+        let selected =
+            migration_database_url_from_values(Some(" "), Some(" "), None).expect("migration url");
+
+        assert!(selected.is_none());
     }
 
     #[test]

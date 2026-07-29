@@ -13,7 +13,8 @@ The control plane already has two separate persistence paths:
 - Runtime mirroring and restore use `apps/control-plane/src/supabase.rs`, which
   talks to Supabase PostgREST over HTTPS with `SUPABASE_SERVICE_ROLE_KEY`.
 - Schema migrations use `apps/control-plane/src/migrations.rs`, which connects
-  directly with the Rust `postgres` crate through `DATABASE_URL`.
+  directly with the Rust `postgres` crate through `MUNDUSX_DATABASE_URL`, with
+  `DATABASE_URL` accepted as a temporary legacy alias.
 
 The highest-risk replacement work is not generic PostgreSQL compatibility. The
 schema is mostly plain PostgreSQL. The risky pieces are the Supabase REST/Data
@@ -34,12 +35,28 @@ Supabase pooler as the primary database connection.
 | `apps/control-plane/src/main.rs` | `/health` emits `storage_source`, `supabase`, and `supabase_sync`. `/v1/status` embeds `storage_source` through state snapshots. | Operator API contract | #242 |
 | `apps/control-plane/src/state.rs` | `snapshot(storage_source)` stores the caller-provided storage source string; tests include `"supabase"` expectations. | Plain runtime state with storage label | #242, #246 |
 | `apps/control-plane/src/contracts.rs` | `ControlPlaneSnapshot.storage_source` is a generic string field, not Supabase-specific. | Plain contract-compatible | #242 |
-| `apps/control-plane/src/migrations.rs` | Uses `postgres`, `postgres-native-tls`, `schema_migrations`, and `DATABASE_URL`. Reads SQL from `supabase/schema.sql` and `supabase/migrations`. | Plain PostgreSQL runtime with Supabase path naming | #244 |
+| `apps/control-plane/src/migrations.rs` | Uses `postgres`, `postgres-native-tls`, `schema_migrations`, and direct migration URLs. Reads canonical SQL from `db/schema.sql` and `db/migrations`, with legacy `supabase/` fallback. | Plain PostgreSQL-compatible migration flow | #244 |
 | `apps/control-plane/Cargo.toml` | Already depends on `postgres` and `postgres-native-tls` for migrations. | Plain PostgreSQL-compatible | #244 |
 
 ## Schema And Migration Inventory
 
-Current migration files live under `supabase/`:
+Canonical managed PostgreSQL migration files live under `db/`:
+
+- `db/schema.sql`
+- `db/migrations/0001_rls.sql`
+- `db/migrations/0002_graph_credit_ledger.sql`
+- `db/migrations/0002_job_execution_payload.sql`
+- `db/migrations/0003_identity_trust_path.sql`
+- `db/migrations/0004_sync_keys.sql`
+- `db/migrations/0005_node_policy_overrides.sql`
+- `db/migrations/0005_worker_health.sql`
+- `db/migrations/0006_job_planning.sql`
+- `db/migrations/0007_job_graphs.sql`
+- `db/migrations/0008_repair_node_policy_columns.sql`
+- `db/migrations/0009_reload_rest_schema_cache.sql`
+- `db/migrations/0010_chat_conversations.sql`
+
+Legacy Supabase migration files remain under `supabase/` during parity work:
 
 - `supabase/schema.sql`
 - `supabase/migrations/0001_rls.sql`
@@ -132,10 +149,10 @@ Most write calls depend on PostgREST upsert semantics using `Prefer` and
 | `MUNDUSX_AUTH_DISABLED` | Local/UAT auth-disable flag. | Not a Supabase dependency. |
 | `MUNDUSX_CONTROL_PLANE_HOST` and `PORT` | Server bind configuration. | Not a Supabase dependency. |
 
-The current README tells operators to use the Supabase pooler URI for
-`DATABASE_URL`. That conflicts with the new target rule that migrations/admin
-tasks should use a direct PostgreSQL connection and app traffic should use
-PgBouncer.
+The managed migration path now uses `MUNDUSX_DATABASE_URL` for direct
+PostgreSQL migrations/admin work, with `DATABASE_URL` retained as a temporary
+legacy direct-connection alias. App traffic should use PgBouncer through
+`MUNDUSX_DATABASE_POOL_URL`.
 
 ## Dashboard And Operator Surface Inventory
 
@@ -168,14 +185,16 @@ has landed.
 2. Rename health/status fields or add generic database health fields before
    removing old `supabase` fields (#242).
 3. Keep migrations on direct PostgreSQL and reject pooled URLs where practical
-   (#244).
+   (#244). Portable schema files now live under `db/`; `supabase/` is legacy
+   compatibility during the migration.
 4. Replace PostgREST mirror calls with SQL operations behind a plain Postgres
    backend (#243).
 5. Decide whether to keep PostgreSQL RLS as defense in depth and create
    MundusX-owned roles/grants instead of Supabase `anon`/`authenticated` roles
    (#241/#244).
-6. Remove or skip `notify pgrst, 'reload schema'` unless PostgREST remains an
-   explicit deployment component (#244/#246).
+6. Keep `notify pgrst, 'reload schema'` only in the legacy Supabase copy;
+   managed PostgreSQL migrations skip it because PostgREST is not part of the
+   target service (#244/#246).
 7. Validate UAT health/status, register, heartbeat, job submit, claim,
    complete/fail, polling, scheduler state, credits, and dashboard surfaces on
    the managed Postgres path (#245).

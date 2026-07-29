@@ -6,7 +6,8 @@ This private repository contains the operator-owned control-plane surface:
 
 - `apps/control-plane/` - scheduler, routing, auth, and job management
 - `apps/dashboard/` - operator web UI
-- `supabase/` - company-side schema and migrations
+- `db/` - managed PostgreSQL schema and portable migrations
+- `supabase/` - legacy Supabase schema and migrations retained during migration
 - `tools/` - shared macOS identity helpers used by the operator surface
 
 The public contributor-facing code lives in the separate open-source repo.
@@ -25,11 +26,11 @@ For the complete cross-repo setup path from local control-plane startup to CLI/n
 | Variable | Required | Description |
 |---|---|---|
 | `PORT` | **Yes** | Port the server binds on (`0.0.0.0:PORT`). Must be set in production (Railway injects it but you must confirm it's present). Without it the server falls back to `127.0.0.1:8787` (loopback only). |
-| `DATABASE_URL` | **Yes** | Supabase Postgres connection string. Used for migrations and state persistence. Find it in Supabase → Settings → Database → Connection string (use the pooler URI). |
-| `MUNDUSX_DATABASE_URL` | Future managed database mode | Direct PostgreSQL URL for migrations, schema checks, admin repair, and backup/restore tooling. Do not point this at PgBouncer. |
+| `MUNDUSX_DATABASE_URL` | Managed database mode | Direct PostgreSQL URL for migrations, schema checks, admin repair, and backup/restore tooling. Do not point this at PgBouncer. |
 | `MUNDUSX_DATABASE_POOL_URL` | Future managed database mode | PgBouncer pooled runtime URL for control-plane application traffic. Do not use this for migrations. |
 | `MUNDUSX_DATABASE_POOL_MODE` | No | Expected PgBouncer mode for health/status reporting. Defaults to `transaction`. |
 | `MUNDUSX_DATABASE_TLS_MODE` | No | Expected database TLS mode for health/status reporting. Defaults to `require`. |
+| `DATABASE_URL` | Legacy compatibility only | Temporary direct PostgreSQL migration alias accepted when `MUNDUSX_DATABASE_URL` is absent. Do not set it to the PgBouncer pool URL. |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Yes** | Supabase service role key. Find it in Supabase → Settings → API → `service_role`. |
 | `SUPABASE_URL` | No | Supabase project URL (e.g. `https://xxx.supabase.co`). Derived automatically from `DATABASE_URL` if omitted. |
 | `MUNDUSX_OPERATOR_TOKEN` | **Strongly recommended** | Bearer token protecting the dashboard (`/`), status, nodes, jobs, credits, and job-submit endpoints. If unset, those endpoints are publicly accessible with no authentication. |
@@ -44,14 +45,14 @@ Create a `.env` file at the repo root (never commit it):
 
 ```
 PORT=8787
-DATABASE_URL=postgresql://postgres.your-ref:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-SUPABASE_URL=https://your-ref.supabase.co
-# Future managed Postgres/PgBouncer mode:
-# MUNDUSX_DATABASE_URL=postgresql://migration-user:password@postgres.example.com:5432/mundusx
-# MUNDUSX_DATABASE_POOL_URL=postgresql://app-user:password@pgbouncer.example.com:6432/mundusx
-# MUNDUSX_DATABASE_POOL_MODE=transaction
-# MUNDUSX_DATABASE_TLS_MODE=require
+MUNDUSX_DATABASE_URL=postgresql://migration-user:password@postgres.example.com:5432/mundusx
+MUNDUSX_DATABASE_POOL_URL=postgresql://app-user:password@pgbouncer.example.com:6432/mundusx
+MUNDUSX_DATABASE_POOL_MODE=transaction
+MUNDUSX_DATABASE_TLS_MODE=require
+# Legacy Supabase mirror mode during migration:
+# DATABASE_URL=postgresql://postgres.your-ref:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
+# SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+# SUPABASE_URL=https://your-ref.supabase.co
 MUNDUSX_OPERATOR_TOKEN=a-strong-random-secret
 MUNDUSX_ENVIRONMENT=local
 # Local/UAT smoke tests only:
@@ -68,7 +69,10 @@ MUNDUSX_ENVIRONMENT=local
    ```
    ./control-plane migrate
    ```
-   You can do this as a Railway one-off job or from a local machine with `DATABASE_URL` set.
+   Run this with `MUNDUSX_DATABASE_URL` set to the direct PostgreSQL URL. The
+   command refuses a URL that matches `MUNDUSX_DATABASE_POOL_URL`; migrations
+   must not run through PgBouncer. `DATABASE_URL` remains a temporary legacy
+   direct-connection alias during the Supabase migration.
 4. The normal start command is just the binary with no arguments: `./control-plane`.
 
 ---

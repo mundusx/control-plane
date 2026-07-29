@@ -63,13 +63,13 @@ management and operational repair tasks must connect directly to PostgreSQL.
 | `MUNDUSX_DATABASE_POOL_URL` | Required for shared UAT/production runtime | Pooled runtime URL used by the control-plane process for node, job, scheduler, credit, chat, and dashboard state. | PgBouncer |
 | `MUNDUSX_DATABASE_POOL_MODE` | Recommended | Documents the expected PgBouncer mode. Default target is `transaction`. | Runtime config |
 | `MUNDUSX_DATABASE_TLS_MODE` | Recommended | Documents TLS behavior such as `require`, `verify-full`, or local-only relaxed mode. | Runtime and admin |
-| `DATABASE_URL` | Legacy compatibility only | Existing migration code reads this today. The config implementation should either map it intentionally or reject ambiguous legacy use in managed mode. | Legacy |
+| `DATABASE_URL` | Legacy compatibility only | Temporary direct PostgreSQL migration alias accepted only when `MUNDUSX_DATABASE_URL` is absent. It must not point at PgBouncer. | Legacy |
 | `SUPABASE_URL` | Legacy only | Supabase PostgREST URL. Not part of the target managed database path. | Legacy |
 | `SUPABASE_SERVICE_ROLE_KEY` | Legacy only | Supabase PostgREST service-role key. Not part of the target managed database path. | Legacy |
 
-The next config task should decide whether `DATABASE_URL` remains accepted as a
-temporary alias for `MUNDUSX_DATABASE_URL`. It should not silently mean both
-direct migration traffic and pooled runtime traffic.
+`DATABASE_URL` must not silently mean both direct migration traffic and pooled
+runtime traffic. Managed database deployments should set
+`MUNDUSX_DATABASE_URL` and reserve `DATABASE_URL` for legacy compatibility only.
 
 ## PgBouncer Policy
 
@@ -156,9 +156,11 @@ Required migration behavior:
 - Keep migrations idempotent where practical.
 - Keep rollback notes for destructive or irreversible changes.
 
-The current `supabase/` directory contains mostly portable SQL. Follow-up #244
-should decide whether to rename that directory, split legacy Supabase files from
-portable PostgreSQL migrations, and remove the PostgREST schema-cache reload.
+Portable PostgreSQL schema ownership lives under `db/`. The legacy `supabase/`
+directory is retained during migration for compatibility and history. The
+managed PostgreSQL migration path intentionally treats the old PostgREST
+schema-cache reload as a no-op because PostgREST is not part of the target
+database service.
 
 ## Backups And Restore
 
