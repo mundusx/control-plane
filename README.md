@@ -26,6 +26,10 @@ For the complete cross-repo setup path from local control-plane startup to CLI/n
 |---|---|---|
 | `PORT` | **Yes** | Port the server binds on (`0.0.0.0:PORT`). Must be set in production (Railway injects it but you must confirm it's present). Without it the server falls back to `127.0.0.1:8787` (loopback only). |
 | `DATABASE_URL` | **Yes** | Supabase Postgres connection string. Used for migrations and state persistence. Find it in Supabase → Settings → Database → Connection string (use the pooler URI). |
+| `MUNDUSX_DATABASE_URL` | Future managed database mode | Direct PostgreSQL URL for migrations, schema checks, admin repair, and backup/restore tooling. Do not point this at PgBouncer. |
+| `MUNDUSX_DATABASE_POOL_URL` | Future managed database mode | PgBouncer pooled runtime URL for control-plane application traffic. Do not use this for migrations. |
+| `MUNDUSX_DATABASE_POOL_MODE` | No | Expected PgBouncer mode for health/status reporting. Defaults to `transaction`. |
+| `MUNDUSX_DATABASE_TLS_MODE` | No | Expected database TLS mode for health/status reporting. Defaults to `require`. |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Yes** | Supabase service role key. Find it in Supabase → Settings → API → `service_role`. |
 | `SUPABASE_URL` | No | Supabase project URL (e.g. `https://xxx.supabase.co`). Derived automatically from `DATABASE_URL` if omitted. |
 | `MUNDUSX_OPERATOR_TOKEN` | **Strongly recommended** | Bearer token protecting the dashboard (`/`), status, nodes, jobs, credits, and job-submit endpoints. If unset, those endpoints are publicly accessible with no authentication. |
@@ -43,6 +47,11 @@ PORT=8787
 DATABASE_URL=postgresql://postgres.your-ref:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 SUPABASE_URL=https://your-ref.supabase.co
+# Future managed Postgres/PgBouncer mode:
+# MUNDUSX_DATABASE_URL=postgresql://migration-user:password@postgres.example.com:5432/mundusx
+# MUNDUSX_DATABASE_POOL_URL=postgresql://app-user:password@pgbouncer.example.com:6432/mundusx
+# MUNDUSX_DATABASE_POOL_MODE=transaction
+# MUNDUSX_DATABASE_TLS_MODE=require
 MUNDUSX_OPERATOR_TOKEN=a-strong-random-secret
 MUNDUSX_ENVIRONMENT=local
 # Local/UAT smoke tests only:

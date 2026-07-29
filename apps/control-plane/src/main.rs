@@ -53,6 +53,11 @@ const OPERATOR_TOKEN_ENV: &str = "MUNDUSX_OPERATOR_TOKEN";
 const LEGACY_OPERATOR_TOKEN_ENV: &str = "OPENGPU_OPERATOR_TOKEN";
 const AUTH_DISABLED_ENV: &str = "MUNDUSX_AUTH_DISABLED";
 const CONTROL_PLANE_ENVIRONMENT_ENV: &str = "MUNDUSX_ENVIRONMENT";
+const DATABASE_DIRECT_URL_ENV: &str = "MUNDUSX_DATABASE_URL";
+const DATABASE_POOL_URL_ENV: &str = "MUNDUSX_DATABASE_POOL_URL";
+const DATABASE_POOL_MODE_ENV: &str = "MUNDUSX_DATABASE_POOL_MODE";
+const DATABASE_TLS_MODE_ENV: &str = "MUNDUSX_DATABASE_TLS_MODE";
+const LEGACY_DATABASE_URL_ENV: &str = "DATABASE_URL";
 const CONTROL_PLANE_LOGO_PATH: &str = "/assets/mundusx-logo.png";
 const CONTROL_PLANE_LOGO_PNG: &[u8] = include_bytes!("../assets/mundusx-logo.png");
 const DEFAULT_PAGE_SIZE: usize = 25;
@@ -149,6 +154,24 @@ impl StorageSource {
             Self::LocalJsonOnly => "local-json-only",
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct DatabaseEndpointStatus {
+    env_var: String,
+    configured: bool,
+    status: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct DatabaseHealthStatus {
+    storage_source: String,
+    runtime_pool: DatabaseEndpointStatus,
+    admin_direct: DatabaseEndpointStatus,
+    pool_mode: String,
+    tls_mode: String,
+    legacy_database_url_present: bool,
+    notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -4568,6 +4591,107 @@ fn legacy_operator_token_warning() -> Option<String> {
     }
 }
 
+fn configured_env_value(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
+fn database_health_from_env(storage_source: StorageSource) -> DatabaseHealthStatus {
+    database_health_from_values(
+        storage_source,
+        std::env::var(DATABASE_DIRECT_URL_ENV).ok().as_deref(),
+        std::env::var(DATABASE_POOL_URL_ENV).ok().as_deref(),
+        std::env::var(DATABASE_POOL_MODE_ENV).ok().as_deref(),
+        std::env::var(DATABASE_TLS_MODE_ENV).ok().as_deref(),
+        std::env::var(LEGACY_DATABASE_URL_ENV).ok().as_deref(),
+    )
+}
+
+fn database_health_from_values(
+    storage_source: StorageSource,
+    direct_url: Option<&str>,
+    pool_url: Option<&str>,
+    pool_mode: Option<&str>,
+    tls_mode: Option<&str>,
+    legacy_database_url: Option<&str>,
+) -> DatabaseHealthStatus {
+    let direct_configured = configured_env_value(direct_url);
+    let pool_configured = configured_env_value(pool_url);
+    let legacy_configured = configured_env_value(legacy_database_url);
+    let mut notes = Vec::new();
+
+    if legacy_configured && !direct_configured {
+        notes.push(format!(
+            "{LEGACY_DATABASE_URL_ENV} is present as a legacy direct database URL; prefer {DATABASE_DIRECT_URL_ENV} for managed database mode"
+        ));
+    }
+    if !pool_configured {
+        notes.push(format!(
+            "{DATABASE_POOL_URL_ENV} is not configured; managed Postgres runtime traffic is not using PgBouncer yet"
+        ));
+    }
+    if matches!(storage_source, StorageSource::Supabase) {
+        notes.push("runtime storage is still using the legacy Supabase mirror path".to_string());
+    }
+
+    let admin_direct = if direct_configured {
+        DatabaseEndpointStatus {
+            env_var: DATABASE_DIRECT_URL_ENV.to_string(),
+            configured: true,
+            status: "configured".to_string(),
+        }
+    } else if legacy_configured {
+        DatabaseEndpointStatus {
+            env_var: LEGACY_DATABASE_URL_ENV.to_string(),
+            configured: true,
+            status: "legacy-configured".to_string(),
+        }
+    } else {
+        DatabaseEndpointStatus {
+            env_var: DATABASE_DIRECT_URL_ENV.to_string(),
+            configured: false,
+            status: "unconfigured".to_string(),
+        }
+    };
+
+    let runtime_pool = if pool_configured {
+        DatabaseEndpointStatus {
+            env_var: DATABASE_POOL_URL_ENV.to_string(),
+            configured: true,
+            status: "configured".to_string(),
+        }
+    } else if matches!(storage_source, StorageSource::Supabase) {
+        DatabaseEndpointStatus {
+            env_var: DATABASE_POOL_URL_ENV.to_string(),
+            configured: false,
+            status: "legacy-supabase-runtime".to_string(),
+        }
+    } else {
+        DatabaseEndpointStatus {
+            env_var: DATABASE_POOL_URL_ENV.to_string(),
+            configured: false,
+            status: "unconfigured".to_string(),
+        }
+    };
+
+    DatabaseHealthStatus {
+        storage_source: storage_source.as_str().to_string(),
+        runtime_pool,
+        admin_direct,
+        pool_mode: pool_mode
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("transaction")
+            .to_ascii_lowercase(),
+        tls_mode: tls_mode
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("require")
+            .to_ascii_lowercase(),
+        legacy_database_url_present: legacy_configured,
+        notes,
+    }
+}
+
 fn authorize_operator_request(
     method: &str,
     route_path: &str,
@@ -4833,6 +4957,7 @@ fn handle_connection(
             let environment = control_plane_environment_from_env(
                 std::env::var(CONTROL_PLANE_ENVIRONMENT_ENV).ok().as_deref(),
             );
+            let database = database_health_from_env(storage_source);
             json_response(
                 "200 OK",
                 serde_json::json!({
@@ -4840,6 +4965,7 @@ fn handle_connection(
                     "storage_source": storage_source.as_str(),
                     "supabase": sync_snapshot.summary(),
                     "supabase_sync": sync_snapshot,
+                    "database": database,
                     "deploy_fingerprint": deploy_fingerprint,
                     "environment": environment,
                     "operator_auth_enforced": auth_mode.enforced(),
@@ -4859,10 +4985,16 @@ fn handle_connection(
             } else {
                 compact_status_snapshot(snapshot)
             };
-            json_response(
-                "200 OK",
-                status_snapshot_with_deploy_fingerprint(snapshot, deploy_fingerprint()),
-            )
+            let mut snapshot =
+                status_snapshot_with_deploy_fingerprint(snapshot, deploy_fingerprint());
+            if let serde_json::Value::Object(fields) = &mut snapshot {
+                fields.insert(
+                    "database".to_string(),
+                    serde_json::to_value(database_health_from_env(storage_source))
+                        .expect("database health json"),
+                );
+            }
+            json_response("200 OK", snapshot)
         }
         ("GET", "/v1/planner/status") => json_response(
             "200 OK",
@@ -5664,14 +5796,16 @@ fn main() {
 mod tests {
     use super::{
         auth_disabled_flag_enabled, completion_event_type, control_plane_bind_addr_from_env,
-        control_plane_home, control_plane_operator_page, deploy_fingerprint_from_env,
-        handle_connection, job_async_payload, now_unix_seconds, operator_auth_mode_from_env,
-        operator_auth_startup_config_error, operator_auth_token_from_env,
-        parse_conversation_messages_path, parse_conversation_path, parse_request,
-        read_http_request, requires_operator_auth, status_snapshot_with_deploy_fingerprint,
-        trust_grade, trust_grade_badge, HttpRequestReadError, OperatorAuthMode, OperatorPage,
-        StorageSource, SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
-        CONTROL_PLANE_LOGO_PATH, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
+        control_plane_home, control_plane_operator_page, database_health_from_values,
+        deploy_fingerprint_from_env, handle_connection, job_async_payload, now_unix_seconds,
+        operator_auth_mode_from_env, operator_auth_startup_config_error,
+        operator_auth_token_from_env, parse_conversation_messages_path, parse_conversation_path,
+        parse_request, read_http_request, requires_operator_auth,
+        status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
+        HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource, SupabaseSyncStatus,
+        AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
+        DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV, LEGACY_DATABASE_URL_ENV,
+        LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
     use crate::contracts::{
         AgentRegistration, AgentState, Backend, Heartbeat, JobCompletion, JobExecutionMode,
@@ -7402,6 +7536,69 @@ mod tests {
         assert!(readme.contains(OPERATOR_TOKEN_ENV));
         assert!(readme.contains(LEGACY_OPERATOR_TOKEN_ENV));
         assert!(readme.contains("Deprecated"));
+    }
+
+    #[test]
+    fn database_health_reports_managed_postgres_configuration() {
+        let health = database_health_from_values(
+            StorageSource::LocalJsonFallback,
+            Some("postgresql://admin@db.example/mundusx"),
+            Some("postgresql://app@pool.example/mundusx"),
+            Some("transaction"),
+            Some("verify-full"),
+            None,
+        );
+
+        assert_eq!(health.storage_source, "local-json-fallback");
+        assert!(health.runtime_pool.configured);
+        assert_eq!(health.runtime_pool.env_var, DATABASE_POOL_URL_ENV);
+        assert_eq!(health.runtime_pool.status, "configured");
+        assert!(health.admin_direct.configured);
+        assert_eq!(health.admin_direct.env_var, DATABASE_DIRECT_URL_ENV);
+        assert_eq!(health.admin_direct.status, "configured");
+        assert_eq!(health.pool_mode, "transaction");
+        assert_eq!(health.tls_mode, "verify-full");
+        assert!(!health.legacy_database_url_present);
+        assert!(health.notes.is_empty());
+    }
+
+    #[test]
+    fn database_health_reports_legacy_direct_database_url() {
+        let health = database_health_from_values(
+            StorageSource::LocalJsonOnly,
+            None,
+            None,
+            None,
+            None,
+            Some("postgresql://legacy@example/postgres"),
+        );
+
+        assert_eq!(health.admin_direct.env_var, LEGACY_DATABASE_URL_ENV);
+        assert!(health.admin_direct.configured);
+        assert_eq!(health.admin_direct.status, "legacy-configured");
+        assert!(!health.runtime_pool.configured);
+        assert_eq!(health.runtime_pool.status, "unconfigured");
+        assert_eq!(health.pool_mode, "transaction");
+        assert_eq!(health.tls_mode, "require");
+        assert!(health.legacy_database_url_present);
+        assert!(health
+            .notes
+            .iter()
+            .any(|note| note.contains(LEGACY_DATABASE_URL_ENV)));
+    }
+
+    #[test]
+    fn database_health_reports_supabase_runtime_without_pool() {
+        let health =
+            database_health_from_values(StorageSource::Supabase, None, None, None, None, None);
+
+        assert_eq!(health.storage_source, "supabase");
+        assert_eq!(health.runtime_pool.status, "legacy-supabase-runtime");
+        assert!(!health.runtime_pool.configured);
+        assert!(health
+            .notes
+            .iter()
+            .any(|note| note.contains("legacy Supabase mirror path")));
     }
 
     #[test]
