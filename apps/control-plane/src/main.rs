@@ -2693,6 +2693,17 @@ fn control_plane_operator_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title} - MundusX</title>
+    <script>
+      (() => {{
+        try {{
+          const saved = localStorage.getItem("ehda-theme");
+          const preferred = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.dataset.theme = saved === "light" || saved === "dark" ? saved : preferred;
+        }} catch (_) {{
+          document.documentElement.dataset.theme = "dark";
+        }}
+      }})();
+    </script>
     <style>
       :root {{ color-scheme: dark; --bg:#020711; --surface:#06101d; --line:rgba(73,159,255,.22); --line-strong:rgba(45,164,255,.48); --text:#f6fbff; --muted:#9baac0; --blue:#33a8ff; }}
       * {{ box-sizing: border-box; }}
@@ -2773,6 +2784,78 @@ fn control_plane_operator_page(
       .operator .meta {{ overflow-wrap:anywhere; word-break:break-word; line-height:1.35; }}
       .avatar {{ width:42px; height:42px; flex:0 0 42px; border-radius:12px; background:linear-gradient(135deg,#14539e,#071f3c); display:grid; place-items:center; font-weight:700; }}
       .foot {{ color:var(--muted); font-size:12px; margin-top:22px; overflow-wrap:anywhere; }}
+      html[data-theme="light"] {{
+        color-scheme: light;
+        --bg:#f7f9fc;
+        --surface:#ffffff;
+        --line:rgba(117,134,155,.22);
+        --line-strong:rgba(18,109,255,.48);
+        --text:#111827;
+        --muted:#687386;
+        --blue:#126dff;
+      }}
+      html[data-theme="light"] body {{
+        background:radial-gradient(circle at 72% 0%,rgba(32,108,255,.035),transparent 32%),linear-gradient(135deg,#ffffff 0%,#fafbfe 58%,#f4f7fb 100%);
+      }}
+      html[data-theme="light"] .sidebar {{
+        border-right-color:#dfe5ec;
+        background:rgba(255,255,255,.94);
+      }}
+      html[data-theme="light"] .brand,
+      html[data-theme="light"] h1,
+      html[data-theme="light"] h2 {{
+        color:#111827;
+      }}
+      html[data-theme="light"] .nav-item {{ color:#344054; }}
+      html[data-theme="light"] .nav-item:hover,
+      html[data-theme="light"] .nav-item:focus-visible {{
+        color:#075fd8;
+        background:rgba(18,109,255,.06);
+      }}
+      html[data-theme="light"] .nav-item.active {{
+        color:#075fd8;
+        border-color:rgba(18,109,255,.24);
+        background:linear-gradient(90deg,rgba(18,109,255,.1),rgba(18,109,255,.035));
+        box-shadow:none;
+      }}
+      html[data-theme="light"] .metric,
+      html[data-theme="light"] .panel,
+      html[data-theme="light"] .node-profile-card,
+      html[data-theme="light"] .side-card {{
+        border-color:#dfe5ec;
+        background:rgba(255,255,255,.96);
+        box-shadow:0 6px 20px rgba(16,24,40,.055);
+      }}
+      html[data-theme="light"] .metric-link:hover,
+      html[data-theme="light"] .metric-link:focus-visible {{
+        border-color:rgba(18,109,255,.34);
+        background:#ffffff;
+        box-shadow:0 12px 28px rgba(16,24,40,.08);
+      }}
+      html[data-theme="light"] .button {{
+        border-color:#dfe5ec;
+        background:rgba(255,255,255,.94);
+        color:#111827;
+      }}
+      html[data-theme="light"] .button.primary {{
+        border-color:rgba(18,109,255,.42);
+        background:rgba(18,109,255,.1);
+        color:#075fd8;
+      }}
+      html[data-theme="light"] input,
+      html[data-theme="light"] select {{
+        border-color:#dfe5ec;
+        background:#ffffff;
+        color:#111827;
+      }}
+      html[data-theme="light"] .check {{ color:#344054; }}
+      html[data-theme="light"] .inline-link {{ color:#075fd8; }}
+      html[data-theme="light"] .inline-link:hover,
+      html[data-theme="light"] .inline-link:focus-visible {{ color:#064da8; }}
+      html[data-theme="light"] .avatar {{
+        background:linear-gradient(135deg,#dbeafe,#eef4ff);
+        color:#075fd8;
+      }}
       @media (max-width: 900px) {{ .shell {{ grid-template-columns:1fr; }} .sidebar {{ position:relative; height:auto; }} .sidebar-bottom {{ display:none; }} .toolbar,.grid.four,.grid.two,.node-profile-grid,.profile-sections,.profile-kv {{ grid-template-columns:1fr; }} .profile-head {{ flex-direction:column; }} .pager {{ align-items:stretch; flex-direction:column; }} .pager-actions {{ display:grid; grid-template-columns:1fr 1fr; }} main {{ padding:22px; }} }}
       @media (prefers-reduced-motion: reduce) {{ *,*::before,*::after {{ animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; transition-duration:.01ms!important; }} .motion-lift:hover,.motion-lift:focus-visible,.motion-glow:hover,.motion-glow:focus-visible {{ transform:none; }} }}
     </style>
@@ -6686,6 +6769,24 @@ mod tests {
         assert!(!html.contains("Node Details"));
         assert!(!html.contains("Signed registry snapshot"));
         assert!(!html.contains("Control Plane</div></div></div>"));
+    }
+
+    #[test]
+    fn operator_pages_use_the_persisted_overview_theme() {
+        let state = ControlPlaneState::default();
+        let html = control_plane_operator_page(
+            &state,
+            StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+            OperatorPage::Nodes,
+            None,
+        );
+
+        assert!(html.contains(r#"localStorage.getItem("ehda-theme")"#));
+        assert!(html.contains(r#"document.documentElement.dataset.theme"#));
+        assert!(html.contains(r#"html[data-theme="light"] body"#));
+        assert!(html.contains(r#"html[data-theme="light"] .sidebar"#));
+        assert!(html.contains(r#"html[data-theme="light"] .metric"#));
     }
 
     #[test]
