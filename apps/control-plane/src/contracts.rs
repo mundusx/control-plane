@@ -424,6 +424,95 @@ pub enum JobResultVerificationStatus {
     FallbackNeeded,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultArtifactKind {
+    Text,
+    Code,
+    Patch,
+    Command,
+    TestReport,
+    StructuredData,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SynthesisStatus {
+    Collecting,
+    Reducing,
+    Synthesizing,
+    Validating,
+    CompletedPartial,
+    Completed,
+    Failed,
+}
+
+impl Default for SynthesisStatus {
+    fn default() -> Self {
+        Self::Collecting
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ResultArtifact {
+    pub artifact_id: String,
+    pub result_node_id: String,
+    pub sequence: u32,
+    pub kind: ResultArtifactKind,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    pub media_type: String,
+    pub content: String,
+    pub byte_size: usize,
+    pub checksum_sha256: String,
+    #[serde(default)]
+    pub base_checksum_sha256: Option<String>,
+    pub verification_status: JobResultVerificationStatus,
+    #[serde(default)]
+    pub verification_reason: Option<String>,
+    #[serde(default)]
+    pub source_worker_id: Option<String>,
+    #[serde(default)]
+    pub source_node_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactBatch {
+    pub batch_id: String,
+    pub sequence: u32,
+    pub artifact_ids: Vec<String>,
+    pub byte_size: usize,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactConflict {
+    pub path: String,
+    pub artifact_ids: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SynthesisManifest {
+    pub version: u32,
+    pub manifest_id: String,
+    pub status: SynthesisStatus,
+    pub artifacts: Vec<ResultArtifact>,
+    pub batches: Vec<ArtifactBatch>,
+    #[serde(default)]
+    pub conflicts: Vec<ArtifactConflict>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub omitted_dependency_ids: Vec<String>,
+    #[serde(default)]
+    pub final_text: Option<String>,
+    pub complete: bool,
+    pub checksum_sha256: String,
+}
+
 impl Default for JobResultVerificationStatus {
     fn default() -> Self {
         Self::Accepted
@@ -522,6 +611,8 @@ pub struct JobResultRecord {
     pub verification_status: JobResultVerificationStatus,
     #[serde(default)]
     pub verification_reason: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<ResultArtifact>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -537,6 +628,10 @@ pub struct JobGraph {
     pub final_output: Option<String>,
     #[serde(default)]
     pub merge_error: Option<String>,
+    #[serde(default)]
+    pub synthesis_status: SynthesisStatus,
+    #[serde(default)]
+    pub final_manifest: Option<SynthesisManifest>,
     pub final_node_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -553,6 +648,8 @@ impl Default for JobGraph {
             results: Vec::new(),
             final_output: None,
             merge_error: None,
+            synthesis_status: SynthesisStatus::Collecting,
+            final_manifest: None,
             final_node_id: None,
             created_at: String::new(),
             updated_at: String::new(),

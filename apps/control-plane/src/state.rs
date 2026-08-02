@@ -1,15 +1,17 @@
 use crate::contracts::{
     is_trusted_identity_path, AdmissionPolicy, AdmissionPolicyUpdate, AgentRegistration,
-    AgentState, Backend, ContextSize, ControlPlaneSnapshot, CreditsLedgerRecord,
-    ExpectedOutputFormat, FallbackDecision, FallbackDecisionStatus, FallbackPolicy, Heartbeat,
-    JobClaimResponse, JobCompletion, JobEventRecord, JobExecutionMode, JobGraph, JobGraphNode,
-    JobGraphNodeStatus, JobGraphStatus, JobPlan, JobRecord, JobRequest, JobResultRecord,
-    JobResultVerificationStatus, JobSchedulingRequirements, JobStatus, NodePolicyOverride,
-    NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, NodeRole, NodeTrustRecord,
-    PlannedJob, PrivacyLevel, RequestClassification, RequestComplexity, RequestTaskType,
-    RuntimeMode, SchedulerDecision, ToolRewardRequest, WorkerHealthReport,
+    AgentState, ArtifactBatch, ArtifactConflict, Backend, ContextSize, ControlPlaneSnapshot,
+    CreditsLedgerRecord, ExpectedOutputFormat, FallbackDecision, FallbackDecisionStatus,
+    FallbackPolicy, Heartbeat, JobClaimResponse, JobCompletion, JobEventRecord, JobExecutionMode,
+    JobGraph, JobGraphNode, JobGraphNodeStatus, JobGraphStatus, JobPlan, JobRecord, JobRequest,
+    JobResultRecord, JobResultVerificationStatus, JobSchedulingRequirements, JobStatus,
+    NodePolicyOverride, NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, NodeRole,
+    NodeTrustRecord, PlannedJob, PrivacyLevel, RequestClassification, RequestComplexity,
+    RequestTaskType, ResultArtifact, ResultArtifactKind, RuntimeMode, SchedulerDecision,
+    SynthesisManifest, SynthesisStatus, ToolRewardRequest, WorkerHealthReport,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +25,8 @@ const DEFAULT_NODE_HEARTBEAT_STALE_SECONDS: u64 = 60;
 const REDUCER_SECTION_CHARS_COMPACT: usize = 1_200;
 const REDUCER_SECTION_CHARS_STANDARD: usize = 4_000;
 const REDUCER_SECTION_CHARS_STRONG: usize = 6_000;
+const ARTIFACT_BATCH_MAX_BYTES: usize = 64 * 1024;
+const ARTIFACT_BATCH_MAX_ITEMS: usize = 20;
 const GRAPH_NODE_LEASE_SECONDS_ENV: &str = "MUNDUSX_GRAPH_NODE_LEASE_SECONDS";
 const QUEUED_JOB_TIMEOUT_SECONDS_ENV: &str = "MUNDUSX_QUEUED_JOB_TIMEOUT_SECONDS";
 const CRITICAL_ROLE_WAIT_SECONDS_ENV: &str = "MUNDUSX_CRITICAL_ROLE_WAIT_SECONDS";
@@ -2774,22 +2778,49 @@ fn graph_node_execution_prompt(
         let max_section_chars = assigned_node
             .map(reducer_section_char_limit)
             .unwrap_or(REDUCER_SECTION_CHARS_STANDARD);
-        let sections = job
-            .graph
-            .nodes
+        let sections = node
+            .depends_on
             .iter()
-            .filter(|candidate| candidate.id != node.id)
-            .filter_map(|candidate| {
-                candidate.output.as_ref().map(|output| {
-                    format!(
-                        "## {}\n{}",
-                        candidate.name,
-                        reducer_section_text_with_limit(output, max_section_chars)
-                    )
+            .filter_map(|dependency_id| {
+                job.graph.results.iter().find(|result| {
+                    result.node_id == *dependency_id
+                        && result.status == JobGraphNodeStatus::Completed
+                        && result.verification_status == JobResultVerificationStatus::Accepted
                 })
+            })
+            .map(|result| {
+                let artifact_refs = result
+                    .artifacts
+                    .iter()
+                    .map(|artifact| {
+                        format!(
+                            "{}:{}:{}",
+                            artifact.artifact_id,
+                            artifact.path.as_deref().unwrap_or("inline"),
+                            artifact.checksum_sha256
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "## {} [{}]\n{}",
+                    result.name,
+                    artifact_refs,
+                    reducer_section_text_with_limit(
+                        result.output.as_deref().unwrap_or_default(),
+                        max_section_chars
+                    )
+                )
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+
+        if job.classification.task_type == RequestTaskType::Coding {
+            return format!(
+                "Original user request:\n{}\n\nCompleted section notes and accepted dependency artifacts, in required order:\n{}\n\nWrite one accurate, coherent final answer as a complete implementation result. Preserve every required accepted artifact and reconcile names and interfaces across work units. Return explanatory text only when needed, then return each file change as its own fenced unified diff block using workspace-relative a/path and b/path headers. Return shell commands only in separate fenced shell blocks. Never combine two target files into an unlabeled code block, never silently choose between conflicting edits, never truncate a file or patch, and never claim completion when a required artifact is missing. If two accepted artifacts conflict, state the conflict explicitly before the affected patch blocks.",
+                job.prompt, sections
+            );
+        }
 
         return format!(
             "Original user request:\n{}\n\nCompleted section notes:\n{}\n\nWrite one accurate, coherent final answer. Preserve the requested section order and every relevant, nonduplicated fact or detail from the completed notes; do not shorten the answer into a highlights summary. Use plain-text section titles without # Markdown markers. Resolve contradictions in favor of well-established facts, remove only genuine duplication, ignore repeated instructions or boilerplate, omit uncertain claims, and finish every sentence. Return only the final answer.",
@@ -4122,6 +4153,8 @@ pub fn build_job_graph(request_id: &str, plan: &JobPlan, created_at: &str) -> Jo
         results: Vec::new(),
         final_output: None,
         merge_error: None,
+        synthesis_status: SynthesisStatus::Collecting,
+        final_manifest: None,
         created_at: created_at.to_string(),
         updated_at: created_at.to_string(),
     };
@@ -4279,6 +4312,8 @@ fn refresh_graph_results(
         .map(|node| {
             let (verification_status, verification_reason) =
                 verify_graph_result(node, expected_format);
+            let artifacts =
+                extract_result_artifacts(node, verification_status, verification_reason.as_deref());
             JobResultRecord {
                 node_id: node.id.clone(),
                 name: node.name.clone(),
@@ -4302,6 +4337,7 @@ fn refresh_graph_results(
                 estimated_output_tokens: node.estimated_output_tokens,
                 verification_status,
                 verification_reason,
+                artifacts,
             }
         })
         .collect();
@@ -4315,6 +4351,287 @@ fn refresh_graph_results(
         }
         graph.status = JobGraphStatus::Failed;
     }
+    graph.synthesis_status = synthesis_status_for_graph(graph);
+    graph.final_manifest = Some(build_synthesis_manifest(graph));
+}
+
+fn synthesis_status_for_graph(graph: &JobGraph) -> SynthesisStatus {
+    if graph.status == JobGraphStatus::Failed {
+        return SynthesisStatus::Failed;
+    }
+    let final_completed = graph.final_node_id.as_deref().is_some_and(|final_id| {
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.id == final_id && node.status == JobGraphNodeStatus::Completed)
+    });
+    if graph.status == JobGraphStatus::Completed {
+        return if final_completed && graph.merge_error.is_none() {
+            SynthesisStatus::Completed
+        } else {
+            SynthesisStatus::CompletedPartial
+        };
+    }
+    let active = graph.nodes.iter().find(|node| {
+        matches!(
+            node.status,
+            JobGraphNodeStatus::Ready | JobGraphNodeStatus::Running
+        )
+    });
+    match active.map(|node| node.responsibility.as_str()) {
+        Some("merge" | "synthesize") => SynthesisStatus::Synthesizing,
+        Some("reduce") => SynthesisStatus::Reducing,
+        _ => SynthesisStatus::Collecting,
+    }
+}
+
+fn extract_result_artifacts(
+    node: &JobGraphNode,
+    verification_status: JobResultVerificationStatus,
+    verification_reason: Option<&str>,
+) -> Vec<ResultArtifact> {
+    let Some(output) = node
+        .output
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+    let blocks = fenced_output_blocks(output);
+    let values = if blocks.is_empty() {
+        vec![("text".to_string(), output.to_string())]
+    } else {
+        blocks
+    };
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, (language, content))| {
+            let kind = artifact_kind_for_language(&language);
+            let path = artifact_path(kind, &content);
+            let media_type = artifact_media_type(kind, &language).to_string();
+            let checksum_sha256 = sha256_hex(content.as_bytes());
+            ResultArtifact {
+                artifact_id: format!("{}-{:04}-{}", node.id, index + 1, &checksum_sha256[..12]),
+                result_node_id: node.id.clone(),
+                sequence: index as u32,
+                kind,
+                path,
+                language: (!language.is_empty() && language != "text").then_some(language),
+                media_type,
+                byte_size: content.len(),
+                content,
+                checksum_sha256,
+                base_checksum_sha256: None,
+                verification_status,
+                verification_reason: verification_reason.map(str::to_string),
+                source_worker_id: node.worker_id.clone(),
+                source_node_id: node.assigned_node_id.clone(),
+            }
+        })
+        .collect()
+}
+
+fn fenced_output_blocks(output: &str) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let mut language: Option<String> = None;
+    let mut content = Vec::new();
+    for line in output.lines() {
+        if let Some(fence) = line.trim_start().strip_prefix("```") {
+            if let Some(open_language) = language.take() {
+                blocks.push((open_language, content.join("\n").trim().to_string()));
+                content.clear();
+            } else {
+                language = Some(fence.trim().to_ascii_lowercase());
+            }
+            continue;
+        }
+        if language.is_some() {
+            content.push(line);
+        }
+    }
+    if let Some(open_language) = language {
+        if !content.is_empty() {
+            blocks.push((open_language, content.join("\n").trim().to_string()));
+        }
+    }
+    blocks.retain(|(_, content)| !content.is_empty());
+    blocks
+}
+
+fn artifact_kind_for_language(language: &str) -> ResultArtifactKind {
+    match language {
+        "diff" | "patch" => ResultArtifactKind::Patch,
+        "sh" | "bash" | "shell" | "powershell" | "ps1" | "terminal" => ResultArtifactKind::Command,
+        "json" => ResultArtifactKind::StructuredData,
+        "test" | "tests" | "tap" | "junit" => ResultArtifactKind::TestReport,
+        "" | "text" | "txt" | "markdown" | "md" => ResultArtifactKind::Text,
+        _ => ResultArtifactKind::Code,
+    }
+}
+
+fn artifact_media_type(kind: ResultArtifactKind, language: &str) -> &'static str {
+    match kind {
+        ResultArtifactKind::Patch => "text/x-diff",
+        ResultArtifactKind::Command => "text/x-shellscript",
+        ResultArtifactKind::StructuredData => "application/json",
+        ResultArtifactKind::TestReport => "text/plain",
+        ResultArtifactKind::Code => match language {
+            "typescript" | "ts" | "tsx" => "text/typescript",
+            "javascript" | "js" | "jsx" => "text/javascript",
+            "python" | "py" => "text/x-python",
+            "rust" | "rs" => "text/x-rust",
+            _ => "text/plain",
+        },
+        ResultArtifactKind::Text => "text/plain",
+    }
+}
+
+fn artifact_path(kind: ResultArtifactKind, content: &str) -> Option<String> {
+    if kind != ResultArtifactKind::Patch {
+        return None;
+    }
+    content.lines().find_map(|line| {
+        let value = line.strip_prefix("+++ ")?.trim();
+        if value == "/dev/null" {
+            return None;
+        }
+        let normalized = value.strip_prefix("b/").unwrap_or(value);
+        safe_artifact_path(normalized).then(|| normalized.to_string())
+    })
+}
+
+fn safe_artifact_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && !path.contains("../")
+        && !path.contains("..\\")
+        && !path.split(['/', '\\']).any(|part| part == "..")
+        && !path.chars().nth(1).is_some_and(|value| value == ':')
+}
+
+fn build_synthesis_manifest(graph: &JobGraph) -> SynthesisManifest {
+    let artifacts = graph
+        .results
+        .iter()
+        .filter(|result| result.verification_status == JobResultVerificationStatus::Accepted)
+        .flat_map(|result| result.artifacts.clone())
+        .collect::<Vec<_>>();
+    let conflicts = artifact_conflicts(&artifacts);
+    let batches = artifact_batches(&graph.graph_id, &artifacts);
+    let omitted_dependency_ids = graph
+        .nodes
+        .iter()
+        .filter(|node| node.status == JobGraphNodeStatus::Failed)
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    if !conflicts.is_empty() {
+        warnings.push("Conflicting artifacts require client review before apply.".to_string());
+    }
+    if !omitted_dependency_ids.is_empty() {
+        warnings
+            .push("One or more graph dependencies did not produce an accepted result.".to_string());
+    }
+    if let Some(error) = graph.merge_error.as_ref() {
+        warnings.push(error.clone());
+    }
+    let complete = graph.synthesis_status == SynthesisStatus::Completed
+        && conflicts.is_empty()
+        && omitted_dependency_ids.is_empty();
+    let checksum_input = artifacts
+        .iter()
+        .map(|artifact| artifact.checksum_sha256.as_str())
+        .collect::<Vec<_>>()
+        .join(":");
+    SynthesisManifest {
+        version: 1,
+        manifest_id: format!("manifest-{}", graph.graph_id),
+        status: if complete {
+            SynthesisStatus::Completed
+        } else if graph.synthesis_status == SynthesisStatus::Completed {
+            SynthesisStatus::CompletedPartial
+        } else {
+            graph.synthesis_status
+        },
+        artifacts,
+        batches,
+        conflicts,
+        warnings,
+        omitted_dependency_ids,
+        final_text: graph.final_output.clone(),
+        complete,
+        checksum_sha256: sha256_hex(checksum_input.as_bytes()),
+    }
+}
+
+fn artifact_batches(graph_id: &str, artifacts: &[ResultArtifact]) -> Vec<ArtifactBatch> {
+    let mut batches = Vec::new();
+    let mut artifact_ids = Vec::new();
+    let mut byte_size = 0usize;
+    for artifact in artifacts {
+        let would_overflow = !artifact_ids.is_empty()
+            && (artifact_ids.len() >= ARTIFACT_BATCH_MAX_ITEMS
+                || byte_size.saturating_add(artifact.byte_size) > ARTIFACT_BATCH_MAX_BYTES);
+        if would_overflow {
+            let sequence = batches.len() as u32;
+            batches.push(ArtifactBatch {
+                batch_id: format!("{}-batch-{:04}", graph_id, sequence + 1),
+                sequence,
+                artifact_ids: std::mem::take(&mut artifact_ids),
+                byte_size,
+                complete: true,
+            });
+            byte_size = 0;
+        }
+        artifact_ids.push(artifact.artifact_id.clone());
+        byte_size = byte_size.saturating_add(artifact.byte_size);
+    }
+    if !artifact_ids.is_empty() {
+        let sequence = batches.len() as u32;
+        batches.push(ArtifactBatch {
+            batch_id: format!("{}-batch-{:04}", graph_id, sequence + 1),
+            sequence,
+            artifact_ids,
+            byte_size,
+            complete: true,
+        });
+    }
+    batches
+}
+
+fn artifact_conflicts(artifacts: &[ResultArtifact]) -> Vec<ArtifactConflict> {
+    let mut by_path: BTreeMap<&str, Vec<&ResultArtifact>> = BTreeMap::new();
+    for artifact in artifacts.iter().filter(|artifact| artifact.path.is_some()) {
+        by_path
+            .entry(artifact.path.as_deref().expect("filtered"))
+            .or_default()
+            .push(artifact);
+    }
+    by_path
+        .into_iter()
+        .filter_map(|(path, values)| {
+            let distinct = values
+                .iter()
+                .map(|artifact| artifact.checksum_sha256.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            (distinct.len() > 1).then(|| ArtifactConflict {
+                path: path.to_string(),
+                artifact_ids: values
+                    .iter()
+                    .map(|artifact| artifact.artifact_id.clone())
+                    .collect(),
+                reason: "multiple accepted artifacts target the same path with different content"
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+fn sha256_hex(content: &[u8]) -> String {
+    hex::encode(Sha256::digest(content))
 }
 
 fn merge_completed_graph_outputs(graph: &JobGraph) -> Option<String> {
@@ -5468,6 +5785,8 @@ mod tests {
                 results: Vec::new(),
                 final_output: None,
                 merge_error: None,
+                synthesis_status: SynthesisStatus::Collecting,
+                final_manifest: None,
                 final_node_id: None,
                 created_at: "1".to_string(),
                 updated_at: "2".to_string(),
@@ -10222,5 +10541,26 @@ mod tests {
             &health,
             NodeRole::Vision
         ));
+    }
+
+    #[test]
+    fn artifact_parser_preserves_separate_code_batches_and_safe_paths() {
+        let output =
+            "```diff\n--- a/src/a.rs\n+++ b/src/a.rs\n@@\n-old\n+new\n```\n```sh\ncargo test\n```";
+        let blocks = fenced_output_blocks(output);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            artifact_kind_for_language(&blocks[0].0),
+            ResultArtifactKind::Patch
+        );
+        assert_eq!(
+            artifact_path(ResultArtifactKind::Patch, &blocks[0].1).as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            artifact_kind_for_language(&blocks[1].0),
+            ResultArtifactKind::Command
+        );
+        assert!(!safe_artifact_path("../secret"));
     }
 }

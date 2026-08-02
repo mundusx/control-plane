@@ -408,6 +408,16 @@ fn job_status_path(job_id: &str) -> String {
     format!("/v1/jobs/{job_id}")
 }
 
+fn job_artifacts_path(job_id: &str) -> String {
+    format!("/v1/jobs/{job_id}/artifacts")
+}
+
+fn parse_job_artifacts_path(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/jobs/")?
+        .strip_suffix("/artifacts")
+        .filter(|job_id| !job_id.is_empty() && !job_id.contains('/'))
+}
+
 fn job_async_payload(record: &JobRecord) -> serde_json::Value {
     let degradation = job_degradation_payload(record);
     let mut job = serde_json::to_value(record).expect("job json");
@@ -421,6 +431,13 @@ fn job_async_payload(record: &JobRecord) -> serde_json::Value {
         "status": record.status,
         "degradation": degradation,
         "status_url": job_status_path(&record.job_id),
+        "artifacts_url": job_artifacts_path(&record.job_id),
+        "synthesis": {
+            "status": record.graph.synthesis_status,
+            "complete": record.graph.final_manifest.as_ref().is_some_and(|manifest| manifest.complete),
+            "artifact_count": record.graph.final_manifest.as_ref().map_or(0, |manifest| manifest.artifacts.len()),
+            "checksum_sha256": record.graph.final_manifest.as_ref().map(|manifest| manifest.checksum_sha256.clone()),
+        },
         "polling": {
             "method": "GET",
             "url": job_status_path(&record.job_id),
@@ -5582,6 +5599,50 @@ fn handle_connection(
                 text_response("400 Bad Request", "missing node_id")
             }
         }
+        ("GET", path) if parse_job_artifacts_path(path).is_some() => {
+            let job_id = parse_job_artifacts_path(path).expect("matched artifact path");
+            let record = state.lock().expect("state lock").jobs.get(job_id).cloned();
+            match record {
+                Some(record) => {
+                    let cursor = query_usize(query, "cursor").unwrap_or(0);
+                    let limit = query_usize(query, "limit").unwrap_or(20).clamp(1, 100);
+                    let manifest = record.graph.final_manifest.unwrap_or_default();
+                    let artifacts = manifest
+                        .artifacts
+                        .iter()
+                        .skip(cursor)
+                        .take(limit)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let consumed = cursor.saturating_add(artifacts.len());
+                    let next_cursor = (consumed < manifest.artifacts.len()).then_some(consumed);
+                    json_response(
+                        "200 OK",
+                        serde_json::json!({
+                            "job_id": record.job_id,
+                            "manifest_id": manifest.manifest_id,
+                            "version": manifest.version,
+                            "status": manifest.status,
+                            "complete": manifest.complete,
+                            "final_text": manifest.final_text,
+                            "artifacts": artifacts,
+                            "batches": manifest.batches,
+                            "conflicts": manifest.conflicts,
+                            "warnings": manifest.warnings,
+                            "omitted_dependency_ids": manifest.omitted_dependency_ids,
+                            "checksum_sha256": manifest.checksum_sha256,
+                            "cursor": cursor,
+                            "next_cursor": next_cursor,
+                            "total": manifest.artifacts.len(),
+                        }),
+                    )
+                }
+                None => json_response(
+                    "404 Not Found",
+                    serde_json::json!({ "error": "job not found" }),
+                ),
+            }
+        }
         ("GET", path) if path.starts_with("/v1/jobs/") => {
             let job_id = path.trim_start_matches("/v1/jobs/");
             if job_id.is_empty() || job_id.contains('/') {
@@ -8450,5 +8511,18 @@ mod tests {
             record.graph.nodes.len() - 1
         );
         assert_eq!(payload["degradation"], payload["job"]["degradation"]);
+    }
+
+    #[test]
+    fn parses_only_well_formed_job_artifact_paths() {
+        assert_eq!(
+            crate::parse_job_artifacts_path("/v1/jobs/job-1/artifacts"),
+            Some("job-1")
+        );
+        assert_eq!(crate::parse_job_artifacts_path("/v1/jobs//artifacts"), None);
+        assert_eq!(
+            crate::parse_job_artifacts_path("/v1/jobs/job-1/extra/artifacts"),
+            None
+        );
     }
 }
