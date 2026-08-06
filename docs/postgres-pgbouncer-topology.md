@@ -222,7 +222,9 @@ Recommended rollout:
    with `MUNDUSX_DATABASE_URL` as local-development fallback.
 4. Run UAT parity smoke against managed PostgreSQL.
 5. Keep the previous Supabase mirror disabled but available for one rollback
-   window if operationally necessary.
+   window if operationally necessary. Enabling it requires the explicit
+   `MUNDUSX_ENABLE_LEGACY_SUPABASE=true` rollback switch; stale Supabase
+   credentials do not select the legacy backend by themselves.
 6. Remove legacy Supabase code/docs only after UAT and production adoption are
    stable.
 

@@ -31,6 +31,7 @@ For the complete cross-repo setup path from local control-plane startup to CLI/n
 | `MUNDUSX_DATABASE_POOL_MODE` | No | Expected PgBouncer mode for health/status reporting. Defaults to `transaction`. |
 | `MUNDUSX_DATABASE_TLS_MODE` | No | Expected database TLS mode for health/status reporting. Defaults to `require`. |
 | `DATABASE_URL` | Legacy compatibility only | Temporary direct PostgreSQL migration alias accepted when `MUNDUSX_DATABASE_URL` is absent. Do not set it to the PgBouncer pool URL. |
+| `MUNDUSX_ENABLE_LEGACY_SUPABASE` | No | Explicit rollback-only switch for the legacy Supabase/PostgREST runtime (`true`, `1`, `yes`, or `on`). Old Supabase variables alone no longer select this backend. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Legacy Supabase mode only | Supabase service role key. Find it in Supabase -> Settings -> API -> `service_role`. |
 | `SUPABASE_URL` | Legacy Supabase mode only | Supabase project URL (e.g. `https://xxx.supabase.co`). Derived automatically from `DATABASE_URL` if omitted. |
 | `MUNDUSX_OPERATOR_TOKEN` | **Strongly recommended** | Bearer token protecting the dashboard (`/`), status, nodes, jobs, credits, and job-submit endpoints. If unset, those endpoints are publicly accessible with no authentication. |
@@ -50,6 +51,7 @@ MUNDUSX_DATABASE_POOL_URL=postgresql://app-user:password@pgbouncer.example.com:6
 MUNDUSX_DATABASE_POOL_MODE=transaction
 MUNDUSX_DATABASE_TLS_MODE=require
 # Legacy Supabase mirror mode during migration:
+# MUNDUSX_ENABLE_LEGACY_SUPABASE=true
 # DATABASE_URL=postgresql://postgres.your-ref:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres
 # SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 # SUPABASE_URL=https://your-ref.supabase.co

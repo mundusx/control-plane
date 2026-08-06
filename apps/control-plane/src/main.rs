@@ -61,6 +61,7 @@ const DATABASE_POOL_URL_ENV: &str = "MUNDUSX_DATABASE_POOL_URL";
 const DATABASE_POOL_MODE_ENV: &str = "MUNDUSX_DATABASE_POOL_MODE";
 const DATABASE_TLS_MODE_ENV: &str = "MUNDUSX_DATABASE_TLS_MODE";
 const LEGACY_DATABASE_URL_ENV: &str = "DATABASE_URL";
+const LEGACY_SUPABASE_ENABLED_ENV: &str = "MUNDUSX_ENABLE_LEGACY_SUPABASE";
 const CONTROL_PLANE_LOGO_PATH: &str = "/assets/mundusx-logo.png";
 const CONTROL_PLANE_LOGO_PNG: &[u8] = include_bytes!("../assets/mundusx-logo.png");
 const DEFAULT_PAGE_SIZE: usize = 25;
@@ -173,7 +174,13 @@ impl DatabaseMirror {
             std::env::var(DATABASE_DIRECT_URL_ENV).ok().as_deref(),
         )
         .map(Self::Postgres);
-        postgres.or_else(|| SupabaseMirror::from_env().map(Self::Supabase))
+        postgres.or_else(|| {
+            legacy_supabase_enabled_from_value(
+                std::env::var(LEGACY_SUPABASE_ENABLED_ENV).ok().as_deref(),
+            )
+            .then(|| SupabaseMirror::from_env().map(Self::Supabase))
+            .flatten()
+        })
     }
 
     fn storage_source(&self) -> StorageSource {
@@ -275,6 +282,15 @@ impl DatabaseMirror {
             Self::Supabase(store) => store.delete_chat_conversation(conversation_id),
         }
     }
+}
+
+fn legacy_supabase_enabled_from_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -6357,15 +6373,17 @@ mod tests {
         auth_disabled_flag_enabled, completion_event_type, control_plane_bind_addr_from_env,
         control_plane_home, control_plane_operator_page, database_health_from_values,
         deploy_fingerprint_from_env, handle_connection, job_async_payload,
-        migration_database_url_from_values, now_unix_seconds, operator_auth_mode_from_env,
-        operator_auth_startup_config_error, operator_auth_token_from_env,
-        parse_conversation_messages_path, parse_conversation_path, parse_request,
-        read_http_request, requires_operator_auth, status_snapshot_with_deploy_fingerprint,
-        trust_grade, trust_grade_badge, HttpRequestReadError, OperatorAuthMode, OperatorPage,
-        StorageSource, SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
-        CONTROL_PLANE_LOGO_PATH, DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV,
-        LEGACY_DATABASE_URL_ENV, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
+        legacy_supabase_enabled_from_value, migration_database_url_from_values, now_unix_seconds,
+        operator_auth_mode_from_env, operator_auth_startup_config_error,
+        operator_auth_token_from_env, parse_conversation_messages_path, parse_conversation_path,
+        parse_request, read_http_request, requires_operator_auth,
+        status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
+        HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource, SupabaseSyncStatus,
+        AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
+        DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV, LEGACY_DATABASE_URL_ENV,
+        LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
+
     use crate::contracts::{
         AgentRegistration, AgentState, Backend, Heartbeat, JobCompletion, JobExecutionMode,
         JobGraphNodeStatus, JobRequest, JobStatus, RoutingMode, RuntimeMode, WorkerHealthReport,
@@ -6376,6 +6394,16 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn legacy_supabase_requires_an_explicit_rollback_switch() {
+        assert!(!legacy_supabase_enabled_from_value(None));
+        assert!(!legacy_supabase_enabled_from_value(Some("false")));
+        assert!(!legacy_supabase_enabled_from_value(Some("disabled")));
+        assert!(legacy_supabase_enabled_from_value(Some("true")));
+        assert!(legacy_supabase_enabled_from_value(Some(" YES ")));
+        assert!(legacy_supabase_enabled_from_value(Some("1")));
+    }
 
     #[test]
     fn completion_events_distinguish_accepted_and_rejected_graph_nodes() {
