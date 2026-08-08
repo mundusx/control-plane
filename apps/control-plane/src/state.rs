@@ -1609,9 +1609,25 @@ impl ControlPlaneState {
 
     pub fn complete_job(
         &mut self,
-        completion: JobCompletion,
+        mut completion: JobCompletion,
         completed_at: String,
     ) -> Option<JobRecord> {
+        if let Some(job) = self.jobs.get(&completion.job_id) {
+            if completion.status == JobStatus::Completed && is_speakai_job(job) {
+                match completion
+                    .output
+                    .as_deref()
+                    .ok_or_else(|| "SpeakAI completion did not include output".to_string())
+                    .and_then(validate_speakai_output)
+                {
+                    Ok(validated) => completion.output = Some(validated),
+                    Err(error) => {
+                        completion.status = JobStatus::Failed;
+                        completion.error = Some(error);
+                    }
+                }
+            }
+        }
         let compact_reducer_node = self
             .nodes
             .get(&completion.node_id)
@@ -2026,6 +2042,168 @@ impl ControlPlaneState {
         self.reevaluate_queued_jobs();
         record
     }
+}
+
+fn is_speakai_job(job: &JobRecord) -> bool {
+    job.system_prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt.starts_with("You are SpeakAI,"))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SpeakAiOutput {
+    speech_act: String,
+    question_type: Option<String>,
+    topic: String,
+    summary: String,
+    replies: Vec<SpeakAiReply>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpeakAiReply {
+    strategy: String,
+    purpose: String,
+    text: String,
+    meaning: String,
+}
+
+fn speakai_reply_contract(speech_act: &str) -> Option<[(&'static str, &'static str); 3]> {
+    Some(match speech_act {
+        "opinion" => [
+            ("supportive", "AGREE"),
+            ("continue", "EXPLORE"),
+            ("alternative", "DISAGREE_POLITELY"),
+        ],
+        "question" => [
+            ("direct", "ANSWER"),
+            ("continue", "ANSWER_AND_EXPLORE"),
+            ("boundary", "DECLINE_POLITELY"),
+        ],
+        "observation" => [
+            ("acknowledge", "ACKNOWLEDGE"),
+            ("continue", "EXPLORE"),
+            ("alternative", "OFFER_ALTERNATIVE"),
+        ],
+        "request" => [
+            ("accept", "ACCEPT"),
+            ("clarify", "CLARIFY"),
+            ("boundary", "DECLINE_POLITELY"),
+        ],
+        "invitation" => [
+            ("accept", "ACCEPT"),
+            ("clarify", "ASK_DETAILS"),
+            ("boundary", "DECLINE_POLITELY"),
+        ],
+        "suggestion" => [
+            ("supportive", "SUPPORT"),
+            ("continue", "EXPLORE"),
+            ("alternative", "SUGGEST_ALTERNATIVE"),
+        ],
+        "greeting" => [
+            ("direct", "RETURN_GREETING"),
+            ("continue", "START_CONVERSATION"),
+            ("warm", "WARM_VARIATION"),
+        ],
+        "thanks" => [
+            ("direct", "ACCEPT_THANKS"),
+            ("warm", "RESPOND_WARMLY"),
+            ("continue", "CONTINUE"),
+        ],
+        "apology" => [
+            ("accept", "ACCEPT_APOLOGY"),
+            ("reassure", "REASSURE"),
+            ("continue", "DISCUSS_FURTHER"),
+        ],
+        "compliment" => [
+            ("accept", "ACCEPT_COMPLIMENT"),
+            ("reciprocal", "RECIPROCATE"),
+            ("modest", "RESPOND_MODESTLY"),
+        ],
+        "emotion" => [
+            ("empathetic", "EMPATHIZE"),
+            ("continue", "EXPLORE"),
+            ("supportive", "OFFER_SUPPORT"),
+        ],
+        "information" => [
+            ("acknowledge", "ACKNOWLEDGE"),
+            ("continue", "ASK_FOLLOW_UP"),
+            ("related", "ADD_RELATED_POINT"),
+        ],
+        _ => return None,
+    })
+}
+
+fn validate_speakai_output(output: &str) -> Result<String, String> {
+    let trimmed = output.trim();
+    let without_fence_prefix = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let json = without_fence_prefix
+        .strip_suffix("```")
+        .unwrap_or(without_fence_prefix)
+        .trim();
+    let json = json
+        .split_once("; response=")
+        .map(|(_, response)| response.trim())
+        .unwrap_or(json);
+    let value: SpeakAiOutput = serde_json::from_str(json)
+        .map_err(|error| format!("SpeakAI output failed schema validation: {error}"))?;
+    for (name, field) in [
+        ("speechAct", value.speech_act.as_str()),
+        ("topic", value.topic.as_str()),
+        ("summary", value.summary.as_str()),
+    ] {
+        if field.trim().is_empty() {
+            return Err(format!(
+                "SpeakAI output failed schema validation: `{name}` must not be empty"
+            ));
+        }
+    }
+    let expected = speakai_reply_contract(&value.speech_act).ok_or_else(|| {
+        format!(
+            "SpeakAI output failed schema validation: unsupported speechAct `{}`",
+            value.speech_act
+        )
+    })?;
+    if value.speech_act == "question" {
+        if value
+            .question_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            return Err("SpeakAI output failed schema validation: questions require a non-empty `questionType`".to_string());
+        }
+    } else if value.question_type.is_some() {
+        return Err(
+            "SpeakAI output failed schema validation: `questionType` is allowed only for questions"
+                .to_string(),
+        );
+    }
+    if value.replies.len() != 3 {
+        return Err(
+            "SpeakAI output failed schema validation: `replies` must contain exactly 3 items"
+                .to_string(),
+        );
+    }
+    for (index, (reply, (strategy, purpose))) in value.replies.iter().zip(expected).enumerate() {
+        if reply.strategy != strategy || reply.purpose != purpose {
+            return Err(format!(
+                "SpeakAI output failed schema validation: reply {} for `{}` must use strategy `{strategy}` and purpose `{purpose}`",
+                index + 1,
+                value.speech_act
+            ));
+        }
+        if reply.text.trim().is_empty() || reply.meaning.trim().is_empty() {
+            return Err(format!("SpeakAI output failed schema validation: reply {} text and meaning must not be empty", index + 1));
+        }
+    }
+    serde_json::to_string(&serde_json::from_str::<serde_json::Value>(json).expect("validated JSON"))
+        .map_err(|error| format!("SpeakAI output serialization failed: {error}"))
 }
 
 fn graph_execution_allowed(
@@ -5722,6 +5900,20 @@ mod tests {
     use crate::contracts::{
         RuntimeMode, WorkerHealthReport, IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK,
     };
+
+    #[test]
+    fn validates_question_specific_speakai_replies() {
+        let output = r#"{"speechAct":"question","questionType":"personal_information","topic":"Place of residence","summary":"They are asking where the other person lives.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Ich wohne in Warschau.","meaning":"I live in Warsaw."},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Ich wohne in Warschau. Und du?","meaning":"I live in Warsaw. And you?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Das möchte ich lieber nicht sagen.","meaning":"I would rather not say."}]}"#;
+        assert!(validate_speakai_output(output).is_ok());
+    }
+
+    #[test]
+    fn rejects_speakai_output_with_wrong_reply_contract() {
+        let output = r#"{"speechAct":"question","questionType":"personal_information","topic":"Place of residence","summary":"A question","replies":[{"strategy":"supportive","purpose":"AGREE","text":"Ja.","meaning":"Yes."},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Und du?","meaning":"And you?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Lieber nicht.","meaning":"Rather not."}]}"#;
+        assert!(validate_speakai_output(output)
+            .expect_err("wrong question strategy must fail")
+            .contains("reply 1"));
+    }
 
     fn m_series_registration(node_id: &str) -> AgentRegistration {
         AgentRegistration {

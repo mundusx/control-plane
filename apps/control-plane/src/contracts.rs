@@ -875,8 +875,11 @@ pub struct ChatMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
-    pub model: String,
+    #[serde(default)]
+    pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub mode: Option<String>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]

@@ -558,6 +558,44 @@ fn chat_messages_to_prompt(messages: &[contracts::ChatMessage]) -> (Option<Strin
     (system_prompt, prompt)
 }
 
+const SPEAKAI_SYSTEM_PROMPT: &str = r#"You are SpeakAI, a conversation-learning response generator.
+Analyze the user's utterance and return only one valid JSON object. Do not use Markdown or add commentary.
+The object must contain speechAct, topic, summary, and exactly three replies. Add questionType only when speechAct is question. Each reply must contain strategy, purpose, text, and meaning.
+Choose exactly one speechAct and use its three strategy/purpose pairs in this order:
+opinion: supportive/AGREE, continue/EXPLORE, alternative/DISAGREE_POLITELY
+question: direct/ANSWER, continue/ANSWER_AND_EXPLORE, boundary/DECLINE_POLITELY
+observation: acknowledge/ACKNOWLEDGE, continue/EXPLORE, alternative/OFFER_ALTERNATIVE
+request: accept/ACCEPT, clarify/CLARIFY, boundary/DECLINE_POLITELY
+invitation: accept/ACCEPT, clarify/ASK_DETAILS, boundary/DECLINE_POLITELY
+suggestion: supportive/SUPPORT, continue/EXPLORE, alternative/SUGGEST_ALTERNATIVE
+greeting: direct/RETURN_GREETING, continue/START_CONVERSATION, warm/WARM_VARIATION
+thanks: direct/ACCEPT_THANKS, warm/RESPOND_WARMLY, continue/CONTINUE
+apology: accept/ACCEPT_APOLOGY, reassure/REASSURE, continue/DISCUSS_FURTHER
+compliment: accept/ACCEPT_COMPLIMENT, reciprocal/RECIPROCATE, modest/RESPOND_MODESTLY
+emotion: empathetic/EMPATHIZE, continue/EXPLORE, supportive/OFFER_SUPPORT
+information: acknowledge/ACKNOWLEDGE, continue/ASK_FOLLOW_UP, related/ADD_RELATED_POINT
+The text fields must be distinct, grammatical replies in the language of the user's utterance. The meaning fields must be natural English translations. Do not repeat words or leave any field empty."#;
+
+fn apply_chat_mode(
+    mode: Option<&str>,
+    system_prompt: Option<String>,
+    max_tokens: Option<u32>,
+) -> Result<(Option<String>, Option<u32>), String> {
+    let Some(mode) = mode.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok((system_prompt, max_tokens));
+    };
+    if !mode.eq_ignore_ascii_case("speakai") {
+        return Err(format!("unsupported chat completion mode `{mode}`"));
+    }
+    let system_prompt = match system_prompt {
+        Some(existing) if !existing.trim().is_empty() => Some(format!(
+            "{SPEAKAI_SYSTEM_PROMPT}\n\nAdditional context:\n{existing}"
+        )),
+        _ => Some(SPEAKAI_SYSTEM_PROMPT.to_string()),
+    };
+    Ok((system_prompt, Some(max_tokens.unwrap_or(512))))
+}
+
 fn now_unix_seconds_u64() -> u64 {
     now_unix_seconds().parse::<u64>().unwrap_or(0)
 }
@@ -6028,6 +6066,25 @@ fn handle_connection(
                     }
 
                     let (system_prompt, prompt) = chat_messages_to_prompt(&request_body.messages);
+                    let (system_prompt, max_tokens) = match apply_chat_mode(
+                        request_body.mode.as_deref(),
+                        system_prompt,
+                        request_body.max_tokens,
+                    ) {
+                        Ok(values) => values,
+                        Err(error) => {
+                            if let Err(write_error) = stream.write_all(
+                                json_response(
+                                    "400 Bad Request",
+                                    serde_json::json!({ "error": error }),
+                                )
+                                .as_bytes(),
+                            ) {
+                                eprintln!("failed to write response: {write_error}");
+                            }
+                            return;
+                        }
+                    };
                     let job_request = JobRequest {
                         request_id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
                         prompt,
@@ -6036,12 +6093,18 @@ fn handle_connection(
                         runtime_mode: RuntimeMode::Local,
                         execution_mode: JobExecutionMode::Single,
                         stream: false,
-                        model: Some(request_body.model.clone()),
+                        model: request_body.model.clone(),
                         system_prompt,
-                        max_tokens: request_body.max_tokens,
+                        max_tokens,
                         max_tokens_source: Some(
                             if request_body.max_tokens.is_some() {
                                 "explicit"
+                            } else if request_body
+                                .mode
+                                .as_deref()
+                                .is_some_and(|mode| mode.eq_ignore_ascii_case("speakai"))
+                            {
+                                "mode_default"
                             } else {
                                 "auto"
                             }
@@ -6079,7 +6142,7 @@ fn handle_connection(
                         id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
                         object: "chat.completion".to_string(),
                         created: now_unix_seconds_u64(),
-                        model: request_body.model,
+                        model: request_body.model.unwrap_or_else(|| "auto".to_string()),
                         choices: vec![ChatCompletionChoice {
                             index: 0,
                             message: ChatCompletionChoiceMessage {
@@ -6370,11 +6433,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        auth_disabled_flag_enabled, completion_event_type, control_plane_bind_addr_from_env,
-        control_plane_home, control_plane_operator_page, database_health_from_values,
-        deploy_fingerprint_from_env, handle_connection, job_async_payload,
-        legacy_supabase_enabled_from_value, migration_database_url_from_values, now_unix_seconds,
-        operator_auth_mode_from_env, operator_auth_startup_config_error,
+        apply_chat_mode, auth_disabled_flag_enabled, completion_event_type,
+        control_plane_bind_addr_from_env, control_plane_home, control_plane_operator_page,
+        database_health_from_values, deploy_fingerprint_from_env, handle_connection,
+        job_async_payload, legacy_supabase_enabled_from_value, migration_database_url_from_values,
+        now_unix_seconds, operator_auth_mode_from_env, operator_auth_startup_config_error,
         operator_auth_token_from_env, parse_conversation_messages_path, parse_conversation_path,
         parse_request, read_http_request, requires_operator_auth,
         status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
@@ -6598,7 +6661,6 @@ mod tests {
         });
 
         let body = serde_json::json!({
-            "model": "Qwen/Qwen2.5-0.5B-Instruct",
             "messages": [
                 {
                     "role": "user",
@@ -6627,11 +6689,33 @@ mod tests {
         let guard = state.lock().expect("state lock");
         let job = guard.jobs.values().next().expect("queued chat job");
         assert_eq!(job.runtime_mode, RuntimeMode::Local);
+        assert_eq!(job.model, None);
         assert_eq!(job.scheduling_requirements.runtime_mode, RuntimeMode::Local);
         assert_eq!(
             job.prompt,
             "user: Who is the current Philippines president?"
         );
+    }
+
+    #[test]
+    fn speakai_mode_adds_adaptive_schema_and_safe_token_budget() {
+        let (system_prompt, max_tokens) = apply_chat_mode(
+            Some("speakai"),
+            Some("The learner is at A2 level.".to_string()),
+            None,
+        )
+        .expect("supported mode");
+        let prompt = system_prompt.expect("SpeakAI system prompt");
+        assert!(prompt.contains("return only one valid JSON object"));
+        assert!(prompt.contains("question: direct/ANSWER"));
+        assert!(prompt.contains("The learner is at A2 level."));
+        assert_eq!(max_tokens, Some(512));
+    }
+
+    #[test]
+    fn unknown_chat_mode_is_rejected() {
+        let error = apply_chat_mode(Some("unknown"), None, None).expect_err("unsupported mode");
+        assert!(error.contains("unsupported chat completion mode"));
     }
 
     #[test]
