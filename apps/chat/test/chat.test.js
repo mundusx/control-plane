@@ -17,6 +17,7 @@ import {
   extractPolynomialIntegral,
   extractPolynomialSubtraction,
   extractWeatherLocation,
+  normalizeWeatherWordTypos,
   fetchChatConversation,
   fetchNetworkSummary,
   needsGrounding,
@@ -4126,4 +4127,47 @@ test("deleteChatConversation treats missing backend records as shallow local his
   assert.equal(result.conversation_id, "tool-only");
   assert.equal(result.deleted, false);
   assert.equal(result.persisted, false);
+});
+
+test("extracts a location that comes before the word weather", () => {
+  // "Whats the berlin weather today?" previously found nothing: the patterns
+  // only look after "weather", so they saw "today" and rejected it.
+  assert.equal(extractWeatherLocation("Whats the berlin weather today?"), "berlin");
+  assert.equal(extractWeatherLocation("the manila weather"), "manila");
+  assert.equal(extractWeatherLocation("Berlin temperature right now"), "Berlin");
+  assert.equal(extractWeatherLocation("new york city weather today"), "new york city");
+});
+
+test("does not invent a location from words that are not places", () => {
+  assert.equal(extractWeatherLocation("is the weather nice"), null);
+  assert.equal(extractWeatherLocation("what's the weather"), null);
+  assert.equal(extractWeatherLocation("how is the weather today"), null);
+  assert.equal(extractWeatherLocation("show me the current weather"), null);
+  assert.equal(extractWeatherLocation("tell me the weather"), null);
+});
+
+test("still prefers the explicit location that follows weather", () => {
+  assert.equal(extractWeatherLocation("weather in Berlin"), "Berlin");
+  assert.equal(extractWeatherLocation("what is the weather in Manila today?"), "Manila");
+  assert.equal(extractWeatherLocation("forecast for Tokyo"), "Tokyo");
+});
+
+test("tolerates misspelled weather words", () => {
+  assert.equal(extractWeatherLocation("wheather in Berlin"), "Berlin");
+  assert.equal(extractWeatherLocation("whats the berlin wheather today?"), "berlin");
+  assert.equal(extractWeatherLocation("weater in Manila"), "Manila");
+  assert.equal(extractWeatherLocation("forcast for Tokyo"), "Tokyo");
+  assert.equal(extractWeatherLocation("temprature in Paris"), "Paris");
+});
+
+test("normalizeWeatherWordTypos leaves correct spellings alone", () => {
+  assert.equal(normalizeWeatherWordTypos("weather in Berlin"), "weather in Berlin");
+  assert.equal(normalizeWeatherWordTypos("wheather"), "weather");
+  assert.equal(normalizeWeatherWordTypos(""), "");
+});
+
+test("a question with no weather intent is still ignored", () => {
+  assert.equal(extractWeatherLocation("who is Ada Lovelace"), null);
+  assert.equal(extractWeatherLocation(""), null);
+  assert.equal(extractWeatherLocation(null), null);
 });

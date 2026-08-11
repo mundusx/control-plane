@@ -4896,8 +4896,131 @@ function fetchMundusXKnowledgeJob(message, topic) {
   };
 }
 
+// Common misspellings of the words that trigger a weather lookup. Without these
+// a typo sends the question to an LLM, which cannot know today's weather.
+const WEATHER_WORD_TYPOS = [
+  [/\bwheather\b/gi, "weather"],
+  [/\bweahter\b/gi, "weather"],
+  [/\bweater\b/gi, "weather"],
+  [/\bwether\b/gi, "weather"],
+  [/\bweathe?r?r\b/gi, "weather"],
+  [/\bforcast\b/gi, "forecast"],
+  [/\bforecase\b/gi, "forecast"],
+  [/\btemprature\b/gi, "temperature"],
+  [/\btemperatur\b/gi, "temperature"],
+  [/\btempreature\b/gi, "temperature"],
+];
+
+export function normalizeWeatherWordTypos(value) {
+  return WEATHER_WORD_TYPOS.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    String(value ?? ""),
+  );
+}
+
+// Words that can sit directly before "weather" without naming a place, so
+// "is the weather nice" never looks up a city called "is".
+const WEATHER_LOCATION_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "current",
+  "currently",
+  "for",
+  "how",
+  "hows",
+  "is",
+  "it",
+  "its",
+  "latest",
+  "local",
+  "me",
+  "my",
+  "our",
+  "s",
+  "show",
+  "significant",
+  "somewhere",
+  "tell",
+  "that",
+  "the",
+  "there",
+  "these",
+  "this",
+  "those",
+  "today",
+  "todays",
+  "tomorrow",
+  "tomorrows",
+  "us",
+  "was",
+  "what",
+  "whats",
+  "which",
+  "whos",
+  "why",
+  "will",
+  "yesterday",
+]);
+
+// Words that can follow "weather" without naming a place, so "is the weather
+// nice" does not look up a city called "nice".
+const WEATHER_DESCRIPTOR_WORDS = new Set([
+  "bad",
+  "chilly",
+  "cloudy",
+  "cold",
+  "condition",
+  "conditions",
+  "cool",
+  "data",
+  "dry",
+  "fine",
+  "forecast",
+  "good",
+  "here",
+  "hot",
+  "humid",
+  "info",
+  "information",
+  "like",
+  "lately",
+  "looking",
+  "nice",
+  "out",
+  "outside",
+  "rainy",
+  "report",
+  "snowy",
+  "sunny",
+  "there",
+  "update",
+  "warm",
+  "wet",
+  "windy",
+]);
+
+function isNonPlaceWord(word) {
+  const normalized = word.replace(/['’]/g, "").toLowerCase();
+  return (
+    WEATHER_LOCATION_STOPWORDS.has(normalized) || WEATHER_DESCRIPTOR_WORDS.has(normalized)
+  );
+}
+
+/// Rejects a candidate made up entirely of words that never name a place.
+function rejectNonPlaceLocation(location) {
+  if (!location) {
+    return null;
+  }
+  const words = location.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.every(isNonPlaceWord)) {
+    return null;
+  }
+  return location;
+}
+
 export function extractWeatherLocation(message) {
-  const text = String(message ?? "").trim();
+  const text = normalizeWeatherWordTypos(String(message ?? "").trim());
   if (!text) {
     return null;
   }
@@ -4916,12 +5039,39 @@ export function extractWeatherLocation(message) {
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
-    const location = cleanWeatherLocation(match?.[1]);
+    const location = rejectNonPlaceLocation(cleanWeatherLocation(match?.[1]));
     if (location) {
       return location;
     }
   }
-  return null;
+
+  // "the berlin weather today" names the place before the subject, so the
+  // patterns above see only "weather today" and find nothing.
+  return extractLeadingWeatherLocation(text);
+}
+
+function extractLeadingWeatherLocation(text) {
+  const match = text.match(
+    /([\p{L}][\p{L}\s.'-]*?)\s+(?:weather|forecast|temperature|temp)\b/u,
+  );
+  const candidate = cleanWeatherLocation(match?.[1]);
+  if (!candidate) {
+    return null;
+  }
+
+  // Keep only the trailing words that look like a place name.
+  const words = candidate.split(/\s+/).filter(Boolean);
+  while (words.length > 0 && isNonPlaceWord(words[0])) {
+    words.shift();
+  }
+  if (words.length === 0 || words.length > 4) {
+    return null;
+  }
+  if (words.some(isNonPlaceWord)) {
+    return null;
+  }
+
+  return rejectNonPlaceLocation(cleanWeatherLocation(words.join(" ")));
 }
 
 function isCompoundPromptForDirectTools(message) {
