@@ -642,10 +642,18 @@ impl ControlPlaneState {
         }
     }
 
+    /// True for runtimes that serve models from their own endpoint rather than
+    /// from a MundusX-managed `llama-cli` process: MLX, vLLM, and a contributed
+    /// cluster the contributor already runs.
+    fn serves_models_remotely(worker_health: &WorkerHealthReport) -> bool {
+        let runtime_mode = worker_health.runtime_mode.trim();
+        runtime_mode.eq_ignore_ascii_case("mlx")
+            || runtime_mode.eq_ignore_ascii_case("vllm")
+            || runtime_mode.eq_ignore_ascii_case("contributed-cluster")
+    }
+
     fn worker_runtime_dependencies_ready(worker_health: &WorkerHealthReport) -> bool {
-        worker_health.runtime_mode.eq_ignore_ascii_case("mlx")
-            || worker_health.runtime_mode.eq_ignore_ascii_case("vllm")
-            || worker_health.llama_cli_available
+        Self::serves_models_remotely(worker_health) || worker_health.llama_cli_available
     }
 
     fn compatible_ready_node_count_for_request(&self, request: &JobRequest) -> usize {
@@ -710,6 +718,7 @@ impl ControlPlaneState {
         if !worker_health.healthy
             || !worker_health.runtime_ready
             || (!matches!(node.backend, Backend::M | Backend::Vllm)
+                && !Self::serves_models_remotely(worker_health)
                 && !worker_health.llama_cli_available)
         {
             return 1;
@@ -718,6 +727,7 @@ impl ControlPlaneState {
         let runtime_mode = worker_health.runtime_mode.to_ascii_lowercase();
         let warm_persistent_runtime = runtime_mode.contains("persistent")
             || runtime_mode.contains("warm")
+            || runtime_mode == "contributed-cluster"
             || node.backend == Backend::Vllm;
         if node.backend == Backend::Cuda && !warm_persistent_runtime {
             return 1;
@@ -5701,15 +5711,13 @@ pub fn evaluate_policy(
         reasons.push("model name is missing".to_string());
     }
 
-    let mlx_runtime = worker_health.runtime_mode.eq_ignore_ascii_case("mlx");
-    let vllm_runtime = worker_health.runtime_mode.eq_ignore_ascii_case("vllm");
     // A contributed cluster is a local LLM runtime the contributor already runs.
     // The node routes to its endpoint, so it has no MundusX model file, no
     // llama-cli, and no accelerator of its own to report.
     let contributed_cluster_runtime = worker_health
         .runtime_mode
         .eq_ignore_ascii_case("contributed-cluster");
-    let remote_model_runtime = mlx_runtime || vllm_runtime || contributed_cluster_runtime;
+    let remote_model_runtime = ControlPlaneState::serves_models_remotely(worker_health);
     if worker_health
         .model_path
         .as_deref()
@@ -10289,6 +10297,28 @@ mod tests {
         health.cuda_device_available = false;
         health.cuda_driver_available = false;
         health
+    }
+
+    #[test]
+    fn schedules_jobs_onto_a_node_contributing_a_running_local_cluster() {
+        // Admission alone was not enough: `worker_runtime_dependencies_ready`
+        // also required mlx, vllm, or a local llama-cli, so these nodes were
+        // never eligible and jobs stayed queued and unassigned.
+        let health = contributed_cluster_worker_health("2");
+
+        assert!(ControlPlaneState::worker_runtime_dependencies_ready(
+            &health
+        ));
+    }
+
+    #[test]
+    fn a_node_without_a_remote_runtime_still_needs_llama_cli_to_be_scheduled() {
+        let mut health = healthy_worker_health("2");
+        health.llama_cli_available = false;
+
+        assert!(!ControlPlaneState::worker_runtime_dependencies_ready(
+            &health
+        ));
     }
 
     #[test]
