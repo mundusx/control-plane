@@ -5703,7 +5703,13 @@ pub fn evaluate_policy(
 
     let mlx_runtime = worker_health.runtime_mode.eq_ignore_ascii_case("mlx");
     let vllm_runtime = worker_health.runtime_mode.eq_ignore_ascii_case("vllm");
-    let remote_model_runtime = mlx_runtime || vllm_runtime;
+    // A contributed cluster is a local LLM runtime the contributor already runs.
+    // The node routes to its endpoint, so it has no MundusX model file, no
+    // llama-cli, and no accelerator of its own to report.
+    let contributed_cluster_runtime = worker_health
+        .runtime_mode
+        .eq_ignore_ascii_case("contributed-cluster");
+    let remote_model_runtime = mlx_runtime || vllm_runtime || contributed_cluster_runtime;
     if worker_health
         .model_path
         .as_deref()
@@ -5740,6 +5746,7 @@ pub fn evaluate_policy(
         && !runtime_mode.eq_ignore_ascii_case("mlx")
         && !runtime_mode.eq_ignore_ascii_case("cuda")
         && !uses_vllm_runtime
+        && !contributed_cluster_runtime
         && !runtime_mode.eq_ignore_ascii_case("blas")
     {
         reasons.push(format!(
@@ -5748,11 +5755,18 @@ pub fn evaluate_policy(
     }
 
     let uses_mlx_runtime = runtime_mode.eq_ignore_ascii_case("mlx");
-    if !uses_mlx_runtime && !uses_vllm_runtime && !worker_health.llama_cli_available {
+    if !uses_mlx_runtime
+        && !uses_vllm_runtime
+        && !contributed_cluster_runtime
+        && !worker_health.llama_cli_available
+    {
         reasons.push("llama-cli is unavailable".to_string());
     }
 
-    if runtime_mode.eq_ignore_ascii_case("cuda") || uses_vllm_runtime {
+    if contributed_cluster_runtime {
+        // Health for these nodes is the contributed endpoint answering, which
+        // `worker_health.healthy` already covers above.
+    } else if runtime_mode.eq_ignore_ascii_case("cuda") || uses_vllm_runtime {
         if !worker_health.cuda_driver_available {
             reasons.push("CUDA driver is unavailable".to_string());
         }
@@ -10260,6 +10274,76 @@ mod tests {
 
         assert!(node.policy_allowed);
         assert_eq!(node.policy_reason, None);
+    }
+
+    /// Health exactly as a node contributing an already-running local cluster
+    /// reports it: the endpoint answers, but there is no MundusX model file, no
+    /// llama-cli, and no accelerator of its own.
+    fn contributed_cluster_worker_health(checked_at: &str) -> WorkerHealthReport {
+        let mut health = healthy_worker_health(checked_at);
+        health.runtime_mode = "contributed-cluster".to_string();
+        health.model_path = None;
+        health.model_name = Some("UD-IQ2_M".to_string());
+        health.llama_cli_available = false;
+        health.blas_device_available = false;
+        health.cuda_device_available = false;
+        health.cuda_driver_available = false;
+        health
+    }
+
+    #[test]
+    fn admits_a_node_contributing_a_running_local_cluster() {
+        // Before this, such a node was blocked with "model path is missing;
+        // llama-cli is unavailable; BLAS device acceleration is unavailable",
+        // even though it routes every job to a healthy local endpoint.
+        let health = contributed_cluster_worker_health("2");
+
+        let (allowed, reason) =
+            evaluate_policy(AgentState::Ready, "AC Power", false, Some(90), &health);
+
+        assert!(allowed, "unexpected block: {reason:?}");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn a_contributed_cluster_still_needs_a_model_and_a_healthy_endpoint() {
+        let mut unhealthy = contributed_cluster_worker_health("2");
+        unhealthy.healthy = false;
+        let (allowed, reason) =
+            evaluate_policy(AgentState::Ready, "AC Power", false, Some(90), &unhealthy);
+        assert!(!allowed);
+        assert!(reason
+            .as_deref()
+            .expect("reason")
+            .contains("worker health probe reported unhealthy"));
+
+        let mut no_model = contributed_cluster_worker_health("2");
+        no_model.model_name = None;
+        let (allowed, reason) =
+            evaluate_policy(AgentState::Ready, "AC Power", false, Some(90), &no_model);
+        assert!(!allowed);
+        assert!(reason
+            .as_deref()
+            .expect("reason")
+            .contains("model name is missing"));
+    }
+
+    #[test]
+    fn other_runtimes_still_require_a_local_model_and_accelerator() {
+        // The exemption must not leak into the normal local-runtime path.
+        let mut health = healthy_worker_health("2");
+        health.model_path = None;
+        health.llama_cli_available = false;
+        health.blas_device_available = false;
+
+        let (allowed, reason) =
+            evaluate_policy(AgentState::Ready, "AC Power", false, Some(90), &health);
+        let reason = reason.expect("reason");
+
+        assert!(!allowed);
+        assert!(reason.contains("model path is missing"));
+        assert!(reason.contains("llama-cli is unavailable"));
+        assert!(reason.contains("BLAS device acceleration is unavailable"));
     }
 
     #[test]
