@@ -2169,14 +2169,25 @@ fn validate_speakai_output(output: &str) -> Result<String, String> {
         )
     })?;
     if value.speech_act == "question" {
-        if value
+        let question_type = value
             .question_type
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .is_none()
-        {
-            return Err("SpeakAI output failed schema validation: questions require a non-empty `questionType`".to_string());
+            .ok_or_else(|| "SpeakAI output failed schema validation: questions require a non-empty `questionType`".to_string())?;
+        if !matches!(
+            question_type,
+            "factual"
+                | "personal"
+                | "opinion"
+                | "clarification"
+                | "preference"
+                | "hypothetical"
+                | "other"
+        ) {
+            return Err(format!(
+                "SpeakAI output failed schema validation: unsupported questionType `{question_type}`"
+            ));
         }
     } else if value.question_type.is_some() {
         return Err(
@@ -5903,13 +5914,27 @@ mod tests {
 
     #[test]
     fn validates_question_specific_speakai_replies() {
-        let output = r#"{"speechAct":"question","questionType":"personal_information","topic":"Place of residence","summary":"They are asking where the other person lives.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Ich wohne in Warschau.","meaning":"I live in Warsaw."},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Ich wohne in Warschau. Und du?","meaning":"I live in Warsaw. And you?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Das möchte ich lieber nicht sagen.","meaning":"I would rather not say."}]}"#;
+        let output = r#"{"speechAct":"question","questionType":"personal","topic":"Place of residence","summary":"They are asking where the other person lives.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Ich wohne in Warschau.","meaning":"I live in Warsaw."},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Ich wohne in Warschau. Und du?","meaning":"I live in Warsaw. And you?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Das möchte ich lieber nicht sagen.","meaning":"I would rather not say."}]}"#;
         assert!(validate_speakai_output(output).is_ok());
     }
 
     #[test]
+    fn validates_the_german_parents_question_contract() {
+        let output = r#"{"speechAct":"question","questionType":"personal","topic":"Parents","summary":"The speaker asks who the listener's parents are.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Meine Eltern heißen …","meaning":"My parents are called …"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Meine Eltern heißen … Und wie heißen deine?","meaning":"My parents are called … And what are yours called?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Darüber möchte ich lieber nicht sprechen.","meaning":"I would rather not talk about that."}]}"#;
+        assert!(validate_speakai_output(output).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_speakai_question_type() {
+        let output = r#"{"speechAct":"question","questionType":"personal_information","topic":"Parents","summary":"A personal question.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Meine Eltern heißen …","meaning":"My parents are called …"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Und wie heißen deine?","meaning":"And what are yours called?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Darüber spreche ich lieber nicht.","meaning":"I would rather not discuss that."}]}"#;
+        assert!(validate_speakai_output(output)
+            .expect_err("unknown question type")
+            .contains("unsupported questionType"));
+    }
+
+    #[test]
     fn rejects_speakai_output_with_wrong_reply_contract() {
-        let output = r#"{"speechAct":"question","questionType":"personal_information","topic":"Place of residence","summary":"A question","replies":[{"strategy":"supportive","purpose":"AGREE","text":"Ja.","meaning":"Yes."},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Und du?","meaning":"And you?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Lieber nicht.","meaning":"Rather not."}]}"#;
+        let output = r#"{"speechAct":"question","questionType":"personal","topic":"Place of residence","summary":"A question","replies":[{"strategy":"supportive","purpose":"AGREE","text":"Ja.","meaning":"Yes."},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Und du?","meaning":"And you?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Lieber nicht.","meaning":"Rather not."}]}"#;
         assert!(validate_speakai_output(output)
             .expect_err("wrong question strategy must fail")
             .contains("reply 1"));
