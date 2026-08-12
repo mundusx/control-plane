@@ -3128,6 +3128,65 @@ test("returns compact completed chunk outputs for decomposed jobs", async () => 
   assert.equal(result.progress.final_synthesis, false);
 });
 
+test("returns verified completed graph sections as a progressive partial response", async () => {
+  const calls = [];
+  const result = await pollChatJob(
+    "job-progressive-batches",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url) => {
+      calls.push(url);
+      return jsonResponse({
+        job: {
+          job_id: "job-progressive-batches",
+          status: "assigned",
+          execution_mode: "decompose",
+          graph_execution_enabled: true,
+          graph: {
+            nodes: [
+              {
+                id: "scope",
+                name: "Scope request",
+                status: "completed",
+                responsibility: "scope",
+                output: "response=The request covers origins and current impact.",
+              },
+              {
+                id: "foundations",
+                name: "Analyze foundations",
+                status: "completed",
+                responsibility: "chunk_analysis",
+                output: "response=The organization was founded in 2015.",
+              },
+              {
+                id: "impact",
+                name: "Analyze current impact",
+                status: "running",
+                responsibility: "chunk_analysis",
+              },
+              {
+                id: "synthesize",
+                name: "Synthesize final answer",
+                status: "waiting",
+                responsibility: "merge",
+              },
+            ],
+          },
+        },
+      });
+    },
+    { conversationId: "conv-progressive" },
+  );
+
+  assert.equal(result.status, "assigned");
+  assert.equal(result.output, "");
+  assert.equal(result.partial, true);
+  assert.equal(result.completed_batches, 2);
+  assert.match(result.partial_output, /## Scope request/);
+  assert.match(result.partial_output, /## Analyze foundations/);
+  assert.doesNotMatch(result.partial_output, /Analyze current impact|Synthesize final answer/);
+  assert.ok(!calls.some((url) => url.includes("/v1/conversations/")));
+});
+
 test("exposes runtime metrics from completed chunk output", async () => {
   const fetchImpl = async () =>
     jsonResponse({
