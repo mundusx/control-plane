@@ -1028,6 +1028,67 @@ fn render_node_records(nodes: Vec<NodeRecord>) -> String {
     html
 }
 
+fn render_registry_records(nodes: Vec<NodeRecord>) -> String {
+    if nodes.is_empty() {
+        return r#"<div class="empty">No identities have registered yet.</div>"#.to_string();
+    }
+
+    let mut html = String::from(
+        r#"<div class="table registry-table">
+        <div class="thead">
+          <div>Identity</div>
+          <div>Fingerprint</div>
+          <div>Trust path</div>
+          <div>Reputation</div>
+          <div>Policy decision</div>
+          <div>Last activity</div>
+        </div>"#,
+    );
+
+    for node in nodes {
+        let (trust_bg, trust_fg, trust_label) = trust_badge(&node.identity_trust_path);
+        let (grade_bg, grade_fg, grade_label) = trust_grade_badge(
+            node.trust.score,
+            node.trust.completed_jobs,
+            node.trust.failed_jobs,
+        );
+        let (policy_bg, policy_fg, policy_label) = policy_badge(node.policy_allowed);
+        let policy_reason = node
+            .policy_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+            .unwrap_or("No policy restriction reported");
+
+        html.push_str(&format!(
+            r#"<div class="row">
+              <div><a class="inline-link" href="/nodes/{path_id}"><strong>{node_id}</strong></a><div class="meta">{hostname}</div></div>
+              <div><code>{fingerprint}</code><div class="meta">signed device identity</div></div>
+              <div><span class="pill" style="background:{trust_bg};color:{trust_fg};">{trust_label}</span><div class="meta">{trust_path}</div></div>
+              <div><span class="pill" style="background:{grade_bg};color:{grade_fg};">grade {grade} &middot; {score}/100</span><div class="meta">{grade_label} &middot; accepted {accepted} &middot; rejected {rejected}</div></div>
+              <div><span class="pill" style="background:{policy_bg};color:{policy_fg};">{policy_label}</span><div class="meta">{policy_reason}</div></div>
+              <div>{updated_at}<div class="meta">reported state {reported_state}</div></div>
+            </div>"#,
+            path_id = escape_path_segment(&node.node_id),
+            node_id = escape_html(&node.node_id),
+            hostname = escape_html(&node.hostname),
+            fingerprint = escape_html(&node.public_key_fingerprint),
+            trust_label = escape_html(trust_label),
+            trust_path = escape_html(&node.identity_trust_path),
+            grade = trust_grade(node.trust.score),
+            score = node.trust.score,
+            grade_label = escape_html(grade_label),
+            accepted = node.trust.accepted_results,
+            rejected = node.trust.rejected_results,
+            policy_reason = escape_html(policy_reason),
+            updated_at = escape_html(&node.updated_at),
+            reported_state = escape_html(&node.reported_state.to_string()),
+        ));
+    }
+
+    html.push_str("</div>");
+    html
+}
+
 fn compact_preview(value: Option<&str>) -> String {
     let text = value.unwrap_or("").trim();
     if text.is_empty() {
@@ -2645,7 +2706,7 @@ fn control_plane_operator_page(
         "nodes",
     );
     let (paged_registry_nodes, registry_pagination) = paged_node_records(registry_nodes, query);
-    let registry_nodes_html = render_node_records(paged_registry_nodes);
+    let registry_nodes_html = render_registry_records(paged_registry_nodes);
     let registry_pagination_html =
         render_pagination_controls("/registry", query, &registry_pagination);
     let mut filtered_jobs = state.jobs.values().cloned().collect::<Vec<_>>();
@@ -2836,6 +2897,7 @@ fn control_plane_operator_page(
       .metric strong {{ display:block; margin-top:7px; font-size:28px; }}
       .table {{ display:grid; overflow-x:auto; }}
       .thead,.row {{ display:grid; grid-template-columns:minmax(210px,1.15fr) minmax(130px,.7fr) minmax(170px,.95fr) minmax(90px,.45fr) minmax(90px,.45fr) minmax(340px,1.8fr) minmax(130px,.7fr) minmax(110px,.55fr); gap:14px; min-width:1280px; padding:14px 0; border-bottom:1px solid var(--line); }}
+      .registry-table .thead,.registry-table .row {{ grid-template-columns:minmax(180px,1fr) minmax(240px,1.35fr) minmax(180px,1fr) minmax(220px,1.2fr) minmax(220px,1.2fr) minmax(150px,.8fr); min-width:1190px; }}
       .jobs-table .thead,.jobs-table .row {{ grid-template-columns:minmax(190px,1fr) minmax(260px,1.45fr) minmax(110px,.55fr) minmax(160px,.85fr) minmax(160px,.85fr) minmax(180px,.9fr) minmax(260px,1.35fr); min-width:1320px; }}
       .thead {{ color:var(--muted); text-transform:uppercase; font-size:12px; }}
       .row > div {{ min-width:0; overflow-wrap:anywhere; }}
@@ -7650,6 +7712,14 @@ mod tests {
         assert!(html.contains("local-encrypted-fallback"));
         assert!(html.contains("allowed"));
         assert!(html.contains("42"));
+        assert!(html.contains("Identity"));
+        assert!(html.contains("Fingerprint"));
+        assert!(html.contains("Trust path"));
+        assert!(html.contains("Reputation"));
+        assert!(html.contains("Policy decision"));
+        assert!(html.contains("Last activity"));
+        assert!(html.contains("signed device identity"));
+        assert!(!html.contains("Power</div>"));
     }
 
     #[test]
@@ -7664,7 +7734,7 @@ mod tests {
             None,
         );
 
-        assert!(html.contains("No nodes have registered yet."));
+        assert!(html.contains("No identities have registered yet."));
     }
 
     #[test]
