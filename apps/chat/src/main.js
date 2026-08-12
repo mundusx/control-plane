@@ -18,6 +18,10 @@ const DEFAULT_WEB_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_WEB_SEARCH_MAX_RESULTS = 4;
 const DEFAULT_WEB_SEARCH_TTL_SECONDS = 1800;
 const DEFAULT_WEB_SEARCH_DAILY_BUDGET = 0;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 8192;
+const CONTEXT_SAFETY_TOKENS = 256;
+const MAX_HISTORY_CONTEXT_TOKENS = 2048;
+const RECENT_HISTORY_MESSAGES = 6;
 const POLL_INTERVAL_MS = 1500;
 const MAX_BODY_BYTES = 64 * 1024;
 // Temporarily disabled by product decision. Keep the implementation available so it can
@@ -2441,6 +2445,8 @@ export function page(config = configFromEnv()) {
       if (failed) parts.push(failed + " failed");
       const tokenUsage = formatTokenUsageSummary(progress.token_usage);
       if (tokenUsage) parts.push(tokenUsage);
+      const contextUsage = formatContextUsageSummary(progress.context_usage);
+      if (contextUsage) parts.push(contextUsage);
       return "Completed work sections - " + parts.join(" - ");
     }
 
@@ -2456,6 +2462,24 @@ export function page(config = configFromEnv()) {
           ? " (" + usage.output_budget_percent + "%)"
           : "";
         parts.push("output " + usage.output_tokens + "/" + usage.max_output_tokens + percent);
+      }
+      return parts.join(" - ");
+    }
+
+    function formatContextUsageSummary(usage) {
+      if (!usage || !Number.isFinite(usage.context_window_tokens)) return "";
+      const qualifier = usage.source === "runtime" ? "" : " estimated";
+      const parts = [
+        "context " + usage.used_tokens + "/" + usage.context_window_tokens +
+          " used" + qualifier + " (" + usage.used_percent + "%)",
+        "reserved " + usage.reserved_tokens + "/" + usage.context_window_tokens +
+          " (" + usage.reserved_percent + "%)",
+      ];
+      if (usage.history_compressed) {
+        parts.push(
+          "history compressed " + usage.history_source_messages + "→" +
+            usage.history_included_messages + " messages",
+        );
       }
       return parts.join(" - ");
     }
@@ -3141,13 +3165,35 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
     }
   }
 
+  const model = String(body?.model ?? config.modelOverride ?? "").trim();
+  const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
+  const contextWindowTokens = capacityProfile?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona);
   let codeTransformationFollowUp = false;
+  let historyContext = emptyHistoryContext();
   if (conversationId) {
     try {
-      const history = await fetchConversationHistory(conversationId, config, fetchImpl, 16);
+      const history = await fetchConversationHistory(conversationId, config, fetchImpl, 80);
       codeTransformationFollowUp = isCodeTransformationFollowUp(message, history);
-      const context = buildRelevantHistoryContext(history, codeTransformationFollowUp);
+      const maxOutputTokens = inferMaxTokens(
+        message,
+        body?.maxTokens,
+        capacityProfile,
+        codeTransformationFollowUp,
+      );
+      const historyTokenBudget = conversationHistoryTokenBudget({
+        contextWindowTokens,
+        maxOutputTokens,
+        baseInputTokens: estimateDisplayTokens(`${systemPrompt}\n${message}`) ?? 0,
+      });
+      historyContext = codeTransformationFollowUp
+        ? historyContextForCodeTransformation(history, message, historyTokenBudget)
+        : buildCompressedHistoryContext(history, {
+            currentMessage: message,
+            maxTokens: historyTokenBudget,
+            recentMessages: RECENT_HISTORY_MESSAGES,
+          });
+      const context = historyContext.text;
       if (context) {
         systemPrompt = `${systemPrompt}\n\nPrior conversation (most recent last):\n${context}`;
       }
@@ -3156,13 +3202,17 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
     }
   }
 
-  const model = String(body?.model ?? config.modelOverride ?? "").trim();
-  const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
+  const resolvedMaxTokens = inferMaxTokens(
+    message,
+    body?.maxTokens,
+    capacityProfile,
+    codeTransformationFollowUp,
+  );
   const jobBody = buildGenericJobBody(message, config, {
     model: body?.model,
     voicePersona: body?.voicePersona,
     executionMode: body?.executionMode,
-    maxTokens: body?.maxTokens,
+    maxTokens: resolvedMaxTokens,
     temperature: body?.temperature,
     topP: body?.topP,
     capacityProfile,
@@ -3186,8 +3236,16 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
     throw httpError(502, "control plane did not return a job id");
   }
   rememberPromptForJob(jobId, message);
+  const contextUsage = plannedContextUsage({
+    contextWindowTokens,
+    systemPrompt: jobBody.system_prompt,
+    prompt: jobBody.prompt,
+    maxOutputTokens: jobBody.max_tokens,
+    historyContext,
+  });
+  rememberContextUsageForJob(jobId, contextUsage);
 
-  return formatChatJob(jobId, job, jobBody.model || null, { prompt: message });
+  return formatChatJob(jobId, job, jobBody.model || null, { prompt: message, contextUsage });
 }
 
 async function recordAssistantTurn(conversationId, config, fetchImpl, result) {
@@ -3371,7 +3429,14 @@ function capacityProfileFromNode(node, requestedModel = "") {
   const memoryMb = positiveInteger(node.available_memory_mb, 0);
   const cudaReady = health.cuda_device_available === true || String(node.backend ?? "").toLowerCase() === "cuda";
   const lowVram = String(health.notes ?? "").toLowerCase().includes("low-vram");
-  const base = capacityProfileFromModel(modelName, { gpuAvailable, memoryMb, cudaReady, lowVram });
+  const contextWindowTokens = contextWindowTokensForNode(node, modelName);
+  const base = capacityProfileFromModel(modelName, {
+    gpuAvailable,
+    memoryMb,
+    cudaReady,
+    lowVram,
+    contextWindowTokens,
+  });
   return {
     ...base,
     score: base.score + Math.min(20, Math.floor(gpuAvailable / 5)) + Math.min(20, Math.floor(memoryMb / 2048)),
@@ -3384,6 +3449,7 @@ function capacityProfileFromModel(modelName, node = null) {
   const memoryMb = node?.memoryMb ?? 0;
   const cudaReady = node?.cudaReady ?? false;
   const lowVram = node?.lowVram ?? false;
+  const contextWindowTokens = positiveInteger(node?.contextWindowTokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
   let tier = "small";
   let score = modelBillions * 10;
 
@@ -3401,7 +3467,23 @@ function capacityProfileFromModel(modelName, node = null) {
     score += 25;
   }
 
-  return { tier, modelBillions, gpuAvailable, memoryMb, cudaReady, lowVram, score };
+  return { tier, modelBillions, gpuAvailable, memoryMb, cudaReady, lowVram, contextWindowTokens, score };
+}
+
+function contextWindowTokensForNode(node, modelName) {
+  const capabilities = node?.capabilities ?? {};
+  const requested = String(modelName ?? "").trim().toLowerCase();
+  const models = Array.isArray(capabilities.models) ? capabilities.models : [];
+  const matchingModel = models.find((model) => {
+    const names = [model?.name, ...(Array.isArray(model?.aliases) ? model.aliases : [])]
+      .map((value) => String(value ?? "").trim().toLowerCase())
+      .filter(Boolean);
+    return requested && names.includes(requested);
+  });
+  return positiveInteger(
+    matchingModel?.context_tokens ?? capabilities.max_context_tokens,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+  );
 }
 
 function modelSizeBillions(modelName) {
@@ -6108,6 +6190,7 @@ function buildGroundedSystemPrompt(message, voicePersona, sources) {
 
 const groundingSourcesByJobId = new Map();
 const promptContextByJobId = new Map();
+const contextUsageByJobId = new Map();
 const MAX_TRACKED_PROMPT_CONTEXTS = 250;
 
 function rememberPromptForJob(jobId, prompt) {
@@ -6132,6 +6215,25 @@ function lookupPromptForJob(jobId) {
 
 function forgetPromptForJob(jobId) {
   promptContextByJobId.delete(String(jobId ?? "").trim());
+}
+
+function rememberContextUsageForJob(jobId, usage) {
+  const key = String(jobId ?? "").trim();
+  if (!key || !usage) return;
+  contextUsageByJobId.set(key, usage);
+  while (contextUsageByJobId.size > MAX_TRACKED_PROMPT_CONTEXTS) {
+    const oldestKey = contextUsageByJobId.keys().next().value;
+    if (!oldestKey) break;
+    contextUsageByJobId.delete(oldestKey);
+  }
+}
+
+function lookupContextUsageForJob(jobId) {
+  return contextUsageByJobId.get(String(jobId ?? "").trim()) ?? null;
+}
+
+function forgetContextUsageForJob(jobId) {
+  contextUsageByJobId.delete(String(jobId ?? "").trim());
 }
 
 function trackGroundingSources(jobId, sources, config) {
@@ -6315,11 +6417,16 @@ export async function pollChatJob(jobId, config = configFromEnv(), fetchImpl = f
   }
   const conversationId = options.conversationId ?? null;
   const prompt = String(options.message ?? "").trim() || lookupPromptForJob(jobId);
+  const contextUsage = lookupContextUsageForJob(jobId);
   const latest = await controlPlaneFetch(fetchImpl, config, `/v1/jobs/${encodeURIComponent(jobId)}`);
   const job = latest.job ?? latest;
-  const formatted = formatChatJob(jobId, job, job.model ?? config.modelOverride ?? null, { prompt });
+  const formatted = formatChatJob(jobId, job, job.model ?? config.modelOverride ?? null, {
+    prompt,
+    contextUsage,
+  });
   if (["completed", "failed"].includes(String(formatted.status ?? "").toLowerCase())) {
     forgetPromptForJob(jobId);
+    forgetContextUsageForJob(jobId);
     logChatJobTerminalState(jobId, formatted);
   }
   if (formatted.status === "completed" && conversationId) {
@@ -6376,7 +6483,7 @@ async function waitForChatJob(jobId, body, config, fetchImpl) {
 }
 
 function formatChatJob(jobId, job, fallbackModel, options = {}) {
-  const progress = summarizeChatProgress(job);
+  const progress = summarizeChatProgress(job, options.contextUsage);
   const sourceOutput = String(job.output ?? "");
   const rawOutput = job.status === "completed" ? cleanChatOutput(sourceOutput) : "";
   const output = job.status === "completed" ? promoteSectionOutputWhenFinalIsThin(rawOutput, progress) : "";
@@ -6432,7 +6539,7 @@ function mergedCompletedSectionOutputs(progress) {
   return sections.length ? sections.join("\n\n") : "";
 }
 
-function summarizeChatProgress(job) {
+function summarizeChatProgress(job, plannedContext = null) {
   const graph = job.graph ?? {};
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const parentStatus = String(job.status ?? "").toLowerCase();
@@ -6445,6 +6552,7 @@ function summarizeChatProgress(job) {
         output: job.output ?? null,
         effective_max_tokens: job.effective_max_tokens ?? job.max_tokens ?? null,
       }, job);
+      const tokenUsage = summarizeTokenUsage([directNode], job);
       return {
         total: 0,
         completed: 0,
@@ -6457,7 +6565,8 @@ function summarizeChatProgress(job) {
         merging: false,
         final_synthesis: false,
         strategy: job.plan?.strategy ?? "single_job",
-        token_usage: summarizeTokenUsage([directNode], job),
+        token_usage: tokenUsage,
+        context_usage: summarizeContextUsage(tokenUsage, plannedContext),
       };
   }
 
@@ -6487,6 +6596,7 @@ function summarizeChatProgress(job) {
     effectiveNodes.map((node) => [node.id, node.name || node.id]),
   );
   const formattedNodes = effectiveNodes.map((node) => formatChatProgressNode(node, job, nodeNameById));
+  const tokenUsage = summarizeTokenUsage(formattedNodes, job);
 
     return {
       total: effectiveNodes.length,
@@ -6499,7 +6609,8 @@ function summarizeChatProgress(job) {
       final_synthesis: Boolean(finalNodeId),
       strategy: job.plan?.strategy ?? graph.strategy ?? "graph",
       nodes: formattedNodes,
-      token_usage: summarizeTokenUsage(formattedNodes, job),
+      token_usage: tokenUsage,
+      context_usage: summarizeContextUsage(tokenUsage, plannedContext),
     };
 }
 
@@ -7408,6 +7519,187 @@ export function buildHistoryContext(messages, maxChars = 3000, maxTurns = 8) {
     used += line.length;
   }
   return lines.join("\n");
+}
+
+function summarizeContextUsage(tokenUsage, planned) {
+  if (!planned || !Number.isFinite(planned.context_window_tokens)) return null;
+  const inputTokens = Number.isFinite(tokenUsage?.input_tokens)
+    ? tokenUsage.input_tokens
+    : planned.estimated_input_tokens;
+  const outputTokens = Number.isFinite(tokenUsage?.output_tokens) ? tokenUsage.output_tokens : 0;
+  const maxOutputTokens = Number.isFinite(tokenUsage?.max_output_tokens)
+    ? tokenUsage.max_output_tokens
+    : planned.max_output_tokens;
+  const usedTokens = inputTokens + outputTokens;
+  const reservedTokens = inputTokens + maxOutputTokens + CONTEXT_SAFETY_TOKENS;
+  const contextWindowTokens = planned.context_window_tokens;
+  return {
+    context_window_tokens: contextWindowTokens,
+    used_tokens: usedTokens,
+    used_percent: Math.round((usedTokens / contextWindowTokens) * 100),
+    reserved_tokens: reservedTokens,
+    reserved_percent: Math.round((reservedTokens / contextWindowTokens) * 100),
+    history_tokens: planned.history_tokens,
+    history_compressed: planned.history_compressed,
+    history_source_messages: planned.history_source_messages,
+    history_included_messages: planned.history_included_messages,
+    duplicate_messages_removed: planned.duplicate_messages_removed,
+    source: tokenUsage?.source === "runtime" ? "runtime" : "estimated",
+  };
+}
+
+export function buildCompressedHistoryContext(messages, options = {}) {
+  const source = Array.isArray(messages) ? messages : [];
+  const currentMessage = String(options.currentMessage ?? "").trim();
+  const maxTokens = Math.max(0, positiveInteger(options.maxTokens, MAX_HISTORY_CONTEXT_TOKENS));
+  const maxChars = maxTokens * 4;
+  const recentMessageLimit = Math.max(2, positiveInteger(options.recentMessages, RECENT_HISTORY_MESSAGES));
+  const { messages: filtered, removed } = removeCurrentMessageFromHistory(source, currentMessage);
+  const fullText = filtered.map(formatHistoryMessage).join("\n");
+  if (!filtered.length || maxChars <= 0) {
+    return {
+      text: "",
+      compressed: filtered.length > 0,
+      source_messages: source.length,
+      included_messages: 0,
+      recent_messages: 0,
+      compressed_messages: filtered.length,
+      duplicate_messages_removed: removed,
+      estimated_tokens: 0,
+      max_tokens: maxTokens,
+    };
+  }
+  if (filtered.length <= 12 && fullText.length <= maxChars) {
+    return {
+      text: fullText,
+      compressed: false,
+      source_messages: source.length,
+      included_messages: filtered.length,
+      recent_messages: filtered.length,
+      compressed_messages: 0,
+      duplicate_messages_removed: removed,
+      estimated_tokens: estimateDisplayTokens(fullText) ?? 0,
+      max_tokens: maxTokens,
+    };
+  }
+
+  const recent = filtered.slice(-recentMessageLimit);
+  const older = filtered.slice(0, -recent.length);
+  const header = `[Earlier conversation compressed from ${older.length} messages]`;
+  const recentCharBudget = Math.max(0, Math.floor((maxChars - header.length - 2) * 0.68));
+  const perRecentChars = Math.max(40, Math.floor(recentCharBudget / Math.max(1, recent.length)) - 1);
+  const recentLines = recent.map((entry) => compactHistoryMessage(entry, perRecentChars));
+  const recentText = recentLines.join("\n");
+  const summaryBudget = Math.max(0, maxChars - header.length - recentText.length - 2);
+  const summaryLines = [];
+  let summaryChars = 0;
+  for (let index = older.length - 1; index >= 0; index--) {
+    const line = compactHistoryMessage(older[index], Math.min(180, summaryBudget));
+    const next = line.length + (summaryLines.length ? 1 : 0);
+    if (!line || summaryChars + next > summaryBudget) continue;
+    summaryLines.unshift(line);
+    summaryChars += next;
+  }
+  const text = [header, summaryLines.join("\n"), recentText].filter(Boolean).join("\n").slice(0, maxChars);
+  return {
+    text,
+    compressed: true,
+    source_messages: source.length,
+    included_messages: summaryLines.length + recentLines.length,
+    recent_messages: recentLines.length,
+    compressed_messages: older.length,
+    duplicate_messages_removed: removed,
+    estimated_tokens: estimateDisplayTokens(text) ?? 0,
+    max_tokens: maxTokens,
+  };
+}
+
+function removeCurrentMessageFromHistory(messages, currentMessage) {
+  const filtered = [...messages];
+  let removed = 0;
+  const last = filtered[filtered.length - 1];
+  if (
+    currentMessage &&
+    String(last?.role ?? "").toLowerCase() === "user" &&
+    String(last?.content ?? "").trim() === currentMessage
+  ) {
+    filtered.pop();
+    removed = 1;
+  }
+  return { messages: filtered, removed };
+}
+
+function formatHistoryMessage(entry) {
+  const label = entry?.role === "assistant" ? "Assistant" : "User";
+  return `${label}: ${String(entry?.content ?? "").trim()}`;
+}
+
+function compactHistoryMessage(entry, maxChars) {
+  const label = entry?.role === "assistant" ? "Assistant" : "User";
+  if (maxChars <= label.length + 2) return `${label}:`.slice(0, Math.max(0, maxChars));
+  const contentBudget = Math.max(1, maxChars - label.length - 2);
+  const content = compactRelevantContent(entry?.content, contentBudget);
+  return `${label}: ${content}`.slice(0, maxChars);
+}
+
+function emptyHistoryContext() {
+  return {
+    text: "",
+    compressed: false,
+    source_messages: 0,
+    included_messages: 0,
+    recent_messages: 0,
+    compressed_messages: 0,
+    duplicate_messages_removed: 0,
+    estimated_tokens: 0,
+    max_tokens: 0,
+  };
+}
+
+function historyContextForCodeTransformation(history, currentMessage, maxTokens) {
+  const source = Array.isArray(history) ? history : [];
+  const { messages: filtered, removed } = removeCurrentMessageFromHistory(source, currentMessage);
+  const relevant = buildRelevantHistoryContext(filtered, true);
+  const maxChars = Math.max(0, maxTokens * 4);
+  const text = maxChars <= 0
+    ? ""
+    : relevant.length > maxChars
+      ? compactRelevantContent(relevant, maxChars)
+      : relevant;
+  return {
+    text,
+    compressed: filtered.length > 2 || relevant.length > maxChars,
+    source_messages: source.length,
+    included_messages: Math.min(2, filtered.length),
+    recent_messages: Math.min(2, filtered.length),
+    compressed_messages: Math.max(0, filtered.length - 2),
+    duplicate_messages_removed: removed,
+    estimated_tokens: estimateDisplayTokens(text) ?? 0,
+    max_tokens: maxTokens,
+  };
+}
+
+function conversationHistoryTokenBudget({ contextWindowTokens, maxOutputTokens, baseInputTokens }) {
+  const available = Math.max(
+    0,
+    contextWindowTokens - maxOutputTokens - baseInputTokens - CONTEXT_SAFETY_TOKENS,
+  );
+  const proportional = Math.floor(contextWindowTokens * 0.35);
+  return Math.max(0, Math.min(MAX_HISTORY_CONTEXT_TOKENS, proportional, available));
+}
+
+function plannedContextUsage({ contextWindowTokens, systemPrompt, prompt, maxOutputTokens, historyContext }) {
+  const estimatedInputTokens = estimateDisplayTokens(`${systemPrompt}\n${prompt}`) ?? 0;
+  return {
+    context_window_tokens: contextWindowTokens,
+    estimated_input_tokens: estimatedInputTokens,
+    max_output_tokens: maxOutputTokens,
+    history_compressed: Boolean(historyContext.compressed),
+    history_source_messages: historyContext.source_messages,
+    history_included_messages: historyContext.included_messages,
+    history_tokens: historyContext.estimated_tokens,
+    duplicate_messages_removed: historyContext.duplicate_messages_removed,
+  };
 }
 
 export function buildRelevantHistoryContext(messages, codeTransformationFollowUp = false) {

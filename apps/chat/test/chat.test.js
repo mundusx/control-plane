@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildHistoryContext,
+  buildCompressedHistoryContext,
   buildRelevantHistoryContext,
   buildChatSystemPrompt,
   cleanChatOutput,
@@ -87,6 +88,7 @@ test("renders a usable chat page", () => {
   assert.match(html, /\.work-trace/);
   assert.match(html, /Completed work sections/);
   assert.match(html, /function formatTokenUsageSummary/);
+  assert.match(html, /function formatContextUsageSummary/);
   assert.match(html, /token_usage/);
   assert.match(html, /Ask everyone/);
   assert.doesNotMatch(html, /<span class="kbd">\/<\/span>Commands/);
@@ -3724,6 +3726,129 @@ test("buildHistoryContext formats turns chronologically with role labels", () =>
   ]);
 
   assert.equal(context, "User: hello\nAssistant: hi there");
+});
+
+test("compresses older history while preserving recent turns within a token budget", () => {
+  const messages = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `turn-${index} ${"detail ".repeat(30)}`,
+  }));
+
+  const result = buildCompressedHistoryContext(messages, {
+    maxTokens: 180,
+    recentMessages: 4,
+  });
+
+  assert.equal(result.compressed, true);
+  assert.equal(result.source_messages, 20);
+  assert.equal(result.recent_messages, 4);
+  assert.match(result.text, /Earlier conversation compressed from 16 messages/);
+  assert.match(result.text, /turn-16/);
+  assert.match(result.text, /turn-19/);
+  assert.ok(result.estimated_tokens <= 180);
+});
+
+test("removes the just-submitted user message from reconstructed history", () => {
+  const result = buildCompressedHistoryContext([
+    { role: "user", content: "Earlier question" },
+    { role: "assistant", content: "Earlier answer" },
+    { role: "user", content: "Continue the discussion." },
+  ], {
+    currentMessage: "Continue the discussion.",
+    maxTokens: 500,
+  });
+
+  assert.equal(result.duplicate_messages_removed, 1);
+  assert.doesNotMatch(result.text, /Continue the discussion/);
+  assert.match(result.text, /Earlier question/);
+  assert.match(result.text, /Earlier answer/);
+});
+
+test("tracks model context occupancy and compression for submitted chat jobs", async () => {
+  let submittedBody = null;
+  const history = Array.from({ length: 20 }, (_, index) => ({
+    role: index === 19 ? "user" : index % 2 === 0 ? "user" : "assistant",
+    content: index === 19 ? "Continue the discussion." : `history-${index} ${"detail ".repeat(90)}`,
+  }));
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/v1/conversations/conv-context/messages") && init.method === "POST") {
+      return jsonResponse({ id: 1 }, true, 201);
+    }
+    if (url.includes("/v1/conversations/conv-context/messages")) {
+      return jsonResponse({ conversation_id: "conv-context", messages: history });
+    }
+    if (url === "https://uat.mundusx.ai/v1/nodes?page=1&page_size=25") {
+      return jsonResponse({ items: [{
+        node_id: "node-context",
+        state: "ready",
+        policy_allowed: true,
+        computed_policy_allowed: true,
+        available_memory_mb: 8192,
+        available_gpu_percent: 70,
+        capabilities: {
+          max_context_tokens: 4096,
+          models: [{ name: "Qwen/Qwen2.5-7B-Instruct", context_tokens: 4096 }],
+        },
+        worker_health: {
+          healthy: true,
+          runtime_ready: true,
+          model_name: "Qwen/Qwen2.5-7B-Instruct",
+          cuda_device_available: true,
+        },
+      }] });
+    }
+    if (url === "https://uat.mundusx.ai/v1/jobs") {
+      submittedBody = JSON.parse(init.body);
+      return jsonResponse({
+        job_id: "job-context",
+        job: { job_id: "job-context", status: "queued", prompt: submittedBody.prompt, system_prompt: submittedBody.system_prompt, max_tokens: submittedBody.max_tokens },
+      });
+    }
+    if (url === "https://uat.mundusx.ai/v1/jobs/job-context") {
+      return jsonResponse({ job: {
+        job_id: "job-context",
+        status: "completed",
+        prompt: submittedBody.prompt,
+        system_prompt: submittedBody.system_prompt,
+        max_tokens: submittedBody.max_tokens,
+        graph_execution_enabled: false,
+        graph: { nodes: [{
+          id: "job.direct",
+          name: "Direct response",
+          status: "completed",
+          effective_max_tokens: submittedBody.max_tokens,
+          output: "llama.cpp mode=cuda; prompt_eval_count=500; eval_count=100; response=Done.",
+        }] },
+        output: "llama.cpp mode=cuda; prompt_eval_count=500; eval_count=100; response=Done.",
+      } });
+    }
+    throw new Error(`unexpected url ${url}`);
+  };
+
+  const result = await submitChatJob(
+    { message: "Continue the discussion.", conversationId: "conv-context" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.match(submittedBody.system_prompt, /Earlier conversation compressed from/);
+  assert.equal((submittedBody.system_prompt.match(/Continue the discussion\./g) ?? []).length, 0);
+  assert.equal(result.progress.context_usage.context_window_tokens, 4096);
+  assert.equal(result.progress.context_usage.history_compressed, true);
+  assert.equal(result.progress.context_usage.duplicate_messages_removed, 1);
+  assert.ok(result.progress.context_usage.reserved_percent < 100);
+
+  const completed = await pollChatJob(
+    "job-context",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+  assert.equal(completed.progress.context_usage.source, "runtime");
+  assert.equal(completed.progress.context_usage.used_tokens, 600);
+  assert.equal(
+    completed.progress.context_usage.reserved_tokens,
+    500 + submittedBody.max_tokens + 256,
+  );
 });
 
 test("buildRelevantHistoryContext keeps only code and conversion instructions for follow-ups", () => {
