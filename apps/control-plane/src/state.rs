@@ -540,6 +540,8 @@ impl ControlPlaneState {
             min_memory_mb: update.min_memory_mb,
             min_cuda_vram_mb: update.min_cuda_vram_mb,
             allowed_backends: normalize_admission_backends(update.allowed_backends),
+            enforce_model_policy: update.enforce_model_policy,
+            allowed_models: update.allowed_models,
             updated_at: Some(updated_at),
             updated_by: update
                 .actor
@@ -5821,6 +5823,30 @@ pub fn evaluate_admission_policy(
             ));
         }
 
+        if policy.enforce_model_policy {
+            match worker_health
+                .model_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                Some(name) if policy.allowed_models.iter().any(|allowed| allowed == name) => {}
+                Some(name)
+                    if crate::contracts::OFFICIAL_MODELS
+                        .iter()
+                        .any(|(known, _)| *known == name) =>
+                {
+                    reasons.push(format!("model {name} is denied by operator model policy"));
+                }
+                Some(name) => reasons.push(format!(
+                    "model {name} is under investigation and is not admitted"
+                )),
+                None => {
+                    reasons.push("model identity is missing and is under investigation".to_string())
+                }
+            }
+        }
+
         if policy.require_trusted_identity && !is_trusted_identity_path(identity_trust_path) {
             reasons.push("trusted identity is required by admission policy".to_string());
         }
@@ -6135,6 +6161,8 @@ mod tests {
         state.register(m_series_registration("node-1"));
         state.set_admission_policy(
             AdmissionPolicyUpdate {
+                enforce_model_policy: false,
+                allowed_models: crate::contracts::official_model_names(),
                 enabled: true,
                 require_trusted_identity: false,
                 require_healthy_runtime: true,
@@ -6158,11 +6186,35 @@ mod tests {
     }
 
     #[test]
+    fn model_policy_quarantines_unknown_models_for_investigation() {
+        let mut policy = AdmissionPolicy::default();
+        policy.enforce_model_policy = true;
+        let health = healthy_worker_health("1");
+
+        let (allowed, reason) = evaluate_admission_policy(
+            true,
+            None,
+            &policy,
+            Backend::M,
+            crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK,
+            16_000,
+            &health,
+        );
+
+        assert!(!allowed);
+        assert!(reason
+            .as_deref()
+            .is_some_and(|value| value.contains("under investigation")));
+    }
+
+    #[test]
     fn admission_policy_blocks_underpowered_cuda_node() {
         let mut state = ControlPlaneState::default();
         state.register(cuda_registration("node-cuda"));
         state.set_admission_policy(
             AdmissionPolicyUpdate {
+                enforce_model_policy: false,
+                allowed_models: crate::contracts::official_model_names(),
                 enabled: true,
                 require_trusted_identity: false,
                 require_healthy_runtime: true,
@@ -6194,6 +6246,8 @@ mod tests {
 
         state.set_admission_policy(
             AdmissionPolicyUpdate {
+                enforce_model_policy: false,
+                allowed_models: crate::contracts::official_model_names(),
                 enabled: true,
                 require_trusted_identity: true,
                 require_healthy_runtime: true,

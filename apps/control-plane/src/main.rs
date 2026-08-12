@@ -2630,6 +2630,18 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("system");
+    let model_rows = contracts::OFFICIAL_MODELS
+        .iter()
+        .enumerate()
+        .map(|(index, (name, label))| {
+            format!(
+                r#"<label class="check"><input type="checkbox" name="allow_model_{index}" value="1"{checked}> <strong>{label}</strong><span class="meta">{name}</span></label>"#,
+                checked = checked_attr(policy.allowed_models.iter().any(|allowed| allowed == name)),
+                label = escape_html(label),
+                name = escape_html(name),
+            )
+        })
+        .collect::<String>();
 
     format!(
         r#"<section class="panel">
@@ -2639,6 +2651,7 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
                 <label class="check"><input type="checkbox" name="enabled" value="1"{enabled_checked}> Enforce admission rules</label>
                 <label class="check"><input type="checkbox" name="require_healthy_runtime" value="1"{runtime_checked}> Require healthy runtime</label>
                 <label class="check"><input type="checkbox" name="require_trusted_identity" value="1"{trusted_checked}> Require trusted identity</label>
+                <label class="check"><input type="checkbox" name="enforce_model_policy" value="1"{model_policy_checked}> Enforce model admission (unknown models become Under investigation)</label>
                 <div class="policy-grid">
                   <label><span>Minimum system RAM (MB)</span><input type="number" name="min_memory_mb" min="0" step="512" value="{min_memory_mb}"></label>
                   <label><span>Minimum CUDA VRAM (MB)</span><input type="number" name="min_cuda_vram_mb" min="0" step="512" value="{min_cuda_vram_mb}"></label>
@@ -2650,6 +2663,11 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
                   <label class="check"><input type="checkbox" name="allow_backend_cuda" value="1"{allow_cuda}> CUDA</label>
                   <label class="check"><input type="checkbox" name="allow_backend_vllm" value="1"{allow_vllm}> vLLM</label>
                 </div>
+                <div class="policy-models">
+                  <h3>Model market admission</h3>
+                  <p class="meta">Checked models are allowed. Unchecked catalog models are denied. Models outside this curated catalog are Under investigation and cannot take jobs.</p>
+                  <div class="policy-grid">{model_rows}</div>
+                </div>
                 <button class="button primary" type="submit">Apply Policy</button>
               </form>
               <p class="meta">Last update: {updated} by {updated_by}</p>
@@ -2657,12 +2675,14 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
         enabled_checked = checked_attr(policy.enabled),
         runtime_checked = checked_attr(policy.require_healthy_runtime),
         trusted_checked = checked_attr(policy.require_trusted_identity),
+        model_policy_checked = checked_attr(policy.enforce_model_policy),
         min_memory_mb = policy.min_memory_mb,
         min_cuda_vram_mb = policy.min_cuda_vram_mb,
         allow_auto = checked_attr(allow_auto),
         allow_m = checked_attr(allow_m),
         allow_cuda = checked_attr(allow_cuda),
         allow_vllm = checked_attr(allow_vllm),
+        model_rows = model_rows,
         updated = escape_html(updated),
         updated_by = escape_html(updated_by),
     )
@@ -4434,14 +4454,22 @@ fn admission_policy_update_from_form(body: &str) -> AdmissionPolicyUpdate {
     if form_flag(body, "allow_backend_vllm") {
         allowed_backends.push(Backend::Vllm);
     }
+    let allowed_models = contracts::OFFICIAL_MODELS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| form_flag(body, &format!("allow_model_{index}")))
+        .map(|(_, (name, _))| (*name).to_string())
+        .collect();
 
     AdmissionPolicyUpdate {
         enabled: form_flag(body, "enabled"),
         require_trusted_identity: form_flag(body, "require_trusted_identity"),
         require_healthy_runtime: form_flag(body, "require_healthy_runtime"),
+        enforce_model_policy: form_flag(body, "enforce_model_policy"),
         min_memory_mb: form_u32(body, "min_memory_mb"),
         min_cuda_vram_mb: form_u32(body, "min_cuda_vram_mb"),
         allowed_backends,
+        allowed_models,
         actor: Some("operator".to_string()),
     }
 }
@@ -6508,18 +6536,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_chat_mode, auth_disabled_flag_enabled, completion_event_type,
-        control_plane_bind_addr_from_env, control_plane_home, control_plane_operator_page,
-        database_health_from_values, deploy_fingerprint_from_env, handle_connection,
-        job_async_payload, legacy_supabase_enabled_from_value, migration_database_url_from_values,
-        now_unix_seconds, operator_auth_mode_from_env, operator_auth_startup_config_error,
-        operator_auth_token_from_env, parse_conversation_messages_path, parse_conversation_path,
-        parse_request, read_http_request, requires_operator_auth,
-        status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
-        HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource, SupabaseSyncStatus,
-        AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
-        DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV, LEGACY_DATABASE_URL_ENV,
-        LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
+        admission_policy_update_from_form, apply_chat_mode, auth_disabled_flag_enabled,
+        completion_event_type, control_plane_bind_addr_from_env, control_plane_home,
+        control_plane_operator_page, database_health_from_values, deploy_fingerprint_from_env,
+        handle_connection, job_async_payload, legacy_supabase_enabled_from_value,
+        migration_database_url_from_values, now_unix_seconds, operator_auth_mode_from_env,
+        operator_auth_startup_config_error, operator_auth_token_from_env,
+        parse_conversation_messages_path, parse_conversation_path, parse_request,
+        read_http_request, requires_operator_auth, status_snapshot_with_deploy_fingerprint,
+        trust_grade, trust_grade_badge, HttpRequestReadError, OperatorAuthMode, OperatorPage,
+        StorageSource, SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
+        CONTROL_PLANE_LOGO_PATH, DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV,
+        LEGACY_DATABASE_URL_ENV, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
     };
 
     use crate::contracts::{
@@ -7735,6 +7763,31 @@ mod tests {
         );
 
         assert!(html.contains("No identities have registered yet."));
+    }
+
+    #[test]
+    fn operator_settings_lists_curated_models_and_parses_admission_choices() {
+        let state = ControlPlaneState::default();
+        let html = control_plane_operator_page(
+            &state,
+            StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+            OperatorPage::Settings,
+            None,
+        );
+
+        assert!(html.contains("Model market admission"));
+        assert!(html.contains("Under investigation"));
+        assert!(html.contains("Qwen/Qwen2.5-0.5B-Instruct"));
+
+        let update = admission_policy_update_from_form(
+            "enabled=1&enforce_model_policy=1&allow_backend_m=1&allow_model_1=1",
+        );
+        assert!(update.enforce_model_policy);
+        assert_eq!(
+            update.allowed_models,
+            vec!["Qwen/Qwen2.5-0.5B-Instruct".to_string()]
+        );
     }
 
     #[test]

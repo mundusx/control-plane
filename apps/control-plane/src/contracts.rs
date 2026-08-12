@@ -1359,6 +1359,10 @@ pub struct AdmissionPolicy {
     pub min_memory_mb: u32,
     pub min_cuda_vram_mb: u32,
     pub allowed_backends: Vec<Backend>,
+    #[serde(default)]
+    pub enforce_model_policy: bool,
+    #[serde(default = "official_model_names")]
+    pub allowed_models: Vec<String>,
     pub updated_at: Option<String>,
     pub updated_by: Option<String>,
 }
@@ -1372,6 +1376,8 @@ impl Default for AdmissionPolicy {
             min_memory_mb: 0,
             min_cuda_vram_mb: 0,
             allowed_backends: vec![Backend::Auto, Backend::M, Backend::Cuda, Backend::Vllm],
+            enforce_model_policy: false,
+            allowed_models: official_model_names(),
             updated_at: None,
             updated_by: None,
         }
@@ -1392,7 +1398,31 @@ pub struct AdmissionPolicyUpdate {
     pub min_cuda_vram_mb: u32,
     #[serde(default)]
     pub allowed_backends: Vec<Backend>,
+    #[serde(default)]
+    pub enforce_model_policy: bool,
+    #[serde(default = "official_model_names")]
+    pub allowed_models: Vec<String>,
     pub actor: Option<String>,
+}
+
+pub const OFFICIAL_MODELS: &[(&str, &str)] = &[
+    ("HuggingFaceTB/SmolLM2-135M-Instruct", "SmolLM2 135M"),
+    ("Qwen/Qwen2.5-0.5B-Instruct", "Qwen 2.5 0.5B"),
+    ("Qwen/Qwen2.5-1.5B-Instruct", "Qwen 2.5 1.5B"),
+    ("mlx-community/Qwen2.5-3B-Instruct-4bit", "Qwen 2.5 3B MLX"),
+    ("mlx-community/Qwen2.5-7B-Instruct-4bit", "Qwen 2.5 7B MLX"),
+    ("Qwen/Qwen2.5-7B-Instruct-AWQ", "Qwen 2.5 7B AWQ"),
+    ("Qwen/Qwen2.5-14B-Instruct-AWQ", "Qwen 2.5 14B AWQ"),
+    ("Qwen/Qwen2.5-32B-Instruct-AWQ", "Qwen 2.5 32B AWQ"),
+    ("Qwen/Qwen2.5-72B-Instruct-AWQ", "Qwen 2.5 72B AWQ"),
+    ("Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen3 Coder 30B-A3B"),
+];
+
+pub fn official_model_names() -> Vec<String> {
+    OFFICIAL_MODELS
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
