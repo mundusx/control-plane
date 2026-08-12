@@ -2871,7 +2871,6 @@ fn control_plane_operator_page(
         ),
     };
     let nav = [
-        OperatorPage::Flow,
         OperatorPage::Nodes,
         OperatorPage::Jobs,
         OperatorPage::Credits,
@@ -4355,7 +4354,6 @@ fn control_plane_home(
         <a class="brand motion-glow" href="/" aria-label="EHDA control plane home"><img class="brand-mark" alt="Mercedes-Benz emblem" src="{logo_path}" /><span class="brand-copy"><strong>EHDA</strong><small>Control Plane</small></span></a>
         <nav class="nav">
           <a class="nav-item motion-lift active" href="/"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>Overview</a>
-          <a class="nav-item motion-lift" href="/flow"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h6v5H3zM15 13h6v5h-6z"/><path d="M9 8.5h3a3 3 0 0 1 3 3V13"/><path d="m12 10 3 3 3-3"/></svg>Flow</a>
           <a class="nav-item motion-lift" href="/nodes"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/></svg>Nodes</a>
           <a class="nav-item motion-lift" href="/jobs"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16"/><path d="M4 17h16"/><circle cx="7" cy="7" r="2"/><circle cx="17" cy="17" r="2"/></svg>Jobs</a>
           <a class="nav-item motion-lift" href="/credits"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>Credits</a>
@@ -8012,7 +8010,7 @@ mod tests {
         assert!(html.contains("Customers do not always wait for the full job"));
         assert!(html.contains("Batch 1"));
         assert!(html.contains("stream only self-contained, verified sections"));
-        assert!(html.contains(r#"class="nav-item motion-lift active" href="/flow""#));
+        assert!(!html.contains(r#"href="/flow""#));
     }
 
     #[test]
