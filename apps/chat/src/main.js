@@ -2439,7 +2439,25 @@ export function page(config = configFromEnv()) {
       const parts = [completed + "/" + total + " " + unit + " complete"];
       if (running) parts.push(running + " running");
       if (failed) parts.push(failed + " failed");
+      const tokenUsage = formatTokenUsageSummary(progress.token_usage);
+      if (tokenUsage) parts.push(tokenUsage);
       return "Completed work sections - " + parts.join(" - ");
+    }
+
+    function formatTokenUsageSummary(usage) {
+      if (!usage || !Number.isFinite(usage.total_tokens)) return "";
+      const qualifier = usage.source === "runtime" ? "" : " estimated";
+      const parts = [
+        "tokens " + usage.total_tokens + " total" + qualifier +
+          " (" + usage.input_tokens + " input + " + usage.output_tokens + " output)",
+      ];
+      if (Number.isFinite(usage.max_output_tokens)) {
+        const percent = Number.isFinite(usage.output_budget_percent)
+          ? " (" + usage.output_budget_percent + "%)"
+          : "";
+        parts.push("output " + usage.output_tokens + "/" + usage.max_output_tokens + percent);
+      }
+      return parts.join(" - ");
     }
 
     function createChunkRow(chunk) {
@@ -6419,6 +6437,14 @@ function summarizeChatProgress(job) {
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const parentStatus = String(job.status ?? "").toLowerCase();
   if (!nodes.length) {
+      const directNode = formatChatProgressNode({
+        id: job.job_id || "direct",
+        name: "Direct response",
+        status: parentStatus,
+        assigned_node_id: job.assigned_node_id ?? null,
+        output: job.output ?? null,
+        effective_max_tokens: job.effective_max_tokens ?? job.max_tokens ?? null,
+      }, job);
       return {
         total: 0,
         completed: 0,
@@ -6431,6 +6457,7 @@ function summarizeChatProgress(job) {
         merging: false,
         final_synthesis: false,
         strategy: job.plan?.strategy ?? "single_job",
+        token_usage: summarizeTokenUsage([directNode], job),
       };
   }
 
@@ -6459,6 +6486,7 @@ function summarizeChatProgress(job) {
   const nodeNameById = Object.fromEntries(
     effectiveNodes.map((node) => [node.id, node.name || node.id]),
   );
+  const formattedNodes = effectiveNodes.map((node) => formatChatProgressNode(node, job, nodeNameById));
 
     return {
       total: effectiveNodes.length,
@@ -6470,7 +6498,8 @@ function summarizeChatProgress(job) {
       merging,
       final_synthesis: Boolean(finalNodeId),
       strategy: job.plan?.strategy ?? graph.strategy ?? "graph",
-      nodes: effectiveNodes.map((node) => formatChatProgressNode(node, job, nodeNameById)),
+      nodes: formattedNodes,
+      token_usage: summarizeTokenUsage(formattedNodes, job),
     };
 }
 
@@ -6504,6 +6533,62 @@ function formatChatProgressNode(node, job, nodeNameById = {}) {
     runtime_metrics: runtimeMetrics,
     output: compactOutput,
   };
+}
+
+function summarizeTokenUsage(nodes, job) {
+  const completedNodes = (Array.isArray(nodes) ? nodes : [])
+    .filter((node) => String(node?.status ?? "").toLowerCase() === "completed");
+  if (!completedNodes.length) return null;
+
+  const exactInputCounts = completedNodes
+    .map((node) => node.runtime_metrics?.prompt_eval_count)
+    .filter(Number.isFinite);
+  const exactOutputCounts = completedNodes
+    .map((node) => node.runtime_metrics?.eval_count)
+    .filter(Number.isFinite);
+  const hasExactInput = exactInputCounts.length === completedNodes.length;
+  const hasExactOutput = exactOutputCounts.length === completedNodes.length;
+
+  const inputTokens = hasExactInput
+    ? exactInputCounts.reduce((sum, value) => sum + value, 0)
+    : estimateJobInputTokens(job);
+  const outputTokens = hasExactOutput
+    ? exactOutputCounts.reduce((sum, value) => sum + value, 0)
+    : sumAvailableMetric(completedNodes, "estimated_output_tokens");
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return null;
+
+  const nodeBudgets = completedNodes
+    .map((node) => node.effective_max_tokens)
+    .filter(Number.isFinite);
+  const maxOutputTokens = nodeBudgets.length
+    ? nodeBudgets.reduce((sum, value) => sum + value, 0)
+    : positiveNumberOrNull(job.effective_max_tokens) ?? positiveNumberOrNull(job.max_tokens);
+  const outputBudgetPercent = Number.isFinite(maxOutputTokens) && maxOutputTokens > 0
+    ? Math.round((outputTokens / maxOutputTokens) * 100)
+    : null;
+
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+    max_output_tokens: maxOutputTokens ?? null,
+    output_budget_percent: outputBudgetPercent,
+    source: hasExactInput && hasExactOutput ? "runtime" : "estimated",
+  };
+}
+
+function estimateJobInputTokens(job) {
+  const parts = [job?.system_prompt, job?.prompt]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+  return parts.length ? estimateDisplayTokens(parts.join("\n")) : null;
+}
+
+function sumAvailableMetric(values, key) {
+  const metrics = values.map((value) => value?.[key]).filter(Number.isFinite);
+  return metrics.length === values.length
+    ? metrics.reduce((sum, value) => sum + value, 0)
+    : null;
 }
 
 function logChatJobTerminalState(jobId, formatted) {

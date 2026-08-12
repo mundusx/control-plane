@@ -86,6 +86,8 @@ test("renders a usable chat page", () => {
   assert.match(html, /id="network-state"/);
   assert.match(html, /\.work-trace/);
   assert.match(html, /Completed work sections/);
+  assert.match(html, /function formatTokenUsageSummary/);
+  assert.match(html, /token_usage/);
   assert.match(html, /Ask everyone/);
   assert.doesNotMatch(html, /<span class="kbd">\/<\/span>Commands/);
   assert.match(html, /id="web-search-toggle"/);
@@ -3138,6 +3140,7 @@ test("exposes runtime metrics from completed chunk output", async () => {
               id: "job.direct",
               name: "Direct response",
               status: "completed",
+              effective_max_tokens: 256,
               output:
                 "llama.cpp mode=cuda; total_duration=3000000000; load_duration=500000000; prompt_eval_count=20; prompt_eval_duration=100000000; prompt_eval_rate=200; eval_count=40; eval_duration=2000000000; eval_rate=20; response=Done.",
             },
@@ -3161,6 +3164,53 @@ test("exposes runtime metrics from completed chunk output", async () => {
     eval_count: 40,
     eval_duration_ms: 2000,
     eval_rate: 20,
+  });
+  assert.deepEqual(result.progress.token_usage, {
+    input_tokens: 20,
+    output_tokens: 40,
+    total_tokens: 60,
+    max_output_tokens: 256,
+    output_budget_percent: 16,
+    source: "runtime",
+  });
+});
+
+test("labels aggregate token usage as estimated when runtime counters are unavailable", async () => {
+  const fetchImpl = async () =>
+    jsonResponse({
+      job: {
+        job_id: "job-estimated-token-usage",
+        status: "completed",
+        prompt: "12345678",
+        system_prompt: "12345678",
+        max_tokens: 100,
+        graph_execution_enabled: false,
+        graph: {
+          nodes: [
+            {
+              id: "job.direct",
+              name: "Direct response",
+              status: "completed",
+              output: "response=12345678",
+            },
+          ],
+        },
+      },
+    });
+
+  const result = await pollChatJob(
+    "job-estimated-token-usage",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.deepEqual(result.progress.token_usage, {
+    input_tokens: 5,
+    output_tokens: 2,
+    total_tokens: 7,
+    max_output_tokens: 100,
+    output_budget_percent: 2,
+    source: "estimated",
   });
 });
 
