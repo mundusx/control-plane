@@ -1039,6 +1039,21 @@ export function page(config = configFromEnv()) {
       font-size: 14px;
       line-height: 1.35;
     }
+    .partial-response {
+      border: 1px solid rgba(124, 108, 246, 0.24);
+      border-radius: 14px;
+      background: linear-gradient(145deg, rgba(124, 108, 246, 0.07), rgba(59, 130, 246, 0.04));
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+    .partial-response-label {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
     .work-title {
       display: flex;
       align-items: center;
@@ -1964,15 +1979,37 @@ export function page(config = configFromEnv()) {
     function renderPendingJob(node, payload) {
       const body = node.querySelector(".message-body");
       body.textContent = "";
-      const liveSections = createLiveSections(payload);
-      if (liveSections) {
-        body.appendChild(liveSections);
+      const partialResponse = createPartialResponse(payload);
+      if (partialResponse) {
+        body.appendChild(partialResponse);
+      } else {
+        const liveSections = createLiveSections(payload);
+        if (liveSections) {
+          body.appendChild(liveSections);
+        }
       }
       body.appendChild(createWorkTrace(payload));
       const meta = document.createElement("div");
       meta.className = "meta";
       meta.textContent = formatJobMeta(payload);
       body.appendChild(meta);
+    }
+
+    function createPartialResponse(payload) {
+      const output = String(payload.partial_output || "").trim();
+      if (!output) return null;
+      const wrapper = document.createElement("section");
+      wrapper.className = "partial-response";
+      wrapper.setAttribute("aria-live", "polite");
+      const label = document.createElement("div");
+      label.className = "partial-response-label";
+      const batches = Number(payload.completed_batches || 0);
+      label.textContent = batches === 1
+        ? "Partial response · 1 verified batch"
+        : "Partial response · " + batches + " verified batches";
+      wrapper.appendChild(label);
+      appendRichMessage(wrapper, output);
+      return wrapper;
     }
 
     function renderCompletedJob(node, payload, conversationId = null) {
@@ -6487,6 +6524,16 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
   const sourceOutput = String(job.output ?? "");
   const rawOutput = job.status === "completed" ? cleanChatOutput(sourceOutput) : "";
   const output = job.status === "completed" ? promoteSectionOutputWhenFinalIsThin(rawOutput, progress) : "";
+  const partialOutput = job.status === "completed" || !job.graph_execution_enabled
+    ? ""
+    : mergedCompletedSectionOutputs(progress);
+  const completedBatches = partialOutput
+    ? progress.nodes.filter((node) =>
+        node.status === "completed" &&
+        String(node.responsibility ?? "section") !== "merge" &&
+        String(node.output ?? "").trim(),
+      ).length
+    : 0;
   const qualityFlags = CHAT_VERIFIER_ENABLED && job.status === "completed"
     ? detectChatQualityFlags(sourceOutput, rawOutput, output, options.prompt)
     : [];
@@ -6495,6 +6542,9 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
     job_id: jobId,
     status: rejectFlag ? "failed" : job.status,
     output: rejectFlag ? "" : output,
+    partial_output: partialOutput,
+    partial: Boolean(partialOutput),
+    completed_batches: completedBatches,
     output_cleaned: job.status === "completed" && output !== String(job.output ?? ""),
     quality_flags: qualityFlags,
     needs_repair: qualityFlags.some((flag) => flag.severity === "repair"),
