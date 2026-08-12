@@ -2616,6 +2616,7 @@ fn control_plane_operator_page(
 ) -> String {
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
+    let registered = state.nodes.len();
     let trusted = snapshot["trusted_count"].as_u64().unwrap_or(0);
     let paused = snapshot["paused_count"].as_u64().unwrap_or(0);
     let policy_blocked = snapshot["policy_blocked_count"].as_u64().unwrap_or(0);
@@ -2638,6 +2639,15 @@ fn control_plane_operator_page(
     let (paged_nodes, nodes_pagination) = paged_node_records(filtered_nodes, query);
     let filtered_nodes_html = render_node_records(paged_nodes);
     let nodes_pagination_html = render_pagination_controls("/nodes", query, &nodes_pagination);
+    let registry_nodes = filter_json_items(
+        state.nodes.values().cloned().collect::<Vec<_>>(),
+        query,
+        "nodes",
+    );
+    let (paged_registry_nodes, registry_pagination) = paged_node_records(registry_nodes, query);
+    let registry_nodes_html = render_node_records(paged_registry_nodes);
+    let registry_pagination_html =
+        render_pagination_controls("/registry", query, &registry_pagination);
     let mut filtered_jobs = state.jobs.values().cloned().collect::<Vec<_>>();
     filtered_jobs.reverse();
     let filtered_jobs = filter_json_items(filtered_jobs, query, "jobs");
@@ -2714,7 +2724,7 @@ fn control_plane_operator_page(
         OperatorPage::Registry => format!(
             r#"{filters}
             <section class="grid four">
-              <a class="metric metric-link" href="/registry"><span>Registered</span><strong>{nodes}</strong></a>
+              <a class="metric metric-link" href="/registry"><span>Registered</span><strong>{registered}</strong></a>
               <a class="metric metric-link" href="/registry?trust=trusted"><span>Trusted</span><strong>{trusted}</strong></a>
               <a class="metric metric-link" href="/registry?policy=blocked"><span>Policy blocked</span><strong>{policy_blocked}</strong></a>
               <div class="metric"><span>Storage</span><strong>{storage_value}</strong></div>
@@ -2722,10 +2732,13 @@ fn control_plane_operator_page(
             <section class="panel">
               <h2>Registry & Trust</h2>
               <p class="meta">Signed registry snapshots, identity trust paths, and policy decisions should be reviewed here. Raw node data remains available for contract checks.</p>
-              <a class="button" href="/v1/status">Status JSON</a>
+              {registry_nodes_html}
+              {registry_pagination_html}
             </section>"#,
             filters = control_filter_form(page, query, &nodes_api_href),
-            storage_value = escape_html(storage_source.as_str())
+            storage_value = escape_html(storage_source.as_str()),
+            registry_nodes_html = registry_nodes_html,
+            registry_pagination_html = registry_pagination_html
         ),
         OperatorPage::Settings => format!(
             r#"{filters}
@@ -7615,6 +7628,43 @@ mod tests {
         assert!(html.contains(r#"href="/nodes""#));
         assert!(html.contains(r#"href="/nodes?state=online""#));
         assert!(html.contains(r#"href="/v1/nodes?page=1&amp;page_size=25&amp;search=node-new&amp;start=1&amp;end=99&amp;state=online&amp;backend=m&amp;trust=trusted&amp;policy=allowed""#));
+    }
+
+    #[test]
+    fn registry_page_renders_registered_identity_and_trust_evidence() {
+        let mut state = ControlPlaneState::default();
+        register_ready_node(&mut state, "node-registry", "REGISTRY-HOST", "42");
+
+        let html = control_plane_operator_page(
+            &state,
+            StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+            OperatorPage::Registry,
+            None,
+        );
+
+        assert!(html.contains("Registry &amp; Trust") || html.contains("Registry & Trust"));
+        assert!(html.contains("node-registry"));
+        assert!(html.contains("REGISTRY-HOST"));
+        assert!(html.contains("fingerprint-node-registry"));
+        assert!(html.contains("local-encrypted-fallback"));
+        assert!(html.contains("allowed"));
+        assert!(html.contains("42"));
+    }
+
+    #[test]
+    fn registry_page_explains_when_no_identities_are_registered() {
+        let state = ControlPlaneState::default();
+
+        let html = control_plane_operator_page(
+            &state,
+            StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+            OperatorPage::Registry,
+            None,
+        );
+
+        assert!(html.contains("No nodes have registered yet."));
     }
 
     #[test]
