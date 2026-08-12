@@ -3411,11 +3411,17 @@ function stripToolModePrefix(message) {
 
 export function extractLinearEquation(message) {
   const text = String(message ?? "").trim();
-  if (!/\b(?:solve|equation|find)\b/i.test(text) || !text.includes("=")) {
+  if (!/\b(?:solve|equation|find)\b/i.test(text)) {
     return null;
   }
 
-  const equation = cleanEquationText(text);
+  const requestedVariable = extractRequestedLinearVariable(text);
+  const implicitExpression = text.includes("=") ? null : extractImplicitZeroExpression(text, requestedVariable);
+  if (!text.includes("=") && !implicitExpression) {
+    return null;
+  }
+
+  const equation = implicitExpression ? `${implicitExpression}=0` : cleanEquationText(text);
   const sides = equation.split("=");
   if (sides.length !== 2) {
     return null;
@@ -3424,24 +3430,127 @@ export function extractLinearEquation(message) {
   const left = parseLinearExpression(sides[0]);
   const right = parseLinearExpression(sides[1]);
   const variable = mergeLinearVariable(left?.variable, right?.variable);
-  if (!left || !right || variable === false) {
-    return null;
+  if (
+    left &&
+    right &&
+    variable !== false &&
+    (!requestedVariable || !variable || requestedVariable === variable)
+  ) {
+    const coefficient = left.coefficient - right.coefficient;
+    const constant = right.constant - left.constant;
+    if (Math.abs(coefficient) >= 1e-12) {
+      const solution = normalizeNumber(constant / coefficient);
+      return {
+        variable,
+        equation,
+        solution,
+        left,
+        right,
+      };
+    }
   }
 
-  const coefficient = left.coefficient - right.coefficient;
-  const constant = right.constant - left.constant;
-  if (Math.abs(coefficient) < 1e-12) {
+  return requestedVariable
+    ? solveSymbolicLinearEquation(equation, requestedVariable, Boolean(implicitExpression))
+    : null;
+}
+
+function extractRequestedLinearVariable(text) {
+  const findMatch = String(text).match(/\bfind\s+([a-z])\b/i);
+  if (findMatch) return findMatch[1].toLowerCase();
+  const solveForMatch = String(text).match(/\bsolve\b[\s\S]*?\bfor\s+([a-z])\b/i);
+  return solveForMatch ? solveForMatch[1].toLowerCase() : null;
+}
+
+function extractImplicitZeroExpression(text, requestedVariable) {
+  if (!requestedVariable) return null;
+  const source = String(text).trim();
+  const trailingFind = source.match(/^(.+?)\s*[,;:]\s*find\s+[a-z]\b/i);
+  const leadingFind = source.match(/^\s*find\s+[a-z]\s*[:;,]\s*(.+)$/i);
+  const expression = String(trailingFind?.[1] ?? leadingFind?.[1] ?? "")
+    .replace(/[−–—]/g, "-")
+    .replace(/\s+/g, "");
+  if (
+    !expression ||
+    !expression.toLowerCase().includes(requestedVariable) ||
+    !/^[0-9a-zA-Z+\-*.]+$/.test(expression)
+  ) {
     return null;
   }
+  return expression;
+}
 
-  const solution = normalizeNumber(constant / coefficient);
+function solveSymbolicLinearEquation(equation, requestedVariable, assumedZero) {
+  const [leftText, rightText] = equation.split("=");
+  const left = parseSymbolicLinearSide(leftText);
+  const right = parseSymbolicLinearSide(rightText);
+  if (!left || !right) return null;
+
+  const combined = new Map(left);
+  for (const [name, coefficient] of right) {
+    combined.set(name, (combined.get(name) ?? 0) - coefficient);
+  }
+  const targetCoefficient = normalizeNumber(combined.get(requestedVariable) ?? 0);
+  if (Math.abs(targetCoefficient) < 1e-12) return null;
+  combined.delete(requestedVariable);
+
+  const isolated = new Map();
+  const solution = new Map();
+  for (const [name, coefficient] of combined) {
+    const moved = normalizeNumber(-coefficient);
+    if (Math.abs(moved) < 1e-12) continue;
+    isolated.set(name, moved);
+    solution.set(name, normalizeNumber(moved / targetCoefficient));
+  }
+
   return {
-    variable,
+    variable: requestedVariable,
     equation,
-    solution,
-    left,
-    right,
+    solutionExpression: formatSymbolicLinearExpression(solution),
+    targetCoefficient,
+    isolatedExpression: formatSymbolicLinearExpression(isolated),
+    assumedZero,
   };
+}
+
+function parseSymbolicLinearSide(expression) {
+  const compact = String(expression ?? "").replace(/\s+/g, "");
+  if (!compact || !/^[+\-]?(?:\d+(?:\.\d+)?|(?:\d+(?:\.\d+)?)?\*?[a-z])(?:[+\-](?:\d+(?:\.\d+)?|(?:\d+(?:\.\d+)?)?\*?[a-z]))*$/i.test(compact)) {
+    return null;
+  }
+
+  const values = new Map();
+  for (const rawTerm of compact.match(/[+\-]?[^+\-]+/g) ?? []) {
+    const sign = rawTerm.startsWith("-") ? -1 : 1;
+    const body = rawTerm.replace(/^[+\-]/, "");
+    const variableMatch = body.match(/^(\d+(?:\.\d+)?)?\*?([a-z])$/i);
+    const name = variableMatch ? variableMatch[2].toLowerCase() : "constant";
+    const magnitude = variableMatch ? Number(variableMatch[1] || 1) : Number(body);
+    if (!Number.isFinite(magnitude)) return null;
+    values.set(name, normalizeNumber((values.get(name) ?? 0) + sign * magnitude));
+  }
+  return values;
+}
+
+function formatSymbolicLinearExpression(values) {
+  const entries = [...values.entries()]
+    .filter(([, coefficient]) => Math.abs(coefficient) >= 1e-12)
+    .sort(([left], [right]) => {
+      if (left === "constant") return 1;
+      if (right === "constant") return -1;
+      return left.localeCompare(right);
+    });
+  if (!entries.length) return "0";
+
+  return entries.map(([name, coefficient], index) => {
+    const negative = coefficient < 0;
+    const magnitude = Math.abs(coefficient);
+    const core = name === "constant"
+      ? formatNumber(magnitude)
+      : `${Math.abs(magnitude - 1) < 1e-12 ? "" : formatNumber(magnitude)}${name}`;
+    if (index === 0) return negative ? `-${core}` : core;
+    return `${negative ? " - " : " + "}${core}`;
+  }).join("");
 }
 
 function cleanEquationText(text) {
@@ -4632,17 +4741,26 @@ function pluralizeUnit(unit, value) {
 }
 
 function fetchLinearEquationJob(message, equation) {
-  const answer = `${equation.variable} = ${formatNumber(equation.solution)}`;
-  const reducedCoefficient = normalizeNumber(equation.left.coefficient - equation.right.coefficient);
-  const reducedConstant = normalizeNumber(equation.right.constant - equation.left.constant);
+  const symbolic = typeof equation.solutionExpression === "string";
+  const answer = `${equation.variable} = ${symbolic ? equation.solutionExpression : formatNumber(equation.solution)}`;
+  const reducedCoefficient = symbolic
+    ? equation.targetCoefficient
+    : normalizeNumber(equation.left.coefficient - equation.right.coefficient);
+  const reducedConstant = symbolic
+    ? equation.isolatedExpression
+    : formatNumber(normalizeNumber(equation.right.constant - equation.left.constant));
+  const assumption = equation.assumedZero
+    ? `Assuming ${equation.equation} because no equality was provided.`
+    : null;
   const output = [
     `Equation: ${equation.equation}`,
+    assumption,
     `Answer: ${answer}`,
     "",
     "Method:",
-    `Move variable terms and constants to opposite sides: ${formatNumber(reducedCoefficient)}${equation.variable} = ${formatNumber(reducedConstant)}`,
+    `Move variable terms and constants to opposite sides: ${formatNumber(reducedCoefficient)}${equation.variable} = ${reducedConstant}`,
     `Divide both sides by ${formatNumber(reducedCoefficient)}.`,
-  ].join("\n");
+  ].filter((line) => line !== null).join("\n");
   return {
     job_id: `math-${Date.now().toString(36)}-${hashText(message).slice(0, 10)}`,
     status: "completed",
@@ -4660,7 +4778,7 @@ function fetchLinearEquationJob(message, equation) {
       answer,
       steps: [
         equation.equation,
-        `${formatNumber(reducedCoefficient)}${equation.variable} = ${formatNumber(reducedConstant)}`,
+        `${formatNumber(reducedCoefficient)}${equation.variable} = ${reducedConstant}`,
         answer,
       ],
     },
@@ -6821,6 +6939,9 @@ function inferMaxTokens(message, explicitValue, capacityProfile = null, codeTran
   if (message.length > 600) {
     return adaptiveTokenBudget("long", 768, capacityProfile);
   }
+  if (looksLikeMathRequest(lower)) {
+    return adaptiveTokenBudget("normal", 512, capacityProfile);
+  }
   if (message.length <= 40 && !containsAny(lower, ["explain", "why", "how", "what", "tell me", "describe"])) {
     return 128;
   }
@@ -7017,6 +7138,14 @@ function looksLikeCompleteProgramRequest(lower) {
       "need a program",
       "show me a program",
       "show me a code",
+      "give me a program",
+      "give me program",
+      "give me a code",
+      "give me code",
+      "provide a program",
+      "provide program",
+      "provide a code",
+      "provide code",
       "program in c",
       "program in java",
       "java program",
@@ -7041,6 +7170,7 @@ function looksLikeCompleteProgramRequest(lower) {
 
 function looksLikeMathRequest(lower) {
   return /\b(?:solve|equation|derivative|differentiate|integral|integrate|compute|calculate|simplify|factor|evaluate)\b/i.test(lower) ||
+    /\bfind\s+[a-z]\b/i.test(lower) ||
     /(?:\d+\s*[+\-*/=]\s*\d+|[a-z]\s*[+\-*/=]\s*\d+|\bint\b|d\/dx|[a-z]\^\d+)/i.test(lower);
 }
 

@@ -518,6 +518,27 @@ test("uses a complete-code budget for short code conversion requests", async () 
   assert.equal(calls[0].max_tokens, 1536);
 });
 
+test("recognizes concise give-me-code prompts as complete program requests", async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return jsonResponse({
+      job_id: "job-magic-square",
+      job: { job_id: "job-magic-square", status: "queued", execution_mode: "single", graph: { nodes: [] } },
+    });
+  };
+
+  await submitChatJob(
+    { message: "give me a code in java magic square 3x3" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(calls[0].execution_mode, "single");
+  assert.equal(calls[0].max_tokens, 1536);
+  assert.match(calls[0].system_prompt, /complete compilable source file/i);
+});
+
 test("decomposes advanced nested calculus prompts", async () => {
   const calls = [];
   const fetchImpl = async (_url, init) => {
@@ -823,6 +844,42 @@ test("routes simple linear equations to the math tool", async () => {
   ]);
   assert.match(result.output, /Answer: y = -9\.4/);
   assert.doesNotMatch(result.output, /\\frac|Certainly|To solve/i);
+});
+
+test("rearranges an implicit-zero linear expression for the requested variable", async () => {
+  const result = await submitChatJob(
+    { message: "x+x-25y, find x" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      throw new Error("implicit linear expressions should not call the control plane");
+    },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.model, "math-tool");
+  assert.equal(result.tool, "linear_equation");
+  assert.equal(result.response.answer, "x = 12.5y");
+  assert.match(result.output, /Assuming x\+x-25y=0/);
+  assert.match(result.output, /Answer: x = 12\.5y/);
+});
+
+test("uses a safe model budget when short math cannot use a deterministic tool", async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return jsonResponse({
+      job_id: "job-short-math",
+      job: { job_id: "job-short-math", status: "queued", execution_mode: "auto", graph: { nodes: [] } },
+    });
+  };
+
+  await submitChatJob(
+    { message: "calculate pi" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(calls[0].max_tokens, 512);
 });
 
 test("routes simple rate-distance word problems to the math tool", async () => {
@@ -2679,6 +2736,15 @@ test("extracts simple linear equations", () => {
     left: { coefficient: 2, constant: 5, variable: "x" },
     right: { coefficient: 0, constant: 11, variable: null },
   });
+  assert.deepEqual(extractLinearEquation("x+x-25y, find x"), {
+    variable: "x",
+    equation: "x+x-25y=0",
+    solutionExpression: "12.5y",
+    targetCoefficient: 2,
+    isolatedExpression: "25y",
+    assumedZero: true,
+  });
+  assert.equal(extractLinearEquation("find y: 2x + 5 = 11"), null);
   assert.equal(extractLinearEquation("solve x^2 = 4"), null);
   assert.equal(extractLinearEquation("write a story with x=3"), null);
 });
