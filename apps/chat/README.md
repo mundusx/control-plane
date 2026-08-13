@@ -90,3 +90,48 @@ Railway provides `PORT`; the app reads it automatically.
 11. Completed output and graph progress are returned to the browser.
 
 Streaming is not enabled yet; the first version uses polling because the control plane already exposes job status and output.
+
+## Hermes / OpenAI-Compatible Adapter
+
+Chat-U exposes a synchronous OpenAI-compatible adapter for clients such as Hermes:
+
+```text
+Base URL: https://chat-u.mundusx.ai/v1
+Chat completions: POST /chat/completions
+Models: GET /models
+Model: mundusx-agnostic (model-agnostic interface over heterogeneous routing)
+API key: use `not-required` if the client requires a value
+Streaming: accepted as buffered SSE after final validation
+```
+
+Example:
+
+```bash
+curl https://chat-u.mundusx.ai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mundusx-agnostic","messages":[{"role":"user","content":"What is the weather in Warsaw?"}]}'
+```
+
+`GET /models` intentionally exposes only `mundusx-agnostic`. It is a stable model-agnostic service
+identity, not a physical model. Behind it, the heterogeneous MundusX network lets the planner
+privately choose the best eligible contributor node,
+runtime, and model for every request. Requested model names, selected physical models, and node
+identities are not exposed through the Hermes adapter.
+
+The adapter enables Chat-U tool routing by default, preserves prior `messages` as model context,
+waits internally for MundusX jobs, and returns the final answer in
+`choices[0].message.content`. Set the optional top-level field `tool_mode` to `false`
+to disable broad web-search grounding for a request; deterministic direct tools may still route.
+
+For Open WebUI, go to **Admin Settings → Connections → OpenAI → Add Connection** and use:
+
+```text
+Connection type: External / OpenAI-compatible
+URL: https://chat-u.mundusx.ai/v1
+API key: not-required
+Model IDs filter: leave empty (auto-discovers mundusx-agnostic)
+```
+
+Chat-U accepts Open WebUI's default `stream=true`. Until genuine worker token streaming exists,
+it waits for the complete MundusX result, validates it, and then emits one OpenAI-compatible SSE
+content chunk followed by the terminal chunk and `[DONE]`.
