@@ -591,7 +591,7 @@ test("treats an example Node Express CRUD API as a complete code project", async
     fetchImpl,
   );
 
-  assert.equal(calls[0].execution_mode, "decompose");
+  assert.equal(calls[0].execution_mode, "single");
   assert.equal(calls[0].max_tokens, 4096);
   assert.match(calls[0].system_prompt, /complete compilable source file/i);
 });

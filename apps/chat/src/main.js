@@ -3574,6 +3574,9 @@ function shouldUseSingleCodeExecution(message) {
   if (!looksLikeCompleteProgramRequest(lower)) {
     return false;
   }
+  if (message.length <= 420 && looksLikeCodeProjectRequest(lower) && /\b(?:simple|example)\b/i.test(lower)) {
+    return true;
+  }
   if (looksLikeLargeCodeProject(lower)) {
     return false;
   }
