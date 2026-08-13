@@ -575,6 +575,27 @@ test("recognizes concise give-me-code prompts as complete program requests", asy
   assert.match(calls[0].system_prompt, /complete compilable source file/i);
 });
 
+test("treats an example Node Express CRUD API as a complete code project", async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return jsonResponse({
+      job_id: "job-node-crud",
+      job: { job_id: "job-node-crud", status: "queued", execution_mode: "decompose", graph: { nodes: [] } },
+    });
+  };
+
+  await submitChatJob(
+    { message: "Give me example Node.js code using Express for an API that connects to MySQL and provides CRUD interfaces for customer data." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(calls[0].execution_mode, "decompose");
+  assert.equal(calls[0].max_tokens, 4096);
+  assert.match(calls[0].system_prompt, /complete compilable source file/i);
+});
+
 test("decomposes advanced nested calculus prompts", async () => {
   const calls = [];
   const fetchImpl = async (_url, init) => {
@@ -4584,6 +4605,38 @@ test("submitChatTurn retries one invalid complete-code result with stricter vali
   assert.match(prompts[1], /internal validation retry/i);
   assert.equal(result.status, "completed");
   assert.match(result.output, /fibonacci\(8\)/);
+});
+
+test("submitChatTurn rejects and retries a truncated multi-file CRUD response", async () => {
+  const prompts = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (url.startsWith("https://uat.mundusx.ai/v1/nodes")) return jsonResponse({ items: [] });
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+    const body = JSON.parse(init.body);
+    prompts.push(body.system_prompt);
+    const retry = /internal validation retry/i.test(body.system_prompt);
+    return jsonResponse({
+      job_id: retry ? "job-crud-valid" : "job-crud-truncated",
+      job: {
+        job_id: retry ? "job-crud-valid" : "job-crud-truncated",
+        status: "completed",
+        output: retry
+          ? "```javascript\nconst express = require('express'); const mysql = require('mysql2'); const app = express(); const db = mysql.createConnection({host: 'localhost'}); app.get('/customers', handler); app.post('/customers', handler); app.put('/customers/:id', handler); app.delete('/customers/:id', handler); app.listen(3000);\n```"
+          : "Step 1:\n```sh\nnpm install express mysql2\n```\nStep 2:\n```javascript\nconst express = require('express'); const app = express(); app.get('/customers', handler); app.post('/customers', handler); app.put('/customers/:id', handler); app.delete('/customers/:id', handler);\n```\nStep 3:\n```javascript\nmodule.exports = { host: 'localhost',",
+      },
+    });
+  };
+
+  const result = await submitChatTurn(
+    { message: "Give me example Node.js code using Express for an API that connects to MySQL and provides CRUD interfaces for customer data." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /internal validation retry/i);
+  assert.equal(result.status, "completed");
+  assert.match(result.output, /app\.delete/);
 });
 
 test("submitChatTurn retries malformed math output before completing", async () => {

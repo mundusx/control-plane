@@ -38,7 +38,7 @@ export function detectChatQualityFlags(rawValue, cleanedValue, finalValue = clea
     addFlag("placeholder_code", "repair", "The code answer contained placeholders or omitted implementation.");
   }
   if (hasBrokenMarkdownFence(finalOutput)) {
-    addFlag("broken_markdown", "repair", "The rendered answer has an unmatched Markdown code fence.");
+    addFlag("broken_markdown", "reject", "The rendered answer has an unmatched Markdown code fence. Please retry.");
   }
   if (looksLikeMathPrompt(promptValue) && hasMalformedMathOutput(finalOutput)) {
     addFlag(
@@ -190,10 +190,13 @@ export function detectCompleteCodeQualityFlags(outputValue, promptValue = "") {
     return [];
   }
 
-  const fenced = extractFencedSource(output);
+  const fenced = extractPrimaryFencedSource(output, prompt);
   const source = fenced.source;
   const language = inferCodeLanguage(prompt, output, fenced.label);
   const problems = [];
+  if (hasBrokenMarkdownFence(output)) {
+    problems.push("has an unmatched Markdown code fence");
+  }
   if (!source) {
     problems.push("missing a fenced source file");
   } else {
@@ -204,6 +207,7 @@ export function detectCompleteCodeQualityFlags(outputValue, promptValue = "") {
     if (hasPlaceholderImplementation(source)) {
       problems.push("contains placeholder or omitted implementation");
     }
+    problems.push(...projectContractProblems(output, prompt));
   }
 
   if (!problems.length) {
@@ -218,17 +222,54 @@ export function detectCompleteCodeQualityFlags(outputValue, promptValue = "") {
 
 function isCompleteCodeRequest(promptValue) {
   const prompt = String(promptValue ?? "");
-  return /\b(?:create|write|generate|build|return|provide|implement|convert)\b/i.test(prompt) &&
+  const explicitComplete = /\b(?:create|write|generate|build|return|provide|implement|convert)\b/i.test(prompt) &&
     /\b(?:complete|full|runnable|compilable|executable|program|application|source\s+file)\b/i.test(prompt) &&
     /\b(?:code|program|application|source|class|main|function|method|script)\b/i.test(prompt);
+  const codeProject = /\b(?:create|write|generate|build|give|show|provide|implement|example)\b/i.test(prompt) &&
+    /\b(?:code|api|backend|server|service|application|app)\b/i.test(prompt) &&
+    /\b(?:node(?:\.?js)?|express|javascript|typescript|python|java|spring|flask|fastapi|go|rust|c#|\.net)\b/i.test(prompt) &&
+    /\b(?:crud|database|mysql|postgres(?:ql)?|mongodb|rest(?:ful)?|endpoint|route|api)\b/i.test(prompt);
+  return explicitComplete || codeProject;
 }
 
-function extractFencedSource(outputValue) {
-  const match = String(outputValue ?? "").match(/```([a-z0-9+#._-]*)\s*([\s\S]*?)```/i);
+function extractPrimaryFencedSource(outputValue, promptValue = "") {
+  const matches = [...String(outputValue ?? "").matchAll(/```([a-z0-9+#._-]*)\s*([\s\S]*?)```/gi)];
+  const expectedLanguage = inferCodeLanguage(promptValue, outputValue);
+  const match = matches
+    .map((candidate) => ({
+      match: candidate,
+      label: String(candidate[1] ?? "").toLowerCase(),
+      source: String(candidate[2] ?? "").trim(),
+    }))
+    .sort((left, right) => fencedSourceScore(right, expectedLanguage) - fencedSourceScore(left, expectedLanguage))[0];
   return {
-    label: String(match?.[1] ?? "").toLowerCase(),
-    source: String(match?.[2] ?? "").trim(),
+    label: match?.label ?? "",
+    source: match?.source ?? "",
   };
+}
+
+function fencedSourceScore(candidate, expectedLanguage) {
+  const shellLabel = /^(?:sh|shell|bash|powershell|console)$/i.test(candidate.label);
+  const languageMatch = candidate.label && inferCodeLanguage("", "", candidate.label) === expectedLanguage;
+  const codeSignals = (candidate.source.match(/[;{}]|\b(?:class|function|const|let|var|def|import|require|app\.(?:get|post|put|delete))\b/g) ?? []).length;
+  return candidate.source.length + codeSignals * 80 + (languageMatch ? 2000 : 0) - (shellLabel ? 4000 : 0);
+}
+
+function projectContractProblems(outputValue, promptValue) {
+  const output = String(outputValue ?? "");
+  const prompt = String(promptValue ?? "");
+  const problems = [];
+  if (/\bcrud\b|create[\s,/-]+read[\s,/-]+update[\s,/-]+delete/i.test(prompt)) {
+    for (const method of ["get", "post", "put", "delete"]) {
+      if (!new RegExp(`\\bapp\\.${method}\\s*\\(`, "i").test(output)) {
+        problems.push(`is missing the ${method.toUpperCase()} CRUD route`);
+      }
+    }
+  }
+  if (/\b(?:mysql|database)\b/i.test(prompt) && !/\b(?:createConnection|createPool|connect\s*\(|DATABASE_URL|DB_HOST|mysql|postgres|mongodb)\b/i.test(output)) {
+    problems.push("is missing database connection code");
+  }
+  return problems;
 }
 
 function inferCodeLanguage(promptValue, outputValue, fenceLabel = "") {

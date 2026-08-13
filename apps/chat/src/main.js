@@ -3086,7 +3086,7 @@ export async function submitChatTurn(body, config = configFromEnv(), fetchImpl =
     ? submitted
     : await waitForChatJob(submitted.job_id, body, config, fetchImpl);
   const retryableQualityFailure = result?.quality_flags?.some((flag) =>
-    ["invalid_complete_code", "invalid_math_output", "degenerate_repetition"].includes(flag.code),
+    ["invalid_complete_code", "invalid_math_output", "broken_markdown", "degenerate_repetition"].includes(flag.code),
   );
   if (result.status === "failed" && retryableQualityFailure && body?.qualityRetry !== true) {
     return submitChatTurn({ ...body, qualityRetry: true }, config, fetchImpl);
@@ -6886,7 +6886,8 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
         String(node.output ?? "").trim(),
       ).length
     : 0;
-  const verifyCompletedOutput = CHAT_VERIFIER_ENABLED || looksLikeMathRequest(String(options.prompt ?? "").toLowerCase());
+  const promptLower = String(options.prompt ?? "").toLowerCase();
+  const verifyCompletedOutput = CHAT_VERIFIER_ENABLED || looksLikeMathRequest(promptLower);
   const verifierFlags = verifyCompletedOutput && job.status === "completed"
     ? detectChatQualityFlags(sourceOutput, rawOutput, output, options.prompt)
     : [];
@@ -7776,7 +7777,16 @@ function looksLikeCompleteProgramRequest(lower) {
       "update",
       "student",
     ])
-  );
+  ) || looksLikeCodeProjectRequest(lower);
+}
+
+function looksLikeCodeProjectRequest(lower) {
+  const text = String(lower ?? "");
+  const asksForCode = /\b(?:create|write|generate|build|give|show|provide|implement|example)\b/i.test(text) &&
+    /\b(?:code|api|backend|server|service|application|app)\b/i.test(text);
+  const hasRuntime = /\b(?:node(?:\.?js)?|express|javascript|typescript|python|java|spring|flask|fastapi|go|rust|c#|\.net)\b/i.test(text);
+  const hasProjectScope = /\b(?:crud|database|mysql|postgres(?:ql)?|mongodb|rest(?:ful)?|endpoint|route|api)\b/i.test(text);
+  return asksForCode && hasRuntime && hasProjectScope;
 }
 
 function looksLikeMathRequest(lower) {
