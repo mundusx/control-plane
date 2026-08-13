@@ -51,6 +51,18 @@ export function detectChatQualityFlags(rawValue, cleanedValue, finalValue = clea
   return flags;
 }
 
+export function detectDegenerateRepetitionQualityFlags(outputValue) {
+  const prose = proseOutsideCodeFences(outputValue);
+  if (!hasAdjacentTokenLoop(prose)) {
+    return [];
+  }
+  return [{
+    code: "degenerate_repetition",
+    severity: "reject",
+    message: "MundusX generated a repeated text loop. Please retry.",
+  }];
+}
+
 export function normalizeCompleteCodeOutput(outputValue, promptValue = "") {
   const output = String(outputValue ?? "");
   const prompt = String(promptValue ?? "");
@@ -421,5 +433,41 @@ function hasRepeatedText(value) {
   }
 
   const repeatedClause = text.match(/\b(.{24,160}?)\b(?:\s+\1\b){2,}/i);
-  return Boolean(repeatedClause);
+  return Boolean(repeatedClause) || hasAdjacentTokenLoop(proseOutsideCodeFences(text));
+}
+
+function proseOutsideCodeFences(value) {
+  return String(value ?? "").replace(/```[a-zA-Z0-9_+#.-]*[ \t]*[\s\S]*?```/g, " ");
+}
+
+function hasAdjacentTokenLoop(value) {
+  const tokens = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  for (let phraseLength = 2; phraseLength <= 8; phraseLength += 1) {
+    for (let start = 0; start + phraseLength * 4 <= tokens.length; start += 1) {
+      let repeats = 1;
+      while (start + phraseLength * (repeats + 1) <= tokens.length) {
+        let matches = true;
+        for (let offset = 0; offset < phraseLength; offset += 1) {
+          if (tokens[start + offset] !== tokens[start + phraseLength * repeats + offset]) {
+            matches = false;
+            break;
+          }
+        }
+        if (!matches) {
+          break;
+        }
+        repeats += 1;
+      }
+      if (repeats >= 4 && phraseLength * repeats >= 12) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
