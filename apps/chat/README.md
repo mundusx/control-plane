@@ -99,7 +99,7 @@ Chat-U exposes a synchronous OpenAI-compatible adapter for clients such as Herme
 Base URL: https://chat-u.mundusx.ai/v1
 Chat completions: POST /chat/completions
 Models: GET /models
-Model: mundusx-agnostic (model-agnostic interface over heterogeneous routing)
+Model: ehda-agnostic (EHDA model-agnostic interface over heterogeneous routing)
 API key: use `not-required` if the client requires a value
 Streaming: accepted as buffered SSE after final validation
 ```
@@ -109,10 +109,10 @@ Example:
 ```bash
 curl https://chat-u.mundusx.ai/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"mundusx-agnostic","messages":[{"role":"user","content":"What is the weather in Warsaw?"}]}'
+  -d '{"model":"ehda-agnostic","messages":[{"role":"user","content":"What is the weather in Warsaw?"}]}'
 ```
 
-`GET /models` intentionally exposes only `mundusx-agnostic`. It is a stable model-agnostic service
+`GET /models` intentionally exposes only `ehda-agnostic` on the Benz/EHDA branch. It is a stable model-agnostic service
 identity, not a physical model. Behind it, the heterogeneous MundusX network lets the planner
 privately choose the best eligible contributor node,
 runtime, and model for every request. Requested model names, selected physical models, and node
@@ -129,7 +129,7 @@ For Open WebUI, go to **Admin Settings → Connections → OpenAI → Add Connec
 Connection type: External / OpenAI-compatible
 URL: https://chat-u.mundusx.ai/v1
 API key: not-required
-Model IDs filter: leave empty (auto-discovers mundusx-agnostic)
+Model IDs filter: leave empty (auto-discovers ehda-agnostic)
 ```
 
 Chat-U accepts Open WebUI's default `stream=true`. Until genuine worker token streaming exists,
