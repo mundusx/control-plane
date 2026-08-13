@@ -333,6 +333,7 @@ fn upsert_job(client: &mut Client, job: &JobRecord) -> Result<(), String> {
                 &job.prompt,
                 &job.preferred_backend.to_string(),
                 &job.model,
+                &job.mode,
                 &job.system_prompt,
                 &job.max_tokens.map(|value| value as i32),
                 &job.temperature.map(f64::from),
@@ -545,6 +546,7 @@ select coalesce(jsonb_agg(jsonb_build_object(
   'runtime_mode', 'local',
   'stream', false,
   'model', model,
+  'mode', mode,
   'system_prompt', system_prompt,
   'max_tokens', max_tokens,
   'max_tokens_source', null,
@@ -687,22 +689,23 @@ on conflict (source_heartbeat_key) do update set
 
 const JOBS_UPSERT_SQL: &str = r#"
 insert into public.jobs (
-  job_id, request_id, prompt, preferred_backend, model, system_prompt, max_tokens,
+  job_id, request_id, prompt, preferred_backend, model, mode, system_prompt, max_tokens,
   temperature, top_p, seed, classification, plan, graph, status, assigned_node_id,
   worker_id, backend, output, error, submitted_at_epoch, assigned_at_epoch,
   completed_at_epoch, updated_at_epoch
 ) values (
-  $1, $2, $3, $4, $5, $6, $7,
-  $8::double precision::numeric, $9::double precision::numeric, $10,
-  $11::jsonb, $12::jsonb, $13::jsonb, $14, $15,
-  $16, $17, $18, $19, $20, $21,
-  $22, $23
+  $1, $2, $3, $4, $5, $6, $7, $8,
+  $9::double precision::numeric, $10::double precision::numeric, $11,
+  $12::jsonb, $13::jsonb, $14::jsonb, $15, $16,
+  $17, $18, $19, $20, $21, $22,
+  $23, $24
 )
 on conflict (job_id) do update set
   request_id = excluded.request_id,
   prompt = excluded.prompt,
   preferred_backend = excluded.preferred_backend,
   model = excluded.model,
+  mode = excluded.mode,
   system_prompt = excluded.system_prompt,
   max_tokens = excluded.max_tokens,
   temperature = excluded.temperature,

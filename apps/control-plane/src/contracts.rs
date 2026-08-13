@@ -935,6 +935,8 @@ pub struct JobRecord {
     #[serde(default)]
     pub stream: bool,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub system_prompt: Option<String>,
     pub max_tokens: Option<u32>,
     #[serde(default)]

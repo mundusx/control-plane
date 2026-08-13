@@ -558,49 +558,18 @@ fn chat_messages_to_prompt(messages: &[contracts::ChatMessage]) -> (Option<Strin
     (system_prompt, prompt)
 }
 
-const SPEAKAI_SYSTEM_PROMPT: &str = r#"You are SpeakAI, a conversation-learning response generator.
-Analyze the user's utterance and return only one valid JSON object. Do not use Markdown or add commentary.
-Return this exact structure and do not omit, rename, reorder, or add fields:
-{"speechAct":"question","questionType":"personal","topic":"Short English topic","summary":"Short English summary","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Reply in the utterance language","meaning":"Natural English translation"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Reply in the utterance language","meaning":"Natural English translation"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Reply in the utterance language","meaning":"Natural English translation"}]}
-speechAct must be one of: opinion, question, observation, request, invitation, suggestion, greeting, thanks, apology, compliment, emotion, information.
-topic and summary are always required and must be English strings.
-questionType is required only for questions and must be one of: factual, personal, opinion, clarification, preference, hypothetical, other. Omit questionType for every other speechAct.
-replies must contain exactly three objects. Every reply must contain exactly strategy, purpose, text, and meaning.
-Choose exactly one speechAct and use its three strategy/purpose pairs in this order:
-opinion: supportive/AGREE, continue/EXPLORE, alternative/DISAGREE_POLITELY
-question: direct/ANSWER, continue/ANSWER_AND_EXPLORE, boundary/DECLINE_POLITELY
-observation: acknowledge/ACKNOWLEDGE, continue/EXPLORE, alternative/OFFER_ALTERNATIVE
-request: accept/ACCEPT, clarify/CLARIFY, boundary/DECLINE_POLITELY
-invitation: accept/ACCEPT, clarify/ASK_DETAILS, boundary/DECLINE_POLITELY
-suggestion: supportive/SUPPORT, continue/EXPLORE, alternative/SUGGEST_ALTERNATIVE
-greeting: direct/RETURN_GREETING, continue/START_CONVERSATION, warm/WARM_VARIATION
-thanks: direct/ACCEPT_THANKS, warm/RESPOND_WARMLY, continue/CONTINUE
-apology: accept/ACCEPT_APOLOGY, reassure/REASSURE, continue/DISCUSS_FURTHER
-compliment: accept/ACCEPT_COMPLIMENT, reciprocal/RECIPROCATE, modest/RESPOND_MODESTLY
-emotion: empathetic/EMPATHIZE, continue/EXPLORE, supportive/OFFER_SUPPORT
-information: acknowledge/ACKNOWLEDGE, continue/ASK_FOLLOW_UP, related/ADD_RELATED_POINT
-The text fields must be distinct, grammatical replies in the same language as the user's utterance. Never translate text fields into English unless the utterance itself is English. The meaning fields must be natural English translations. Do not repeat words or leave any field empty.
-Example for "Wer sind deine Eltern?":
-{"speechAct":"question","questionType":"personal","topic":"Parents","summary":"The speaker asks who the listener's parents are.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Meine Eltern heißen …","meaning":"My parents are called …"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Meine Eltern heißen … Und wie heißen deine?","meaning":"My parents are called … And what are yours called?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Darüber möchte ich lieber nicht sprechen.","meaning":"I would rather not talk about that."}]}"#;
-
 fn apply_chat_mode(
     mode: Option<&str>,
     system_prompt: Option<String>,
     max_tokens: Option<u32>,
-) -> Result<(Option<String>, Option<u32>), String> {
+) -> Result<(Option<String>, Option<String>, Option<u32>), String> {
     let Some(mode) = mode.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok((system_prompt, max_tokens));
+        return Ok((None, system_prompt, max_tokens));
     };
     if !mode.eq_ignore_ascii_case("speakai") {
         return Err(format!("unsupported chat completion mode `{mode}`"));
     }
-    let system_prompt = match system_prompt {
-        Some(existing) if !existing.trim().is_empty() => Some(format!(
-            "{SPEAKAI_SYSTEM_PROMPT}\n\nAdditional context:\n{existing}"
-        )),
-        _ => Some(SPEAKAI_SYSTEM_PROMPT.to_string()),
-    };
-    Ok((system_prompt, Some(max_tokens.unwrap_or(512))))
+    Ok((Some("speakai".to_string()), None, max_tokens))
 }
 
 fn now_unix_seconds_u64() -> u64 {
@@ -6176,7 +6145,7 @@ fn handle_connection(
                     }
 
                     let (system_prompt, prompt) = chat_messages_to_prompt(&request_body.messages);
-                    let (system_prompt, max_tokens) = match apply_chat_mode(
+                    let (mode, system_prompt, max_tokens) = match apply_chat_mode(
                         request_body.mode.as_deref(),
                         system_prompt,
                         request_body.max_tokens,
@@ -6209,12 +6178,6 @@ fn handle_connection(
                         max_tokens_source: Some(
                             if request_body.max_tokens.is_some() {
                                 "explicit"
-                            } else if request_body
-                                .mode
-                                .as_deref()
-                                .is_some_and(|mode| mode.eq_ignore_ascii_case("speakai"))
-                            {
-                                "mode_default"
                             } else {
                                 "auto"
                             }
@@ -6226,7 +6189,7 @@ fn handle_connection(
                     };
 
                     let mut guard = state.lock().expect("state lock");
-                    let record = guard.submit_job(job_request, now_unix_seconds());
+                    let record = guard.submit_job_with_mode(job_request, mode, now_unix_seconds());
                     let event = guard.record_job_event(
                         None,
                         Some(record.job_id.clone()),
@@ -6808,20 +6771,43 @@ mod tests {
     }
 
     #[test]
-    fn speakai_mode_adds_adaptive_schema_and_safe_token_budget() {
-        let (system_prompt, max_tokens) = apply_chat_mode(
+    fn speakai_mode_is_forwarded_without_backend_prompt_or_retry_instructions() {
+        let (mode, system_prompt, max_tokens) = apply_chat_mode(
             Some("speakai"),
             Some("The learner is at A2 level.".to_string()),
             None,
         )
         .expect("supported mode");
-        let prompt = system_prompt.expect("SpeakAI system prompt");
-        assert!(prompt.contains("return only one valid JSON object"));
-        assert!(prompt.contains("question: direct/ANSWER"));
-        assert!(prompt.contains("questionType is required only for questions"));
-        assert!(prompt.contains("Wer sind deine Eltern?"));
-        assert!(prompt.contains("The learner is at A2 level."));
-        assert_eq!(max_tokens, Some(512));
+        assert_eq!(mode.as_deref(), Some("speakai"));
+        assert_eq!(system_prompt, None);
+        assert_eq!(max_tokens, None);
+
+        let mut state = ControlPlaneState::default();
+        let record = state.submit_job_with_mode(
+            JobRequest {
+                request_id: "chatcmpl-speakai".to_string(),
+                prompt: "Hallo guten Tag!".to_string(),
+                preferred_backend: Backend::Auto,
+                routing_mode: RoutingMode::Normal,
+                runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
+                stream: false,
+                model: None,
+                system_prompt,
+                max_tokens,
+                max_tokens_source: Some("auto".to_string()),
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            mode,
+            "1".to_string(),
+        );
+        assert_eq!(record.mode.as_deref(), Some("speakai"));
+        assert_eq!(record.system_prompt, None);
+        let serialized = serde_json::to_string(&record).expect("serialize SpeakAI job");
+        assert!(serialized.contains(r#""mode":"speakai""#));
+        assert!(!serialized.contains("Return complete valid SpeakAI JSON"));
     }
 
     #[test]
