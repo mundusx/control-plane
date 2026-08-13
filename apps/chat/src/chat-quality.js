@@ -69,8 +69,91 @@ export function normalizeCompleteCodeOutput(outputValue, promptValue = "") {
       source = `import java.util.Scanner;\n\n${source}`;
     }
 
+    source = formatJavaSource(source);
+
     return `\`\`\`java\n${source}\n\`\`\``;
   });
+}
+
+function formatJavaSource(sourceValue) {
+  const source = String(sourceValue ?? "").trim();
+  if (!source || (source.split("\n").length > 3 && !source.split("\n").some((line) => line.length > 160))) {
+    return source;
+  }
+
+  const lines = [];
+  let line = "";
+  let indent = 0;
+  let parentheses = 0;
+  let quote = "";
+  let escaped = false;
+  const flush = () => {
+    const value = line.trim();
+    if (value) {
+      lines.push(`${"    ".repeat(Math.max(0, indent))}${value}`);
+    }
+    line = "";
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1] ?? "";
+    if (quote) {
+      line += character;
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      line += character;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      const end = source.indexOf("\n", index);
+      line += end < 0 ? source.slice(index) : source.slice(index, end);
+      flush();
+      index = end < 0 ? source.length : end;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2);
+      line += end < 0 ? source.slice(index) : source.slice(index, end + 2);
+      index = end < 0 ? source.length : end + 1;
+      continue;
+    }
+    if (character === "(") parentheses += 1;
+    if (character === ")") parentheses = Math.max(0, parentheses - 1);
+    if (character === "{") {
+      line = `${line.trimEnd()} {`;
+      flush();
+      indent += 1;
+      continue;
+    }
+    if (character === "}") {
+      flush();
+      indent = Math.max(0, indent - 1);
+      line = "}";
+      const remainder = source.slice(index + 1);
+      if (!/^\s*(?:;|else\b|catch\b|finally\b)/.test(remainder)) {
+        flush();
+      }
+      continue;
+    }
+    line += character;
+    if (character === ";" && parentheses === 0) {
+      flush();
+    } else if (character === "\n") {
+      flush();
+    }
+  }
+  flush();
+  return lines.join("\n").replace(/\n(import\s)/g, "\n\n$1");
 }
 
 export function detectCompleteCodeQualityFlags(outputValue, promptValue = "") {
@@ -148,6 +231,13 @@ function languageSpecificProblems(language, source, prompt) {
     if (requiresMain && !/public\s+static\s+void\s+main\s*\(/.test(source)) {
       problems.push("does not define public static void main");
     }
+    for (const method of requestedJavaMethods(prompt)) {
+      if (!definesJavaMethod(source, method)) {
+        problems.push(`does not define the requested ${method} method`);
+      } else if (requiresMainToCallMethod(prompt, method) && !javaMainCallsMethod(source, method)) {
+        problems.push(`main does not call the requested ${method} method`);
+      }
+    }
   } else if (language === "python" && requiresMain) {
     if (!/def\s+main\s*\(/.test(source) || !/if\s+__name__\s*==\s*["']__main__["']\s*:/.test(source)) {
       problems.push("does not define and invoke a Python main entrypoint");
@@ -179,6 +269,58 @@ function languageSpecificProblems(language, source, prompt) {
     }
   }
   return problems;
+}
+
+function requestedJavaMethods(promptValue) {
+  const prompt = String(promptValue ?? "");
+  const names = [];
+  for (const pattern of [
+    /\b([A-Za-z_$][\w$]*)\s+(?:function|method)\b/gi,
+    /\b(?:function|method)\s+(?:named|called)\s+([A-Za-z_$][\w$]*)\b/gi,
+  ]) {
+    for (const match of prompt.matchAll(pattern)) {
+      const name = String(match[1] ?? "").trim();
+      if (name && name.toLowerCase() !== "main" && !names.some((item) => item.toLowerCase() === name.toLowerCase())) {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+function definesJavaMethod(sourceValue, methodName) {
+  const method = escapeRegExp(methodName);
+  return new RegExp(
+    `\\b(?:public\\s+|private\\s+|protected\\s+)?(?:static\\s+)?(?:void|byte|short|int|long|float|double|boolean|char|String|[A-Z][\\w$]*(?:<[^>]+>)?|[A-Za-z_$][\\w$]*\\[\\])\\s+${method}\\s*\\(`,
+    "i",
+  ).test(String(sourceValue ?? ""));
+}
+
+function requiresMainToCallMethod(promptValue, methodName) {
+  const method = escapeRegExp(methodName);
+  return new RegExp(`\\bmain\\b[\\s\\S]{0,100}\\bcall(?:s|ing|ed)?\\b[\\s\\S]{0,80}\\b${method}\\b`, "i")
+    .test(String(promptValue ?? ""));
+}
+
+function javaMainCallsMethod(sourceValue, methodName) {
+  const source = String(sourceValue ?? "");
+  const signature = /public\s+static\s+void\s+main\s*\([^)]*\)\s*\{/i.exec(source);
+  if (!signature) return false;
+  const openingBrace = source.indexOf("{", signature.index);
+  let depth = 0;
+  for (let index = openingBrace; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) {
+      const body = source.slice(openingBrace + 1, index);
+      return new RegExp(`\\b${escapeRegExp(methodName)}\\s*\\(`, "i").test(body);
+    }
+  }
+  return false;
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hasBalancedCodeDelimiters(sourceValue, language) {

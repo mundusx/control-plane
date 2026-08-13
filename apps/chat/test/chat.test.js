@@ -3177,6 +3177,33 @@ test("promotes completed section outputs when final synthesis is thin", async ()
   assert.equal(result.progress.nodes[2].responsibility, "merge");
 });
 
+test("keeps concise final answers instead of exposing internal graph node headings", async () => {
+  const result = await pollChatJob(
+    "job-capital",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => jsonResponse({
+      job: {
+        job_id: "job-capital",
+        status: "completed",
+        output: "The capital of the Philippines is Manila.",
+        graph_execution_enabled: true,
+        graph: {
+          nodes: [{
+            id: "execute",
+            name: "Execute request",
+            status: "completed",
+            responsibility: "section",
+            output: "The capital of the Philippines is Manila.",
+          }],
+        },
+      },
+    }),
+  );
+
+  assert.equal(result.output, "The capital of the Philippines is Manila.");
+  assert.doesNotMatch(result.output, /Execute request/);
+});
+
 test("uses parent status for single direct chat job progress", async () => {
   const assigned = await pollChatJob(
     "job-single",
@@ -4386,7 +4413,62 @@ test("pollChatJob deterministically repairs safe Java output defects", async () 
   assert.match(result.output, /import java\.util\.Scanner;/);
   assert.match(result.output, /System\.out\.print\(/);
   assert.match(result.output, /System\.out\.println\(/);
+  assert.match(result.output, /public class FibonacciProgram \{\n {4}public static void main/);
   assert.deepEqual(result.quality_flags, []);
+});
+
+test("pollChatJob rejects Java when main omits the requested Fibonacci method contract", async () => {
+  const prompt = "Create a Java program with a main method that calls the Fibonacci function.";
+  const result = await pollChatJob(
+    "job-java-semantic-invalid",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => jsonResponse({
+      job: {
+        job_id: "job-java-semantic-invalid",
+        status: "completed",
+        output: "```java\npublic class FibonacciProgram { public static void main(String[] args) { int a = 0; int b = 1; System.out.println(a + b); } }\n```",
+      },
+    }),
+    { message: prompt },
+  );
+
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /does not define the requested Fibonacci method/);
+});
+
+test("submitChatTurn retries one invalid complete-code result with stricter validation instructions", async () => {
+  const prompts = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (url.startsWith("https://uat.mundusx.ai/v1/nodes")) {
+      return jsonResponse({ items: [] });
+    }
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+    const body = JSON.parse(init.body);
+    prompts.push(body.system_prompt);
+    const retry = /internal validation retry/i.test(body.system_prompt);
+    return jsonResponse({
+      job_id: retry ? "job-retry-valid" : "job-first-invalid",
+      job: {
+        job_id: retry ? "job-retry-valid" : "job-first-invalid",
+        status: "completed",
+        output: retry
+          ? "```java\npublic class FibonacciProgram { public static void main(String[] args) { System.out.println(fibonacci(8)); } public static long fibonacci(int n) { return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2); } }\n```"
+          : "```java\npublic class FibonacciProgram { public static void main(String[] args) { System.out.println(8); } }\n```",
+      },
+    });
+  };
+
+  const result = await submitChatTurn(
+    { message: "Create a Java program with a main method that calls the Fibonacci function." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.doesNotMatch(prompts[0], /internal validation retry/i);
+  assert.match(prompts[1], /internal validation retry/i);
+  assert.equal(result.status, "completed");
+  assert.match(result.output, /fibonacci\(8\)/);
 });
 
 test("pollChatJob rejects Java that remains structurally invalid after normalization", async () => {

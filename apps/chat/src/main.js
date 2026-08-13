@@ -3081,10 +3081,14 @@ export function createServerApp(config = configFromEnv()) {
 
 export async function submitChatTurn(body, config = configFromEnv(), fetchImpl = fetch) {
   const submitted = await submitChatJob(body, config, fetchImpl);
-  if (["completed", "failed"].includes(submitted.status)) {
-    return submitted;
+  const result = ["completed", "failed"].includes(submitted.status)
+    ? submitted
+    : await waitForChatJob(submitted.job_id, body, config, fetchImpl);
+  const invalidCompleteCode = result?.quality_flags?.some((flag) => flag.code === "invalid_complete_code");
+  if (result.status === "failed" && invalidCompleteCode && body?.qualityRetry !== true) {
+    return submitChatTurn({ ...body, qualityRetry: true }, config, fetchImpl);
   }
-  return waitForChatJob(submitted.job_id, body, config, fetchImpl);
+  return result;
 }
 
 export async function submitOpenAiChatCompletion(body, config = configFromEnv(), fetchImpl = fetch) {
@@ -3343,6 +3347,9 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
   const contextWindowTokens = capacityProfile?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona);
+  if (body?.qualityRetry === true) {
+    systemPrompt += " This is an internal validation retry. Return a corrected complete answer only. Satisfy every requested method, entrypoint, call relationship, import, and formatting requirement. Use readable multiline source code in one fenced block.";
+  }
   let codeTransformationFollowUp = false;
   let historyContext = emptyHistoryContext();
   const suppliedHistory = Array.isArray(body?.historyMessages) ? body.historyMessages : [];
@@ -6745,11 +6752,8 @@ function isThinFinalOutput(output) {
   if (!text) {
     return true;
   }
-  const withoutHeadings = text
-    .replace(/^#{1,6}\s+.+$/gm, "")
-    .replace(/[-*_`#\s]/g, "")
-    .trim();
-  return text.length < 120 && withoutHeadings.length < 40;
+  return /^(?:#{1,6}\s+[^\n]+|MundusX returned (?:an empty response|an explanation instead of source code|incomplete placeholder code)\.?)(?:\s*)$/i
+    .test(text);
 }
 
 function mergedCompletedSectionOutputs(progress) {
@@ -7639,6 +7643,8 @@ export function buildChatSystemPrompt(message = "", voicePersona = "atlas") {
       "Put any explanation, compile notes, or usage notes after the code, never before the code.",
       "Do not use ellipses, TODO comments, placeholder bodies, omitted implementation notes, or pseudo-code.",
       "Include all imports, classes, methods, file operations, menu/input handling, and error handling needed for the requested program.",
+      "Format source code as readable multiline code with conventional indentation; do not compress an entire program onto one line.",
+      "If the user requests a named function or method and says main must call it, define that method and invoke it from main exactly as requested.",
     );
   }
   if (looksLikeMathRequest(lower)) {
@@ -8269,22 +8275,27 @@ function cleanChatOutputInternal(value, emptyFallback) {
   output = stripWorkerTrace(output);
   output = stripRolePrefixes(output);
   output = stripPersonaLabelLeak(output);
-  output = stripExpandedRequestLeak(output);
-  output = stripAssistantPreamble(output);
-  output = stripOrphanedPromptContinuation(output);
-  output = stripEmbeddedRoleLeak(output);
-  output = stripUnaskedWhoExpansion(output);
-  output = stripPromptInstructionLeak(output);
-  output = stripExpandedRequestLeak(output);
-  output = stripAssistantPreamble(output);
-  output = stripOrphanedPromptContinuation(output);
-  output = stripPreCodeNarration(output);
-  output = stripSkillPromptLeak(output);
-  output = stripSystemPromptLeak(output);
-  output = collapseRepeatedOpeningClause(output);
+  const fencedOutput = /^```/.test(output);
+  if (!fencedOutput) {
+    output = stripExpandedRequestLeak(output);
+    output = stripAssistantPreamble(output);
+    output = stripOrphanedPromptContinuation(output);
+    output = stripEmbeddedRoleLeak(output);
+    output = stripUnaskedWhoExpansion(output);
+    output = stripPromptInstructionLeak(output);
+    output = stripExpandedRequestLeak(output);
+    output = stripAssistantPreamble(output);
+    output = stripOrphanedPromptContinuation(output);
+    output = stripPreCodeNarration(output);
+    output = stripSkillPromptLeak(output);
+    output = stripSystemPromptLeak(output);
+    output = collapseRepeatedOpeningClause(output);
+  }
   output = collapseRepeatedCodeFences(output);
-  output = collapseRepeatedSentences(output);
-  output = collapseRepeatedLines(output);
+  if (!fencedOutput) {
+    output = collapseRepeatedSentences(output);
+    output = collapseRepeatedLines(output);
+  }
   output = output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
   if (isExplanationOnlyCodeAnswer(output)) {
