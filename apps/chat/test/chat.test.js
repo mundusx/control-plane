@@ -4471,6 +4471,81 @@ test("submitChatTurn retries one invalid complete-code result with stricter vali
   assert.match(result.output, /fibonacci\(8\)/);
 });
 
+test("pollChatJob rejects a repeated prose loop after a valid fenced Java program", async () => {
+  const result = await pollChatJob(
+    "job-java-repetition-loop",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => jsonResponse({
+      job: {
+        job_id: "job-java-repetition-loop",
+        status: "completed",
+        output: "```java\npublic class FibonacciProgram { public static void main(String[] args) { System.out.println(fibonacci(8)); } public static long fibonacci(int n) { return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2); } }\n```\nIn this code, the `main` method calls `main` method calls `main` method calls `main` method calls `main` method calls `main` method calls.",
+      },
+    }),
+    { message: "Create a Java program with a main method that calls the Fibonacci function." },
+  );
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.output, "");
+  assert.match(result.error, /repeated text loop/i);
+  assert.ok(result.quality_flags.some((flag) => flag.code === "degenerate_repetition"));
+});
+
+test("pollChatJob cleans repeated prose after fenced code without changing the code", async () => {
+  const explanation = "The main method calls fibonacci and prints the result.";
+  const result = await pollChatJob(
+    "job-java-repeated-explanation",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => jsonResponse({
+      job: {
+        job_id: "job-java-repeated-explanation",
+        status: "completed",
+        output: `\`\`\`java\npublic class FibonacciProgram { public static void main(String[] args) { System.out.println(fibonacci(8)); } public static long fibonacci(int n) { return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2); } }\n\`\`\`\n${explanation} ${explanation} ${explanation}`,
+      },
+    }),
+    { message: "Create a Java program with a main method that calls the Fibonacci function." },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.match(result.output, /System\.out\.println\(fibonacci\(8\)\);/);
+  assert.equal(result.output.match(/The main method calls fibonacci and prints the result\./g)?.length, 1);
+  assert.deepEqual(result.quality_flags, []);
+});
+
+test("submitChatTurn retries a repeated prose loop and returns only the validated answer", async () => {
+  const prompts = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (url.startsWith("https://uat.mundusx.ai/v1/nodes")) {
+      return jsonResponse({ items: [] });
+    }
+    const body = JSON.parse(init.body);
+    prompts.push(body.system_prompt);
+    const retry = /internal validation retry/i.test(body.system_prompt);
+    return jsonResponse({
+      job_id: retry ? "job-repetition-retry-valid" : "job-repetition-first-invalid",
+      job: {
+        job_id: retry ? "job-repetition-retry-valid" : "job-repetition-first-invalid",
+        status: "completed",
+        output: retry
+          ? "```java\npublic class FibonacciProgram { public static void main(String[] args) { System.out.println(fibonacci(8)); } public static long fibonacci(int n) { return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2); } }\n```\nThe main method calls fibonacci and prints the result."
+          : "```java\npublic class FibonacciProgram { public static void main(String[] args) { System.out.println(fibonacci(8)); } public static long fibonacci(int n) { return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2); } }\n```\nThe `main` method calls `main` method calls `main` method calls `main` method calls `main` method calls `main` method calls.",
+      },
+    });
+  };
+
+  const result = await submitChatTurn(
+    { message: "Create a Java program with a main method that calls the Fibonacci function." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /Do not repeat words, clauses, sentences, or sections/);
+  assert.equal(result.status, "completed");
+  assert.doesNotMatch(result.output, /main method calls main method calls/i);
+  assert.deepEqual(result.quality_flags, []);
+});
+
 test("pollChatJob rejects Java that remains structurally invalid after normalization", async () => {
   const prompt = "Create a Java program where main calls a Fibonacci function.";
   const result = await pollChatJob(

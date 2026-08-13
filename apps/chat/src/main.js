@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   detectChatQualityFlags,
   detectCompleteCodeQualityFlags,
+  detectDegenerateRepetitionQualityFlags,
   normalizeCompleteCodeOutput,
 } from "./chat-quality.js";
 
@@ -3084,8 +3085,10 @@ export async function submitChatTurn(body, config = configFromEnv(), fetchImpl =
   const result = ["completed", "failed"].includes(submitted.status)
     ? submitted
     : await waitForChatJob(submitted.job_id, body, config, fetchImpl);
-  const invalidCompleteCode = result?.quality_flags?.some((flag) => flag.code === "invalid_complete_code");
-  if (result.status === "failed" && invalidCompleteCode && body?.qualityRetry !== true) {
+  const retryableQualityFailure = result?.quality_flags?.some((flag) =>
+    ["invalid_complete_code", "degenerate_repetition"].includes(flag.code),
+  );
+  if (result.status === "failed" && retryableQualityFailure && body?.qualityRetry !== true) {
     return submitChatTurn({ ...body, qualityRetry: true }, config, fetchImpl);
   }
   return result;
@@ -3348,7 +3351,7 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   const contextWindowTokens = capacityProfile?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona);
   if (body?.qualityRetry === true) {
-    systemPrompt += " This is an internal validation retry. Return a corrected complete answer only. Satisfy every requested method, entrypoint, call relationship, import, and formatting requirement. Use readable multiline source code in one fenced block.";
+    systemPrompt += " This is an internal validation retry. Return a corrected complete answer only. Do not repeat words, clauses, sentences, or sections. Satisfy every requested method, entrypoint, call relationship, import, and formatting requirement. For code requests, use readable multiline source code in one fenced block.";
   }
   let codeTransformationFollowUp = false;
   let historyContext = emptyHistoryContext();
@@ -6714,7 +6717,10 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
   const codeFlags = job.status === "completed"
     ? detectCompleteCodeQualityFlags(output, options.prompt)
     : [];
-  const qualityFlags = [...verifierFlags, ...codeFlags].filter(
+  const repetitionFlags = job.status === "completed"
+    ? detectDegenerateRepetitionQualityFlags(output)
+    : [];
+  const qualityFlags = [...verifierFlags, ...codeFlags, ...repetitionFlags].filter(
     (flag, index, flags) => flags.findIndex((candidate) => candidate.code === flag.code) === index,
   );
   const rejectFlag = qualityFlags.find((flag) => flag.severity === "reject");
@@ -8292,10 +8298,9 @@ function cleanChatOutputInternal(value, emptyFallback) {
     output = collapseRepeatedOpeningClause(output);
   }
   output = collapseRepeatedCodeFences(output);
-  if (!fencedOutput) {
-    output = collapseRepeatedSentences(output);
-    output = collapseRepeatedLines(output);
-  }
+  output = transformProseOutsideCodeFences(output, (prose) =>
+    collapseRepeatedLines(collapseRepeatedSentences(prose)),
+  );
   output = output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
   if (isExplanationOnlyCodeAnswer(output)) {
@@ -8794,6 +8799,31 @@ function collapseRepeatedLines(value) {
   }
 
   return collapsed.join("\n");
+}
+
+function transformProseOutsideCodeFences(value, transform) {
+  const output = String(value ?? "");
+  const fencePattern = /```[a-zA-Z0-9_+#.-]*[ \t]*[\s\S]*?```/g;
+  let cursor = 0;
+  let transformed = "";
+  let match;
+
+  while ((match = fencePattern.exec(output)) !== null) {
+    transformed += transformProseSegment(output.slice(cursor, match.index), transform);
+    transformed += match[0];
+    cursor = match.index + match[0].length;
+  }
+  transformed += transformProseSegment(output.slice(cursor), transform);
+  return transformed;
+}
+
+function transformProseSegment(value, transform) {
+  const segment = String(value ?? "");
+  const leading = segment.match(/^\s*/)?.[0] ?? "";
+  const trailing = segment.match(/\s*$/)?.[0] ?? "";
+  const coreEnd = Math.max(leading.length, segment.length - trailing.length);
+  const core = segment.slice(leading.length, coreEnd);
+  return `${leading}${core ? transform(core) : ""}${trailing}`;
 }
 
 function collapseRepeatedCodeFences(value) {
