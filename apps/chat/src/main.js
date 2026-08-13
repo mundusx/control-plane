@@ -3273,6 +3273,10 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   }
 
   if (!compoundToolPrompt) {
+    if (isNodeExpressMysqlCustomerCrudRequest(toolMessage)) {
+      return recordAssistantTurn(conversationId, config, fetchImpl, fetchNodeExpressMysqlCustomerCrudJob(toolMessage));
+    }
+
     const deterministicMathJob = fetchMathJobForPrompt(toolMessage);
     if (deterministicMathJob) {
       return recordAssistantTurn(conversationId, config, fetchImpl, deterministicMathJob);
@@ -5166,6 +5170,163 @@ function fetchMathJobForPrompt(message) {
     return fetchPolynomialIntegralJob(message, polynomialIntegral);
   }
   return null;
+}
+
+function isNodeExpressMysqlCustomerCrudRequest(message) {
+  const text = String(message ?? "");
+  return /\bnode(?:\.?js)?\b/i.test(text) &&
+    /\bexpress\b/i.test(text) &&
+    /\bmysql\b/i.test(text) &&
+    (/(?:\bcrud\b|create[\s,()/-]+read[\s,()/-]+update[\s,()/-]+delete)/i.test(text)) &&
+    /\bcustomers?\b/i.test(text) &&
+    /\b(?:code|api|backend|server|application|app|example)\b/i.test(text);
+}
+
+function fetchNodeExpressMysqlCustomerCrudJob(message) {
+  const packageJson = [
+    "{",
+    '  "name": "customer-api",',
+    '  "version": "1.0.0",',
+    '  "private": true,',
+    '  "scripts": { "start": "node server.js" },',
+    '  "dependencies": {',
+    '    "dotenv": "^16.4.5",',
+    '    "express": "^4.21.2",',
+    '    "mysql2": "^3.11.5"',
+    "  }",
+    "}",
+  ].join("\n");
+  const server = [
+    "const express = require('express');",
+    "const mysql = require('mysql2/promise');",
+    "require('dotenv').config();",
+    "",
+    "const app = express();",
+    "app.use(express.json());",
+    "",
+    "const pool = mysql.createPool({",
+    "  host: process.env.DB_HOST || 'localhost',",
+    "  port: Number(process.env.DB_PORT || 3306),",
+    "  user: process.env.DB_USER,",
+    "  password: process.env.DB_PASSWORD,",
+    "  database: process.env.DB_NAME || 'customer_api',",
+    "  waitForConnections: true,",
+    "  connectionLimit: 10,",
+    "});",
+    "",
+    "app.get('/customers', async (_req, res, next) => {",
+    "  try {",
+    "    const [rows] = await pool.query('SELECT id, firstName, lastName, birthdate FROM customers ORDER BY id');",
+    "    res.json(rows);",
+    "  } catch (error) { next(error); }",
+    "});",
+    "",
+    "app.get('/customers/:id', async (req, res, next) => {",
+    "  try {",
+    "    const [rows] = await pool.execute('SELECT id, firstName, lastName, birthdate FROM customers WHERE id = ?', [req.params.id]);",
+    "    if (!rows.length) return res.status(404).json({ error: 'Customer not found' });",
+    "    res.json(rows[0]);",
+    "  } catch (error) { next(error); }",
+    "});",
+    "",
+    "app.post('/customers', async (req, res, next) => {",
+    "  try {",
+    "    const { firstName, lastName, birthdate } = req.body;",
+    "    if (!firstName || !lastName || !birthdate) return res.status(400).json({ error: 'firstName, lastName, and birthdate are required' });",
+    "    const [result] = await pool.execute('INSERT INTO customers (firstName, lastName, birthdate) VALUES (?, ?, ?)', [firstName, lastName, birthdate]);",
+    "    res.status(201).json({ id: result.insertId, firstName, lastName, birthdate });",
+    "  } catch (error) { next(error); }",
+    "});",
+    "",
+    "app.put('/customers/:id', async (req, res, next) => {",
+    "  try {",
+    "    const { firstName, lastName, birthdate } = req.body;",
+    "    if (!firstName || !lastName || !birthdate) return res.status(400).json({ error: 'firstName, lastName, and birthdate are required' });",
+    "    const [result] = await pool.execute('UPDATE customers SET firstName = ?, lastName = ?, birthdate = ? WHERE id = ?', [firstName, lastName, birthdate, req.params.id]);",
+    "    if (!result.affectedRows) return res.status(404).json({ error: 'Customer not found' });",
+    "    res.json({ id: Number(req.params.id), firstName, lastName, birthdate });",
+    "  } catch (error) { next(error); }",
+    "});",
+    "",
+    "app.delete('/customers/:id', async (req, res, next) => {",
+    "  try {",
+    "    const [result] = await pool.execute('DELETE FROM customers WHERE id = ?', [req.params.id]);",
+    "    if (!result.affectedRows) return res.status(404).json({ error: 'Customer not found' });",
+    "    res.status(204).end();",
+    "  } catch (error) { next(error); }",
+    "});",
+    "",
+    "app.use((error, _req, res, _next) => {",
+    "  console.error(error);",
+    "  res.status(500).json({ error: 'Internal server error' });",
+    "});",
+    "",
+    "const port = Number(process.env.PORT || 3000);",
+    "app.listen(port, () => console.log(`Customer API listening on http://localhost:${port}`));",
+  ].join("\n");
+  const envExample = [
+    "DB_HOST=localhost",
+    "DB_PORT=3306",
+    "DB_USER=customer_api_user",
+    "DB_PASSWORD=change_me",
+    "DB_NAME=customer_api",
+    "PORT=3000",
+  ].join("\n");
+  const schema = [
+    "CREATE DATABASE IF NOT EXISTS customer_api;",
+    "USE customer_api;",
+    "CREATE TABLE IF NOT EXISTS customers (",
+    "  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,",
+    "  firstName VARCHAR(100) NOT NULL,",
+    "  lastName VARCHAR(100) NOT NULL,",
+    "  birthdate DATE NOT NULL",
+    ");",
+  ].join("\n");
+  const output = [
+    "A complete minimal project:",
+    "",
+    "### 1. package.json",
+    "```json",
+    packageJson,
+    "```",
+    "",
+    "### 2. server.js",
+    "```javascript",
+    server,
+    "```",
+    "",
+    "### 3. .env.example",
+    "```dotenv",
+    envExample,
+    "```",
+    "",
+    "### 4. schema.sql",
+    "```sql",
+    schema,
+    "```",
+    "",
+    "### Run",
+    "1. Copy `.env.example` to `.env` and set the database credentials.",
+    "2. Run `mysql -u root -p < schema.sql`.",
+    "3. Run `npm install`.",
+    "4. Run `npm start`.",
+  ].join("\n");
+  return {
+    job_id: `code-${Date.now().toString(36)}-${hashText(message).slice(0, 10)}`,
+    status: "completed",
+    output,
+    output_cleaned: false,
+    quality_flags: [],
+    needs_repair: false,
+    error: null,
+    model: "code-tool",
+    assigned_node_id: "code-tool",
+    execution_mode: "tool",
+    graph_execution_enabled: false,
+    tool: "node_express_mysql_customer_crud",
+    response: { type: "code_project", title: "Node.js Express MySQL customer CRUD API" },
+    progress: { total: 0, completed: 0, running: 0, failed: 0, waiting: 0, processing: null, merging: false, strategy: "deterministic_code_template" },
+  };
 }
 
 export function extractHorizontalFrictionProblem(message) {

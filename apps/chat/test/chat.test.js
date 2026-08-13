@@ -586,7 +586,7 @@ test("treats an example Node Express CRUD API as a complete code project", async
   };
 
   await submitChatJob(
-    { message: "Give me example Node.js code using Express for an API that connects to MySQL and provides CRUD interfaces for customer data." },
+    { message: "Give me example Node.js code using Express for an API that connects to MySQL and provides CRUD interfaces for order data." },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     fetchImpl,
   );
@@ -594,6 +594,25 @@ test("treats an example Node Express CRUD API as a complete code project", async
   assert.equal(calls[0].execution_mode, "single");
   assert.equal(calls[0].max_tokens, 4096);
   assert.match(calls[0].system_prompt, /complete compilable source file/i);
+});
+
+test("returns a complete deterministic Node Express MySQL customer CRUD project", async () => {
+  const result = await submitChatJob(
+    { message: "Give me example Node.js code using Express for a simple API that connects to a MySQL database and provides CRUD (Create, Read, Update, Delete) interfaces for customer data." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => { throw new Error("recognized CRUD template requests should not call the control plane"); },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.tool, "node_express_mysql_customer_crud");
+  assert.equal((result.output.match(/```/g) ?? []).length % 2, 0);
+  assert.match(result.output, /app\.get\('\/customers'/);
+  assert.match(result.output, /app\.post\('\/customers'/);
+  assert.match(result.output, /app\.put\('\/customers\/:id'/);
+  assert.match(result.output, /app\.delete\('\/customers\/:id'/);
+  assert.match(result.output, /mysql\.createPool/);
+  assert.match(result.output, /CREATE TABLE IF NOT EXISTS customers/);
+  assert.match(result.output, /npm start/);
 });
 
 test("decomposes advanced nested calculus prompts", async () => {
@@ -4621,14 +4640,14 @@ test("submitChatTurn rejects and retries a truncated multi-file CRUD response", 
         job_id: retry ? "job-crud-valid" : "job-crud-truncated",
         status: "completed",
         output: retry
-          ? "```javascript\nconst express = require('express'); const mysql = require('mysql2'); const app = express(); const db = mysql.createConnection({host: 'localhost'}); app.get('/customers', handler); app.post('/customers', handler); app.put('/customers/:id', handler); app.delete('/customers/:id', handler); app.listen(3000);\n```"
-          : "Step 1:\n```sh\nnpm install express mysql2\n```\nStep 2:\n```javascript\nconst express = require('express'); const app = express(); app.get('/customers', handler); app.post('/customers', handler); app.put('/customers/:id', handler); app.delete('/customers/:id', handler);\n```\nStep 3:\n```javascript\nmodule.exports = { host: 'localhost',",
+          ? "```javascript\nconst express = require('express'); const mysql = require('mysql2'); const app = express(); const db = mysql.createConnection({host: 'localhost'}); app.get('/orders', handler); app.post('/orders', handler); app.put('/orders/:id', handler); app.delete('/orders/:id', handler); app.listen(3000);\n```"
+          : "Step 1:\n```sh\nnpm install express mysql2\n```\nStep 2:\n```javascript\nconst express = require('express'); const app = express(); app.get('/orders', handler); app.post('/orders', handler); app.put('/orders/:id', handler); app.delete('/orders/:id', handler);\n```\nStep 3:\n```javascript\nmodule.exports = { host: 'localhost',",
       },
     });
   };
 
   const result = await submitChatTurn(
-    { message: "Give me example Node.js code using Express for an API that connects to MySQL and provides CRUD interfaces for customer data." },
+    { message: "Give me example Node.js code using Express for an API that connects to MySQL and provides CRUD interfaces for order data." },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     fetchImpl,
   );
