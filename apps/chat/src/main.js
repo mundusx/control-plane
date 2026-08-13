@@ -3086,7 +3086,7 @@ export async function submitChatTurn(body, config = configFromEnv(), fetchImpl =
     ? submitted
     : await waitForChatJob(submitted.job_id, body, config, fetchImpl);
   const retryableQualityFailure = result?.quality_flags?.some((flag) =>
-    ["invalid_complete_code", "degenerate_repetition"].includes(flag.code),
+    ["invalid_complete_code", "invalid_math_output", "degenerate_repetition"].includes(flag.code),
   );
   if (result.status === "failed" && retryableQualityFailure && body?.qualityRetry !== true) {
     return submitChatTurn({ ...body, qualityRetry: true }, config, fetchImpl);
@@ -3273,44 +3273,9 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   }
 
   if (!compoundToolPrompt) {
-    const rateDistance = extractRateDistanceWordProblem(toolMessage);
-    if (rateDistance) {
-      return recordAssistantTurn(conversationId, config, fetchImpl, fetchRateDistanceJob(toolMessage, rateDistance));
-    }
-
-    const linearEquation = extractLinearEquation(toolMessage);
-    if (linearEquation) {
-      return recordAssistantTurn(conversationId, config, fetchImpl, fetchLinearEquationJob(toolMessage, linearEquation));
-    }
-
-    const polynomialDerivative = extractPolynomialDerivative(toolMessage);
-    if (polynomialDerivative) {
-      return recordAssistantTurn(
-        conversationId,
-        config,
-        fetchImpl,
-        fetchPolynomialDerivativeJob(toolMessage, polynomialDerivative),
-      );
-    }
-
-    const polynomialSubtraction = extractPolynomialSubtraction(toolMessage);
-    if (polynomialSubtraction) {
-      return recordAssistantTurn(
-        conversationId,
-        config,
-        fetchImpl,
-        fetchPolynomialSubtractionJob(toolMessage, polynomialSubtraction),
-      );
-    }
-
-    const polynomialIntegral = extractPolynomialIntegral(toolMessage);
-    if (polynomialIntegral) {
-      return recordAssistantTurn(
-        conversationId,
-        config,
-        fetchImpl,
-        fetchPolynomialIntegralJob(toolMessage, polynomialIntegral),
-      );
+    const deterministicMathJob = fetchMathJobForPrompt(toolMessage);
+    if (deterministicMathJob) {
+      return recordAssistantTurn(conversationId, config, fetchImpl, deterministicMathJob);
     }
 
     const weatherLocation = extractWeatherLocation(toolMessage);
@@ -5169,6 +5134,14 @@ function fetchLinearEquationJob(message, equation) {
 }
 
 function fetchMathJobForPrompt(message) {
+  const friction = extractHorizontalFrictionProblem(message);
+  if (friction) {
+    return fetchHorizontalFrictionJob(message, friction);
+  }
+  const ladder = extractLadderAngleProblem(message);
+  if (ladder) {
+    return fetchLadderAngleJob(message, ladder);
+  }
   const rateDistance = extractRateDistanceWordProblem(message);
   if (rateDistance) {
     return fetchRateDistanceJob(message, rateDistance);
@@ -5190,6 +5163,76 @@ function fetchMathJobForPrompt(message) {
     return fetchPolynomialIntegralJob(message, polynomialIntegral);
   }
   return null;
+}
+
+export function extractHorizontalFrictionProblem(message) {
+  const text = String(message ?? "").replace(/[μµ]/g, "mu");
+  if (!/\b(?:kinetic\s+friction|coefficient\s+of\s+(?:kinetic\s+)?friction)\b/i.test(text) ||
+      !/\b(?:acceleration|accelerat(?:e|ion))\b/i.test(text)) {
+    return null;
+  }
+  const mass = numberFrom(text, /\b(\d+(?:\.\d+)?)\s*kg\b/i);
+  const coefficient = numberFrom(text, /\b(?:mu(?:_?k)?|coefficient\s+of\s+(?:kinetic\s+)?friction)[^.!?]{0,100}?(?:is|=)\s*(\d+(?:\.\d+)?)/i);
+  const appliedForce = numberFrom(text, /\b(?:force\s+of|with\s+a\s+force\s+of|pull[^.!?]{0,40}?)(\d+(?:\.\d+)?)\s*N\b/i);
+  const gravity = numberFrom(text, /\bg\s*=\s*(\d+(?:\.\d+)?)\s*m\s*\/\s*s(?:\^?2|²)?/i) ?? 9.8;
+  if (![mass, coefficient, appliedForce, gravity].every(Number.isFinite) || mass <= 0 || coefficient < 0 || gravity <= 0) {
+    return null;
+  }
+  const frictionForce = coefficient * mass * gravity;
+  return { mass, coefficient, appliedForce, gravity, frictionForce, netForce: appliedForce - frictionForce, acceleration: (appliedForce - frictionForce) / mass };
+}
+
+export function extractLadderAngleProblem(message) {
+  const text = String(message ?? "");
+  if (!/\bladder\b/i.test(text) || !/\bangle\b/i.test(text) || !/\bground\b/i.test(text) || !/\bwall\b/i.test(text)) {
+    return null;
+  }
+  const length = numberFrom(text, /\b(\d+(?:\.\d+)?)\s*(?:-\s*)?(?:foot|feet|ft)\s+ladder\b/i);
+  const distance = numberFrom(text, /\bdistance\s+of\s+(\d+(?:\.\d+)?)\s*(?:foot|feet|ft)\b/i);
+  if (![length, distance].every(Number.isFinite) || length <= 0 || distance < 0 || distance > length) {
+    return null;
+  }
+  return { length, distance, angleDegrees: Math.acos(distance / length) * 180 / Math.PI };
+}
+
+function numberFrom(text, pattern) {
+  const match = String(text ?? "").match(pattern);
+  return match ? Number(match[1]) : null;
+}
+
+function fetchHorizontalFrictionJob(message, problem) {
+  const answer = `${formatNumber(problem.acceleration)} m/s^2`;
+  return fetchWordProblemMathJob(message, "horizontal_friction", "Horizontal force with kinetic friction", answer, [
+    `Normal force = m*g = ${formatNumber(problem.mass)} * ${formatNumber(problem.gravity)} = ${formatNumber(problem.mass * problem.gravity)} N.`,
+    `Kinetic friction = mu_k*N = ${formatNumber(problem.coefficient)} * ${formatNumber(problem.mass * problem.gravity)} = ${formatNumber(problem.frictionForce)} N.`,
+    `Net force = ${formatNumber(problem.appliedForce)} - ${formatNumber(problem.frictionForce)} = ${formatNumber(problem.netForce)} N.`,
+    `Acceleration = F_net/m = ${formatNumber(problem.netForce)}/${formatNumber(problem.mass)} = ${answer}.`,
+  ]);
+}
+
+function fetchLadderAngleJob(message, problem) {
+  const answer = `${formatNumber(problem.angleDegrees)} degrees`;
+  return fetchWordProblemMathJob(message, "ladder_angle", "Ladder angle", answer, [
+    `cos(theta) = adjacent/hypotenuse = ${formatNumber(problem.distance)}/${formatNumber(problem.length)} = ${formatNumber(problem.distance / problem.length)}.`,
+    `theta = arccos(${formatNumber(problem.distance / problem.length)}) = ${answer}.`,
+  ]);
+}
+
+function fetchWordProblemMathJob(message, tool, title, answer, steps) {
+  return {
+    job_id: `math-${Date.now().toString(36)}-${hashText(message).slice(0, 10)}`,
+    status: "completed",
+    output: [`Answer: ${answer}`, "", "Method:", ...steps].join("\n"),
+    output_cleaned: false,
+    error: null,
+    model: "math-tool",
+    assigned_node_id: "math-tool",
+    execution_mode: "tool",
+    graph_execution_enabled: false,
+    tool,
+    response: { type: "math_solution", title, answer, steps },
+    progress: { total: 0, completed: 0, running: 0, failed: 0, waiting: 0, processing: null, merging: false, strategy: `${tool}_tool` },
+  };
 }
 
 function fetchPolynomialSubtractionJob(message, subtraction) {
@@ -6843,7 +6886,8 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
         String(node.output ?? "").trim(),
       ).length
     : 0;
-  const verifierFlags = CHAT_VERIFIER_ENABLED && job.status === "completed"
+  const verifyCompletedOutput = CHAT_VERIFIER_ENABLED || looksLikeMathRequest(String(options.prompt ?? "").toLowerCase());
+  const verifierFlags = verifyCompletedOutput && job.status === "completed"
     ? detectChatQualityFlags(sourceOutput, rawOutput, output, options.prompt)
     : [];
   const codeFlags = job.status === "completed"
@@ -7738,6 +7782,8 @@ function looksLikeCompleteProgramRequest(lower) {
 function looksLikeMathRequest(lower) {
   return /\b(?:solve|equation|derivative|differentiate|integral|integrate|compute|calculate|simplify|factor|evaluate)\b/i.test(lower) ||
     /\bfind\s+[a-z]\b/i.test(lower) ||
+    /\b(?:acceleration|velocity|speed|force|friction|hypotenuse|adjacent\s+side|right\s+triangle|angle)\b[\s\S]{0,180}\b(?:what|find|determine|calculate)\b/i.test(lower) ||
+    /\b(?:what|find|determine|calculate)\b[\s\S]{0,180}\b(?:acceleration|velocity|speed|force|friction|hypotenuse|right\s+triangle|angle)\b/i.test(lower) ||
     /(?:\d+\s*[+\-*/=]\s*\d+|[a-z]\s*[+\-*/=]\s*\d+|\bint\b|d\/dx|[a-z]\^\d+)/i.test(lower);
 }
 

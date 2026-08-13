@@ -40,6 +40,13 @@ export function detectChatQualityFlags(rawValue, cleanedValue, finalValue = clea
   if (hasBrokenMarkdownFence(finalOutput)) {
     addFlag("broken_markdown", "repair", "The rendered answer has an unmatched Markdown code fence.");
   }
+  if (looksLikeMathPrompt(promptValue) && hasMalformedMathOutput(finalOutput)) {
+    addFlag(
+      "invalid_math_output",
+      "reject",
+      "MundusX returned an incomplete or malformed math answer. Please retry.",
+    );
+  }
   if (hasUnrequestedQuestionDrift(promptValue, finalOutput)) {
     addFlag(
       "question_drift",
@@ -49,6 +56,23 @@ export function detectChatQualityFlags(rawValue, cleanedValue, finalValue = clea
   }
 
   return flags;
+}
+
+function looksLikeMathPrompt(value) {
+  const text = String(value ?? "");
+  return /\b(?:solve|equation|derivative|differentiate|integral|integrate|compute|calculate|simplify|factor|evaluate|acceleration|velocity|friction|hypotenuse|right\s+triangle|angle)\b/i.test(text) ||
+    /(?:\d+\s*[+\-*/=]\s*\d+|[a-z]\s*[+\-*/=]\s*\d+|d\/dx|[a-z]\^\d+)/i.test(text);
+}
+
+function hasMalformedMathOutput(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return true;
+  if (/\\\[\s*\\\]/.test(text) || /\\\(\s*\\\)/.test(text)) return true;
+  if ((text.match(/\\\[/g) ?? []).length !== (text.match(/\\\]/g) ?? []).length) return true;
+  if ((text.match(/\\\(/g) ?? []).length !== (text.match(/\\\)/g) ?? []).length) return true;
+  if ((text.match(/\$\$/g) ?? []).length % 2 === 1) return true;
+  if (/\[math\]|\[\/math\]/i.test(text)) return true;
+  return /(?:=|\bthus\b|\btherefore\b|\banswer\s*:?)\s*$/i.test(text);
 }
 
 export function detectDegenerateRepetitionQualityFlags(outputValue) {

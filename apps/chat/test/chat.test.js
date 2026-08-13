@@ -943,6 +943,34 @@ test("routes simple rate-distance word problems to the math tool", async () => {
   assert.doesNotMatch(result.output, /I need to know|First, you need|two-hour period/i);
 });
 
+test("solves horizontal kinetic-friction acceleration deterministically", async () => {
+  const result = await submitChatJob(
+    { message: "A 10 kg box rests on a flat floor. The coefficient of kinetic friction (mu_k) between the box and the floor is 0.2. If you pull the box horizontally with a force of 30 N, what is the acceleration of the box? Use g = 9.8 m/s^2." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => { throw new Error("recognized friction problems should not call the control plane"); },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.model, "math-tool");
+  assert.equal(result.tool, "horizontal_friction");
+  assert.equal(result.response.answer, "1.04 m/s^2");
+  assert.match(result.output, /Net force = 30 - 19\.6 = 10\.4 N/);
+});
+
+test("solves a ladder angle against a wall deterministically", async () => {
+  const result = await submitChatJob(
+    { message: "A 10-foot ladder leans against a vertical wall. The bottom of the ladder rests on the ground at a distance of 6 feet from the wall. What angle does the ladder make with the ground?" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => { throw new Error("recognized ladder problems should not call the control plane"); },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.model, "math-tool");
+  assert.equal(result.tool, "ladder_angle");
+  assert.equal(result.response.answer, "53.130102 degrees");
+  assert.match(result.output, /cos\(theta\).*6\/10 = 0\.6/);
+});
+
 test("routes simple polynomial derivatives to the math tool", async () => {
   const result = await submitChatJob(
     { message: "derivative of the polynomial function f(x) = 3x^2 + 5x is f(x) = 6x + 5 ? is this true" },
@@ -4556,6 +4584,40 @@ test("submitChatTurn retries one invalid complete-code result with stricter vali
   assert.match(prompts[1], /internal validation retry/i);
   assert.equal(result.status, "completed");
   assert.match(result.output, /fibonacci\(8\)/);
+});
+
+test("submitChatTurn retries malformed math output before completing", async () => {
+  const prompts = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (url.startsWith("https://uat.mundusx.ai/v1/nodes")) {
+      return jsonResponse({ items: [] });
+    }
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+    const body = JSON.parse(init.body);
+    prompts.push(body.system_prompt);
+    const retry = /internal validation retry/i.test(body.system_prompt);
+    return jsonResponse({
+      job_id: retry ? "job-math-retry-valid" : "job-math-first-invalid",
+      job: {
+        job_id: retry ? "job-math-retry-valid" : "job-math-first-invalid",
+        status: "completed",
+        output: retry
+          ? "Answer: 60 degrees. The triangle angle sum is 180 degrees, so x = 180 - 80 - 40 = 60 degrees."
+          : "Using the triangle angle sum: \\[ x = 180 - 80 - 40 \\] \\[ \\]",
+      },
+    });
+  };
+
+  const result = await submitChatTurn(
+    { message: "Determine angle x when the other triangle angles are 80 and 40 degrees." },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /internal validation retry/i);
+  assert.equal(result.status, "completed");
+  assert.match(result.output, /60 degrees/);
 });
 
 test("pollChatJob rejects a repeated prose loop after a valid fenced Java program", async () => {
