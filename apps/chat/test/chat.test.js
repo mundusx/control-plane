@@ -18,6 +18,7 @@ import {
   extractPolynomialIntegral,
   extractPolynomialSubtraction,
   extractWeatherLocation,
+  extractWeatherDayOffset,
   normalizeWeatherWordTypos,
   fetchChatConversation,
   fetchNetworkSummary,
@@ -2748,6 +2749,57 @@ test("adapts a Hermes OpenAI weather request to an immediate Chat-U tool respons
   assert.equal("assigned_node_id" in result.mundusx, false);
 });
 
+test("routes natural Stuttgart tomorrow phrasing to the forecast day", async () => {
+  const result = await submitOpenAiChatCompletion(
+    {
+      model: "mundusx-agnostic",
+      messages: [{ role: "user", content: "Weather is stuttgart tomorrow?" }],
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url) => {
+      assert.equal(url, "https://wttr.in/stuttgart?format=j1");
+      return jsonResponse({
+        nearest_area: [{
+          areaName: [{ value: "Stuttgart" }],
+          region: [{ value: "Baden-Wurttemberg" }],
+          country: [{ value: "Germany" }],
+        }],
+        weather: [
+          { date: "2026-08-13" },
+          {
+            date: "2026-08-14",
+            maxtempC: "27",
+            maxtempF: "81",
+            mintempC: "16",
+            mintempF: "61",
+            hourly: [{ time: "1200", weatherDesc: [{ value: "Partly cloudy" }], chanceofrain: "20" }],
+          },
+        ],
+      });
+    },
+  );
+
+  assert.equal(result.mundusx.tool, "weather");
+  assert.match(result.choices[0].message.content, /Weather forecast for Stuttgart, Baden-Wurttemberg, Germany tomorrow/);
+  assert.match(result.choices[0].message.content, /high 27C\/81F, low 16C\/61F, chance of rain 20%/);
+});
+
+test("asks for a location instead of misrouting a locationless weather request", async () => {
+  const result = await submitOpenAiChatCompletion(
+    {
+      model: "mundusx-agnostic",
+      messages: [{ role: "user", content: "How is the weather today?" }],
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      throw new Error("location clarification must not call an upstream service");
+    },
+  );
+
+  assert.equal(result.mundusx.tool, "weather_clarification");
+  assert.equal(result.choices[0].message.content, "Which city or location would you like the weather for?");
+});
+
 test("adapts Hermes message history into Chat-U model context", async () => {
   let submittedJob = null;
   const result = await submitOpenAiChatCompletion(
@@ -4882,6 +4934,11 @@ test("still prefers the explicit location that follows weather", () => {
   assert.equal(extractWeatherLocation("weather in Berlin"), "Berlin");
   assert.equal(extractWeatherLocation("what is the weather in Manila today?"), "Manila");
   assert.equal(extractWeatherLocation("forecast for Tokyo"), "Tokyo");
+  assert.equal(extractWeatherLocation("Weather is stuttgart tomorrow?"), "stuttgart");
+  assert.equal(extractWeatherLocation("Weather will be in Munich the day after tomorrow"), "Munich");
+  assert.equal(extractWeatherDayOffset("Weather is Stuttgart tomorrow?"), 1);
+  assert.equal(extractWeatherDayOffset("Munich weather the day after tomorrow"), 2);
+  assert.equal(extractWeatherDayOffset("Weather in Berlin today"), 0);
 });
 
 test("tolerates misspelled weather words", () => {
