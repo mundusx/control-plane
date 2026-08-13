@@ -3287,6 +3287,14 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
         await fetchWeatherJob(toolMessage, weatherLocation, config, fetchImpl),
       );
     }
+    if (looksLikeWeatherRequest(toolMessage.toLowerCase())) {
+      return recordAssistantTurn(
+        conversationId,
+        config,
+        fetchImpl,
+        fetchWeatherLocationClarificationJob(toolMessage),
+      );
+    }
 
     const identityTopic = extractAssistantIdentityTopic(toolMessage);
     if (identityTopic) {
@@ -4461,7 +4469,8 @@ function fetchPolynomialDerivativeJob(message, derivative) {
 }
 
 async function fetchWeatherJob(message, location, config, fetchImpl) {
-  const cacheKey = weatherCacheKey(location);
+  const dayOffset = extractWeatherDayOffset(message);
+  const cacheKey = weatherCacheKey(location, dayOffset);
   let cacheHit = false;
   let weather = null;
 
@@ -4478,7 +4487,7 @@ async function fetchWeatherJob(message, location, config, fetchImpl) {
   }
 
   if (!weather) {
-    weather = await fetchWeatherSummary(location, config, fetchImpl);
+    weather = await fetchWeatherSummary(location, dayOffset, config, fetchImpl);
     if (config.weatherCacheUrl) {
       await redisSet(config.weatherCacheUrl, cacheKey, JSON.stringify(weather), config.weatherTtlSeconds);
     }
@@ -4507,6 +4516,37 @@ async function fetchWeatherJob(message, location, config, fetchImpl) {
       processing: null,
       merging: false,
       strategy: "weather_tool",
+    },
+  };
+}
+
+function fetchWeatherLocationClarificationJob(message) {
+  const output = "Which city or location would you like the weather for?";
+  return {
+    job_id: `weather-clarify-${Date.now().toString(36)}-${hashText(message).slice(0, 10)}`,
+    status: "completed",
+    output,
+    output_cleaned: false,
+    error: null,
+    model: "weather-router",
+    assigned_node_id: "weather-tool",
+    execution_mode: "tool",
+    graph_execution_enabled: false,
+    tool: "weather_clarification",
+    response: {
+      type: "clarification",
+      title: "Weather location needed",
+      question: output,
+    },
+    progress: {
+      total: 0,
+      completed: 0,
+      running: 0,
+      failed: 0,
+      waiting: 0,
+      processing: null,
+      merging: false,
+      strategy: "weather_clarification",
     },
   };
 }
@@ -5462,6 +5502,17 @@ export function extractWeatherLocation(message) {
   return extractLeadingWeatherLocation(text);
 }
 
+export function extractWeatherDayOffset(message) {
+  const text = normalizeWeatherWordTypos(String(message ?? "").toLowerCase());
+  if (/\b(?:(?:the\s+)?day\s+after\s+tomorrow|in\s+two\s+days)\b/.test(text)) {
+    return 2;
+  }
+  if (/\btomorrow(?:'s)?\b/.test(text)) {
+    return 1;
+  }
+  return 0;
+}
+
 function extractLeadingWeatherLocation(text) {
   const match = text.match(
     /([\p{L}][\p{L}\s.'-]*?)\s+(?:weather|forecast|temperature|temp)\b/u,
@@ -5680,10 +5731,12 @@ function hasNonWeatherCompoundIntent(lowerText) {
 function cleanWeatherLocation(value) {
   let location = String(value ?? "")
     .replace(/[?!.,]+$/g, "")
-    .replace(/\b(?:today|now|right now|currently|please|pls)\b/gi, "")
+    .replace(/\b(?:(?:the\s+)?day after tomorrow|in two days|tomorrow's|tomorrow|right now|today|now|currently|please|pls)\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
   location = location.replace(/^(?:the\s+)?weather\s+(?:in|for|at|of)\s+/i, "").trim();
+  location = location.replace(/^(?:is|will\s+be)\s+/i, "").trim();
+  location = location.replace(/^(?:in|for|at|of)\s+/i, "").trim();
   location = location
     .replace(/[?!.]\s*(?:subtract|solve|compute|calculate|differentiate|integrate|what|who|tell|explain|write|create|show|give)\b.*$/i, "")
     .replace(/\s+\b(?:and|with)\s+(?:humidity|wind|forecast|temperature|temp|conditions|rain|snow|uv|air quality)\b.*$/i, "")
@@ -5696,7 +5749,7 @@ function cleanWeatherLocation(value) {
   return location;
 }
 
-async function fetchWeatherSummary(location, config, fetchImpl) {
+async function fetchWeatherSummary(location, dayOffset, config, fetchImpl) {
   const url = `${config.weatherBaseUrl}/${encodeURIComponent(location)}?format=j1`;
   const response = await fetchImpl(url, {
     headers: { Accept: "application/json", "User-Agent": "MundusX-Chat/0.1 weather-router" },
@@ -5705,7 +5758,47 @@ async function fetchWeatherSummary(location, config, fetchImpl) {
     throw httpError(502, `weather lookup failed for ${location}`);
   }
   const payload = await response.json();
-  return formatWeatherSummary(location, payload);
+  return dayOffset > 0
+    ? formatWeatherForecastSummary(location, payload, dayOffset)
+    : formatWeatherSummary(location, payload);
+}
+
+function formatWeatherForecastSummary(requestedLocation, payload, dayOffset) {
+  const forecast = payload?.weather?.[dayOffset];
+  if (!forecast) {
+    throw httpError(502, `weather lookup returned no forecast for ${requestedLocation}`);
+  }
+  const area = payload?.nearest_area?.[0];
+  const areaName = area?.areaName?.[0]?.value ?? requestedLocation;
+  const region = area?.region?.[0]?.value ?? "";
+  const country = area?.country?.[0]?.value ?? "";
+  const place = uniquePlaceParts([areaName, region, country]).join(", ");
+  const midday = forecast.hourly?.find((entry) => String(entry?.time ?? "") === "1200")
+    ?? forecast.hourly?.[4]
+    ?? forecast.hourly?.[0];
+  const condition = midday?.weatherDesc?.[0]?.value ?? "forecast conditions";
+  const maxC = forecast.maxtempC;
+  const maxF = forecast.maxtempF;
+  const minC = forecast.mintempC;
+  const minF = forecast.mintempF;
+  const chanceOfRain = midday?.chanceofrain;
+  const dayLabel = dayOffset === 1 ? "tomorrow" : "the day after tomorrow";
+  const rain = chanceOfRain === undefined ? "" : `, chance of rain ${chanceOfRain}%`;
+  const summary = `${condition}, high ${maxC}C/${maxF}F, low ${minC}C/${minF}F${rain}`;
+  return {
+    output: `Weather forecast for ${place} ${dayLabel} (${forecast.date}): ${summary}.`,
+    response: {
+      type: "weather_result",
+      title: `Weather for ${place} ${dayLabel}`,
+      summary,
+      facts: {
+        Date: forecast.date,
+        High: `${maxC}C/${maxF}F`,
+        Low: `${minC}C/${minF}F`,
+        "Chance of rain": chanceOfRain === undefined ? null : `${chanceOfRain}%`,
+      },
+    },
+  };
 }
 
 function formatWeatherSummary(requestedLocation, payload) {
@@ -6464,8 +6557,8 @@ function groundingSourcesCacheKey(jobId) {
   return `mundusx:websearch:sources:v1:${jobId}`;
 }
 
-function weatherCacheKey(location) {
-  return `mundusx:weather:v1:${location.toLowerCase().replace(/\s+/g, " ").trim()}`;
+function weatherCacheKey(location, dayOffset = 0) {
+  return `mundusx:weather:v2:${dayOffset}:${location.toLowerCase().replace(/\s+/g, " ").trim()}`;
 }
 
 async function redisGet(redisUrl, key) {
