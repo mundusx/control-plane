@@ -19,6 +19,7 @@ import {
   extractPolynomialSubtraction,
   extractWeatherLocation,
   extractWeatherDayOffset,
+  isFocusedQuotedRequest,
   normalizeWeatherWordTypos,
   fetchChatConversation,
   fetchNetworkSummary,
@@ -2841,6 +2842,56 @@ test("adapts Hermes message history into Chat-U model context", async () => {
   assert.equal(result.model, "mundusx-agnostic");
   assert.equal(result.mundusx.job_id, "job-hermes");
   assert.equal("assigned_node_id" in result.mundusx, false);
+});
+
+test("isolates a focused quoted request from stale OpenWebUI conversation history", async () => {
+  let submittedJob = null;
+  const quotedRequest = [
+    "> Donald Trump: President of the United States (2017–2021; since 2025). Donald John Trump is an American politician and businessman.",
+    "",
+    "Explain",
+  ].join("\n");
+  const result = await submitOpenAiChatCompletion(
+    {
+      tool_mode: false,
+      messages: [
+        { role: "user", content: "Create a Java Fibonacci program." },
+        { role: "assistant", content: "```java\npublic class FibonacciProgram {}\n```" },
+        { role: "user", content: "Who is Donald Trump?" },
+        { role: "assistant", content: "Donald Trump is the current US president." },
+        { role: "user", content: quotedRequest },
+      ],
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url, init = {}) => {
+      if (url.endsWith("/v1/nodes?page=1&page_size=25")) {
+        return jsonResponse({ nodes: [] });
+      }
+      if (url.endsWith("/v1/jobs") && init.method === "POST") {
+        submittedJob = JSON.parse(init.body);
+        return jsonResponse({
+          job_id: "job-quote-isolated",
+          job: {
+            job_id: "job-quote-isolated",
+            status: "completed",
+            output: "The quote identifies Donald Trump's two non-consecutive presidential terms.",
+          },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  );
+
+  assert.equal(isFocusedQuotedRequest(quotedRequest), true);
+  assert.doesNotMatch(submittedJob.system_prompt, /Fibonacci|Prior conversation/i);
+  assert.match(submittedJob.system_prompt, /quoted source.*complete referent/i);
+  assert.match(submittedJob.prompt, /Donald Trump[\s\S]*Explain/);
+  assert.match(result.choices[0].message.content, /two non-consecutive presidential terms/);
+});
+
+test("does not isolate an ordinary history-dependent explanation follow-up", () => {
+  assert.equal(isFocusedQuotedRequest("Explain that"), false);
+  assert.equal(isFocusedQuotedRequest("> Too short\n\nExplain"), false);
 });
 
 test("Open WebUI adapter exposes a discoverable model and buffered SSE completion", () => {

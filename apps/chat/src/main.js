@@ -3213,6 +3213,41 @@ function openAiMessageText(content) {
     .join("\n");
 }
 
+export function isFocusedQuotedRequest(value) {
+  const text = String(value ?? "").replace(/\r\n/g, "\n").trim();
+  if (!text) {
+    return false;
+  }
+
+  const lines = text.split("\n");
+  const quoteLines = lines.filter((line) => /^\s*>\s?/.test(line));
+  if (quoteLines.length) {
+    const quotedText = quoteLines
+      .map((line) => line.replace(/^\s*>\s?/, "").trim())
+      .join(" ")
+      .trim();
+    const instruction = lines
+      .filter((line) => !/^\s*>\s?/.test(line))
+      .join(" ")
+      .trim();
+    return quotedText.length >= 40 && isFocusedQuoteInstruction(instruction);
+  }
+
+  const delimited = text.match(/^\s*["“]([\s\S]{40,})["”]\s*\n+\s*([^\n]+)$/);
+  return Boolean(delimited && isFocusedQuoteInstruction(delimited[2]));
+}
+
+function isFocusedQuoteInstruction(value) {
+  const instruction = String(value ?? "")
+    .replace(/^\s*(?:please\s+)?/i, "")
+    .replace(/[.!?]+$/g, "")
+    .trim();
+  if (!instruction || instruction.split(/\s+/).length > 12) {
+    return false;
+  }
+  return /^(?:explain|summari[sz]e|analy[sz]e|clarify|paraphrase|critique|fact[- ]?check|translate|rewrite)(?:\s+(?:this|that|it|the\s+(?:quote|text|passage|statement)))?(?:\s+in\s+[a-z-]+)?$/i.test(instruction);
+}
+
 export async function submitChatJob(body, config = configFromEnv(), fetchImpl = fetch) {
   const rawMessage = String(body?.message ?? "").trim();
   if (!rawMessage) {
@@ -3361,17 +3396,21 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   if (body?.qualityRetry === true) {
     systemPrompt += " This is an internal validation retry. Return a corrected complete answer only. Do not repeat words, clauses, sentences, or sections. Satisfy every requested method, entrypoint, call relationship, import, and formatting requirement. For code requests, use readable multiline source code in one fenced block.";
   }
+  const isolateQuotedRequest = isFocusedQuotedRequest(message);
+  if (isolateQuotedRequest) {
+    systemPrompt += " The current request contains its own quoted source. Treat that quote as the complete referent and do not introduce topics from earlier conversation history.";
+  }
   let codeTransformationFollowUp = false;
   let historyContext = emptyHistoryContext();
   const suppliedHistory = Array.isArray(body?.historyMessages) ? body.historyMessages : [];
-  if (suppliedHistory.length) {
+  if (suppliedHistory.length && !isolateQuotedRequest) {
     codeTransformationFollowUp = isCodeTransformationFollowUp(message, suppliedHistory);
     const context = buildRelevantHistoryContext(suppliedHistory, codeTransformationFollowUp);
     if (context) {
       systemPrompt = `${systemPrompt}\n\nPrior conversation (most recent last):\n${context}`;
     }
   }
-  if (conversationId) {
+  if (conversationId && !isolateQuotedRequest) {
     try {
       const history = await fetchConversationHistory(conversationId, config, fetchImpl, 80);
       codeTransformationFollowUp = isCodeTransformationFollowUp(message, history);
