@@ -51,6 +51,158 @@ export function detectChatQualityFlags(rawValue, cleanedValue, finalValue = clea
   return flags;
 }
 
+export function normalizeCompleteCodeOutput(outputValue, promptValue = "") {
+  const output = String(outputValue ?? "");
+  const prompt = String(promptValue ?? "");
+  if (!isCompleteCodeRequest(prompt) || inferCodeLanguage(prompt, output) !== "java") {
+    return output;
+  }
+
+  return output.replace(/```java\s*([\s\S]*?)```/i, (_match, sourceValue) => {
+    let source = String(sourceValue ?? "").trim();
+    source = source
+      .replace(/^Scanner\s*;\s*/i, "import java.util.Scanner;\n\n")
+      .replace(/(^|[^\w.])print\s*\(/g, "$1System.out.print(")
+      .replace(/(^|[^\w.])println\s*\(/g, "$1System.out.println(");
+
+    if (/\bScanner\b/.test(source) && !/\b(?:import\s+java\.util\.Scanner|java\.util\.Scanner)\b/.test(source)) {
+      source = `import java.util.Scanner;\n\n${source}`;
+    }
+
+    return `\`\`\`java\n${source}\n\`\`\``;
+  });
+}
+
+export function detectCompleteCodeQualityFlags(outputValue, promptValue = "") {
+  const output = String(outputValue ?? "").trim();
+  const prompt = String(promptValue ?? "").trim();
+  if (!isCompleteCodeRequest(prompt)) {
+    return [];
+  }
+
+  const fenced = extractFencedSource(output);
+  const source = fenced.source;
+  const language = inferCodeLanguage(prompt, output, fenced.label);
+  const problems = [];
+  if (!source) {
+    problems.push("missing a fenced source file");
+  } else {
+    problems.push(...languageSpecificProblems(language, source, prompt));
+    if (!hasBalancedCodeDelimiters(source, language)) {
+      problems.push("has unbalanced code delimiters");
+    }
+    if (hasPlaceholderImplementation(source)) {
+      problems.push("contains placeholder or omitted implementation");
+    }
+  }
+
+  if (!problems.length) {
+    return [];
+  }
+  return [{
+    code: "invalid_complete_code",
+    severity: "reject",
+    message: `MundusX returned invalid ${language || "complete"} code: ${problems.join("; ")}. Please retry.`,
+  }];
+}
+
+function isCompleteCodeRequest(promptValue) {
+  const prompt = String(promptValue ?? "");
+  return /\b(?:create|write|generate|build|return|provide|implement|convert)\b/i.test(prompt) &&
+    /\b(?:complete|full|runnable|compilable|executable|program|application|source\s+file)\b/i.test(prompt) &&
+    /\b(?:code|program|application|source|class|main|function|method|script)\b/i.test(prompt);
+}
+
+function extractFencedSource(outputValue) {
+  const match = String(outputValue ?? "").match(/```([a-z0-9+#._-]*)\s*([\s\S]*?)```/i);
+  return {
+    label: String(match?.[1] ?? "").toLowerCase(),
+    source: String(match?.[2] ?? "").trim(),
+  };
+}
+
+function inferCodeLanguage(promptValue, outputValue, fenceLabel = "") {
+  const text = `${promptValue ?? ""} ${fenceLabel} ${outputValue ?? ""}`.toLowerCase();
+  if (/\b(?:c\+\+|cpp)\b/.test(text)) return "cpp";
+  if (/\b(?:c#|csharp)\b/.test(text)) return "csharp";
+  if (/\btypescript\b|```ts\b/.test(text)) return "typescript";
+  if (/\bjavascript\b|```js\b/.test(text)) return "javascript";
+  if (/\bpython\b|```py(?:thon)?\b/.test(text)) return "python";
+  if (/\bjava\b/.test(text)) return "java";
+  if (/\bgolang\b|\bgo\s+(?:program|code|application)\b|```go\b/.test(text)) return "go";
+  if (/\brust\b|```rs\b/.test(text)) return "rust";
+  if (/\b(?:language\s+c|c\s+program)\b|```c\b/.test(text)) return "c";
+  return fenceLabel || "code";
+}
+
+function languageSpecificProblems(language, source, prompt) {
+  const problems = [];
+  const requiresMain = /\bmain\b/i.test(prompt) || /\b(?:runnable|executable)\b/i.test(prompt);
+  if (language === "java") {
+    if (/\bScanner\b/.test(source) && !/\b(?:import\s+java\.util\.Scanner|java\.util\.Scanner)\b/.test(source)) {
+      problems.push("uses Scanner without importing java.util.Scanner");
+    }
+    if (/(^|[^\w.])(?:print|println)\s*\(/m.test(source)) {
+      problems.push("uses unqualified print or println calls");
+    }
+    if (requiresMain && !/public\s+static\s+void\s+main\s*\(/.test(source)) {
+      problems.push("does not define public static void main");
+    }
+  } else if (language === "python" && requiresMain) {
+    if (!/def\s+main\s*\(/.test(source) || !/if\s+__name__\s*==\s*["']__main__["']\s*:/.test(source)) {
+      problems.push("does not define and invoke a Python main entrypoint");
+    }
+  } else if (language === "c" || language === "cpp") {
+    if (requiresMain && !/\b(?:int|auto)\s+main\s*\(/.test(source)) {
+      problems.push("does not define a main entrypoint");
+    }
+    if (language === "cpp" && /\b(?:std::)?cout\b/.test(source) && !/#include\s*<iostream>/.test(source)) {
+      problems.push("uses cout without including iostream");
+    }
+    if (language === "c" && /\bprintf\s*\(/.test(source) && !/#include\s*<stdio\.h>/.test(source)) {
+      problems.push("uses printf without including stdio.h");
+    }
+  } else if (language === "go") {
+    if (requiresMain && (!/\bpackage\s+main\b/.test(source) || !/\bfunc\s+main\s*\(/.test(source))) {
+      problems.push("does not define a Go package main entrypoint");
+    }
+    if (/\bfmt\./.test(source) && !/import\s+(?:\([^)]*["']fmt["']|["']fmt["'])/s.test(source)) {
+      problems.push("uses fmt without importing it");
+    }
+  } else if (language === "rust" && requiresMain && !/\bfn\s+main\s*\(/.test(source)) {
+    problems.push("does not define fn main");
+  } else if (language === "csharp" && requiresMain && !/\bstatic\s+void\s+Main\s*\(/.test(source)) {
+    problems.push("does not define static void Main");
+  } else if (["javascript", "typescript"].includes(language) && /\bmain\b/i.test(prompt)) {
+    if (!/(?:function\s+main\s*\(|(?:const|let|var)\s+main\s*=)/.test(source) || !/\bmain\s*\([^)]*\)\s*;?\s*$/m.test(source)) {
+      problems.push("does not define and call main");
+    }
+  }
+  return problems;
+}
+
+function hasBalancedCodeDelimiters(sourceValue, language) {
+  const source = String(sourceValue ?? "")
+    .replace(/"(?:\\.|[^"\\])*"/g, "")
+    .replace(/'(?:\\.|[^'\\])*'/g, "")
+    .replace(/\/\/.*$/gm, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const pairs = language === "python" ? [["(", ")"], ["[", "]"], ["{", "}"]] : [["{", "}"], ["(", ")"], ["[", "]"]];
+  return pairs.every(([open, close]) =>
+    countCharacter(source, open) === countCharacter(source, close),
+  );
+}
+
+function hasPlaceholderImplementation(sourceValue) {
+  return /\b(?:TODO|TBD)\b|\b(?:implement|add)\s+(?:this|logic|code)\s+here\b|\/\/\s*\.\.\.|\/\*\s*\.\.\.\s*\*\//i.test(
+    String(sourceValue ?? ""),
+  );
+}
+
+function countCharacter(value, character) {
+  return String(value ?? "").split(character).length - 1;
+}
+
 function isRestatedUserIntent(promptValue, outputValue) {
   const prompt = String(promptValue ?? "").trim();
   const output = String(outputValue ?? "").trim();

@@ -5,7 +5,11 @@ import { createConnection } from "node:net";
 import { dirname, resolve } from "node:path";
 import { connect as createTlsConnection } from "node:tls";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { detectChatQualityFlags } from "./chat-quality.js";
+import {
+  detectChatQualityFlags,
+  detectCompleteCodeQualityFlags,
+  normalizeCompleteCodeOutput,
+} from "./chat-quality.js";
 
 const DEFAULT_CONTROL_PLANE_URL = "https://uat.mundusx.ai";
 const DEFAULT_TIMEOUT_SECONDS = 90;
@@ -22,6 +26,7 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS = 8192;
 const CONTEXT_SAFETY_TOKENS = 256;
 const MAX_HISTORY_CONTEXT_TOKENS = 2048;
 const RECENT_HISTORY_MESSAGES = 6;
+const PUBLIC_MODEL_ID = "mundusx-agnostic";
 const POLL_INTERVAL_MS = 1500;
 const MAX_BODY_BYTES = 64 * 1024;
 // Temporarily disabled by product decision. Keep the implementation available so it can
@@ -3019,6 +3024,19 @@ export function createServerApp(config = configFromEnv()) {
           model_override: config.modelOverride || null,
         });
       }
+      if (request.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
+        return sendOpenAiJson(response, 204, null);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/models") {
+        return sendOpenAiJson(response, 200, openAiModelsResponse());
+      }
+      if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+        const body = await readJsonBody(request);
+        const result = await submitOpenAiChatCompletion(body, config);
+        return body?.stream === true
+          ? sendOpenAiStream(response, result)
+          : sendOpenAiJson(response, 200, result);
+      }
       if (request.method === "GET" && url.pathname === "/api/network") {
         const result = await fetchNetworkSummary(config);
         return sendJson(response, 200, result);
@@ -3067,6 +3085,125 @@ export async function submitChatTurn(body, config = configFromEnv(), fetchImpl =
     return submitted;
   }
   return waitForChatJob(submitted.job_id, body, config, fetchImpl);
+}
+
+export async function submitOpenAiChatCompletion(body, config = configFromEnv(), fetchImpl = fetch) {
+  if (!Array.isArray(body?.messages) || !body.messages.length) {
+    throw httpError(400, "messages must be a non-empty array");
+  }
+
+  const messages = body.messages
+    .map((entry) => ({ role: normalizeOpenAiRole(entry?.role), content: openAiMessageText(entry?.content) }))
+    .filter((entry) => entry.content);
+  const lastUserIndex = findLastIndex(messages, (entry) => entry.role === "user");
+  if (lastUserIndex < 0) {
+    throw httpError(400, "messages must contain a user message");
+  }
+
+  const toolMode = body?.tool_mode ?? body?.toolMode ?? true;
+  const result = await submitChatTurn(
+    {
+      message: messages[lastUserIndex].content,
+      historyMessages: messages.slice(0, lastUserIndex),
+      executionMode: body?.execution_mode ?? "auto",
+      toolMode: toolMode !== false,
+      model: undefined,
+      temperature: body?.temperature,
+      topP: body?.top_p,
+      maxTokens: body?.max_tokens,
+      timeoutSeconds: body?.timeout_seconds,
+      conversationId: body?.conversation_id ?? body?.metadata?.conversation_id,
+    },
+    config,
+    fetchImpl,
+  );
+
+  const status = String(result?.status ?? "").toLowerCase();
+  if (status !== "completed") {
+    throw httpError(502, result?.error || `Chat-U job ended with status ${status || "unknown"}`);
+  }
+  const content = String(result?.output ?? "").trim();
+  if (!content) {
+    throw httpError(502, "Chat-U completed without assistant output");
+  }
+
+  const usage = result?.progress?.token_usage ?? {};
+  const completionTokens = Number(usage.output_tokens ?? estimateDisplayTokens(content) ?? 0);
+  const promptTokens = Number(usage.input_tokens ?? 0);
+  return {
+    id: result.job_id || `chatcmpl-${Date.now().toString(36)}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: PUBLIC_MODEL_ID,
+    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: Number(usage.total_tokens ?? promptTokens + completionTokens),
+    },
+    mundusx: {
+      job_id: result.job_id ?? null,
+      tool: result.tool ?? null,
+      execution_mode: result.execution_mode ?? null,
+    },
+  };
+}
+
+export function openAiModelsResponse() {
+  return {
+    object: "list",
+    data: [{
+      id: PUBLIC_MODEL_ID,
+      object: "model",
+      created: 0,
+      owned_by: "mundusx-router",
+    }],
+  };
+}
+
+export function openAiSseBody(completion) {
+  const choice = completion?.choices?.[0] ?? {};
+  const base = {
+    id: completion?.id,
+    object: "chat.completion.chunk",
+    created: completion?.created,
+    model: PUBLIC_MODEL_ID,
+  };
+  const contentChunk = {
+    ...base,
+    choices: [{
+      index: 0,
+      delta: {
+        role: "assistant",
+        content: String(choice?.message?.content ?? ""),
+      },
+      finish_reason: null,
+    }],
+  };
+  const finalChunk = {
+    ...base,
+    choices: [{ index: 0, delta: {}, finish_reason: choice?.finish_reason ?? "stop" }],
+  };
+  return `data: ${JSON.stringify(contentChunk)}\n\ndata: ${JSON.stringify(finalChunk)}\n\ndata: [DONE]\n\n`;
+}
+
+function normalizeOpenAiRole(value) {
+  const role = String(value ?? "user").toLowerCase();
+  return ["system", "user", "assistant", "tool"].includes(role) ? role : "user";
+}
+
+function openAiMessageText(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .filter((part) => part?.type === "text" || part?.type === "input_text")
+    .map((part) => String(part?.text ?? "").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 export async function submitChatJob(body, config = configFromEnv(), fetchImpl = fetch) {
@@ -3208,6 +3345,14 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona);
   let codeTransformationFollowUp = false;
   let historyContext = emptyHistoryContext();
+  const suppliedHistory = Array.isArray(body?.historyMessages) ? body.historyMessages : [];
+  if (suppliedHistory.length) {
+    codeTransformationFollowUp = isCodeTransformationFollowUp(message, suppliedHistory);
+    const context = buildRelevantHistoryContext(suppliedHistory, codeTransformationFollowUp);
+    if (context) {
+      systemPrompt = `${systemPrompt}\n\nPrior conversation (most recent last):\n${context}`;
+    }
+  }
   if (conversationId) {
     try {
       const history = await fetchConversationHistory(conversationId, config, fetchImpl, 80);
@@ -6501,13 +6646,24 @@ function logGroundingCitationCheck(jobId, output, sources) {
   }
 }
 
-async function waitForChatJob(jobId, body, config, fetchImpl) {
+export async function waitForChatJob(jobId, body, config, fetchImpl) {
   const timeoutSeconds = positiveInteger(body?.timeoutSeconds, config.defaultTimeoutSeconds);
   const conversationId = String(body?.conversationId ?? "").trim() || null;
   const deadline = Date.now() + timeoutSeconds * 1000;
   let latest = null;
+  let lastTransientError = null;
   while (Date.now() <= deadline) {
-    latest = await pollChatJob(jobId, config, fetchImpl, { conversationId, message: body?.message });
+    try {
+      latest = await pollChatJob(jobId, config, fetchImpl, { conversationId, message: body?.message });
+      lastTransientError = null;
+    } catch (error) {
+      if (!isRetryablePollError(error) || Date.now() + POLL_INTERVAL_MS > deadline) {
+        throw error;
+      }
+      lastTransientError = error;
+      await delay(POLL_INTERVAL_MS);
+      continue;
+    }
     if (latest.status === "completed") {
       return latest;
     }
@@ -6518,14 +6674,23 @@ async function waitForChatJob(jobId, body, config, fetchImpl) {
   }
 
   const status = latest?.status ?? "unknown";
-  throw httpError(504, `timed out waiting for job ${jobId} while status was ${status}`);
+  const transientDetail = lastTransientError ? `; last upstream error: ${lastTransientError.message}` : "";
+  throw httpError(504, `timed out waiting for job ${jobId} while status was ${status}${transientDetail}`);
+}
+
+function isRetryablePollError(error) {
+  const status = Number(error?.statusCode);
+  return !Number.isFinite(status) || [408, 425, 429, 500, 502, 503, 504].includes(status);
 }
 
 function formatChatJob(jobId, job, fallbackModel, options = {}) {
   const progress = summarizeChatProgress(job, options.contextUsage);
   const sourceOutput = String(job.output ?? "");
   const rawOutput = job.status === "completed" ? cleanChatOutput(sourceOutput) : "";
-  const output = job.status === "completed" ? promoteSectionOutputWhenFinalIsThin(rawOutput, progress) : "";
+  const promotedOutput = job.status === "completed" ? promoteSectionOutputWhenFinalIsThin(rawOutput, progress) : "";
+  const output = job.status === "completed"
+    ? normalizeCompleteCodeOutput(promotedOutput, options.prompt)
+    : "";
   const partialOutput = job.status === "completed" || !job.graph_execution_enabled
     ? ""
     : mergedCompletedSectionOutputs(progress);
@@ -6536,9 +6701,15 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
         String(node.output ?? "").trim(),
       ).length
     : 0;
-  const qualityFlags = CHAT_VERIFIER_ENABLED && job.status === "completed"
+  const verifierFlags = CHAT_VERIFIER_ENABLED && job.status === "completed"
     ? detectChatQualityFlags(sourceOutput, rawOutput, output, options.prompt)
     : [];
+  const codeFlags = job.status === "completed"
+    ? detectCompleteCodeQualityFlags(output, options.prompt)
+    : [];
+  const qualityFlags = [...verifierFlags, ...codeFlags].filter(
+    (flag, index, flags) => flags.findIndex((candidate) => candidate.code === flag.code) === index,
+  );
   const rejectFlag = qualityFlags.find((flag) => flag.severity === "reject");
   return {
     job_id: jobId,
@@ -7568,7 +7739,13 @@ export function buildHistoryContext(messages, maxChars = 3000, maxTurns = 8) {
   let used = 0;
   for (let i = trimmed.length - 1; i >= 0; i--) {
     const entry = trimmed[i];
-    const label = entry?.role === "assistant" ? "Assistant" : "User";
+    const label = entry?.role === "assistant"
+      ? "Assistant"
+      : entry?.role === "system"
+        ? "System"
+        : entry?.role === "tool"
+          ? "Tool"
+          : "User";
     const line = `${label}: ${String(entry?.content ?? "").trim()}`;
     if (used + line.length > maxChars) {
       break;
@@ -8023,6 +8200,27 @@ function sendPng(response, bytes) {
 function sendJson(response, status, payload) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(payload));
+}
+
+function sendOpenAiJson(response, status, payload) {
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  });
+  response.end(payload === null ? "" : JSON.stringify(payload));
+}
+
+function sendOpenAiStream(response, completion) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  });
+  response.end(openAiSseBody(completion));
 }
 
 export function escapeHtml(value) {

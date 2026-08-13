@@ -22,12 +22,16 @@ import {
   fetchChatConversation,
   fetchNetworkSummary,
   needsGrounding,
+  openAiModelsResponse,
+  openAiSseBody,
   page,
   pollChatJob,
   redactSensitiveText,
   selectChatSkills,
   submitChatJob,
   submitChatTurn,
+  submitOpenAiChatCompletion,
+  waitForChatJob,
 } from "../src/main.js";
 
 function plannerJobResponse(intents, jobId = "planner-test") {
@@ -2712,6 +2716,136 @@ test("returns immediate weather turns without polling the control plane", async 
   assert.equal(result.progress.strategy, "weather_tool");
 });
 
+test("adapts a Hermes OpenAI weather request to an immediate Chat-U tool response", async () => {
+  const result = await submitOpenAiChatCompletion(
+    {
+      model: "mundusx-agnostic",
+      messages: [{ role: "user", content: "What is the weather in Warsaw?" }],
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url) => {
+      assert.equal(url, "https://wttr.in/Warsaw?format=j1");
+      return jsonResponse({
+        nearest_area: [{ areaName: [{ value: "Warsaw" }], country: [{ value: "Poland" }] }],
+        current_condition: [{
+          weatherDesc: [{ value: "Sunny" }],
+          temp_C: "24",
+          temp_F: "75",
+          FeelsLikeC: "23",
+          FeelsLikeF: "73",
+          humidity: "40",
+          windspeedKmph: "8",
+        }],
+      });
+    },
+  );
+
+  assert.equal(result.object, "chat.completion");
+  assert.equal(result.choices[0].finish_reason, "stop");
+  assert.match(result.choices[0].message.content, /Weather for Warsaw, Poland/);
+  assert.equal(result.model, "mundusx-agnostic");
+  assert.equal(result.mundusx.tool, "weather");
+  assert.equal("assigned_node_id" in result.mundusx, false);
+});
+
+test("adapts Hermes message history into Chat-U model context", async () => {
+  let submittedJob = null;
+  const result = await submitOpenAiChatCompletion(
+    {
+      messages: [
+        { role: "system", content: "Keep answers concise." },
+        { role: "user", content: "My preferred language is German." },
+        { role: "assistant", content: "Understood." },
+        { role: "user", content: "Say hello." },
+      ],
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url, init = {}) => {
+      if (url.endsWith("/v1/nodes?page=1&page_size=25")) {
+        return jsonResponse({ nodes: [] });
+      }
+      if (url.endsWith("/v1/jobs") && init.method === "POST") {
+        submittedJob = JSON.parse(init.body);
+        return jsonResponse({ job_id: "job-hermes", job: { job_id: "job-hermes", status: "queued" } }, true, 202);
+      }
+      if (url.endsWith("/v1/jobs/job-hermes")) {
+        return jsonResponse({
+          job: {
+            job_id: "job-hermes",
+            status: "completed",
+            model: "Qwen/Test",
+            output: "Hallo!",
+          },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  );
+
+  assert.match(submittedJob.system_prompt, /System: Keep answers concise\./);
+  assert.match(submittedJob.system_prompt, /User: My preferred language is German\./);
+  assert.match(submittedJob.system_prompt, /Assistant: Understood\./);
+  assert.equal(result.choices[0].message.content, "Hallo!");
+  assert.equal(result.model, "mundusx-agnostic");
+  assert.equal(result.mundusx.job_id, "job-hermes");
+  assert.equal("assigned_node_id" in result.mundusx, false);
+});
+
+test("Open WebUI adapter exposes a discoverable model and buffered SSE completion", () => {
+  assert.deepEqual(openAiModelsResponse(configFromEnv({})).data.map((model) => model.id), ["mundusx-agnostic"]);
+  const body = openAiSseBody({
+    id: "chatcmpl-test",
+    created: 123,
+    model: "mundusx-agnostic",
+    choices: [{ message: { role: "assistant", content: "Validated answer" }, finish_reason: "stop" }],
+  });
+  assert.match(body, /"object":"chat\.completion\.chunk"/);
+  assert.match(body, /"content":"Validated answer"/);
+  assert.match(body, /"finish_reason":"stop"/);
+  assert.match(body, /data: \[DONE\]/);
+});
+
+test("Hermes model discovery intentionally hides heterogeneous implementation details", () => {
+  const result = openAiModelsResponse(configFromEnv({ MUNDUSX_CHAT_MODEL: "physical/private-model" }));
+  assert.deepEqual(result.data, [{
+    id: "mundusx-agnostic",
+    object: "model",
+    created: 0,
+    owned_by: "mundusx-router",
+  }]);
+});
+
+test("waitForChatJob retries a transient upstream 502 and returns the completed job", async () => {
+  let calls = 0;
+  const result = await waitForChatJob(
+    "job-transient-502",
+    { message: "Say hello", timeoutSeconds: 5 },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url) => {
+      assert.equal(url, "https://uat.mundusx.ai/v1/jobs/job-transient-502");
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 502,
+          text: async () => "upstream error",
+        };
+      }
+      return jsonResponse({
+        job: {
+          job_id: "job-transient-502",
+          status: "completed",
+          output: "Done.",
+        },
+      });
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(result.status, "completed");
+  assert.equal(result.output, "Done.");
+});
+
 test("extracts only obvious weather locations", () => {
   assert.equal(extractWeatherLocation("weather in Warsaw please"), "Warsaw");
   assert.equal(extractWeatherLocation("temperature for New York right now"), "New York");
@@ -4227,6 +4361,121 @@ test("pollChatJob keeps deterministic cleanup while verifier is disabled", async
   assert.equal(result.needs_repair, false);
   assert.match(result.output, /explanation instead of source code/i);
   assert.deepEqual(result.quality_flags, []);
+});
+
+test("pollChatJob deterministically repairs safe Java output defects", async () => {
+  const prompt = "Create a Java program where main calls a Fibonacci function.";
+  const result = await pollChatJob(
+    "job-java-repair",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () =>
+      jsonResponse({
+        job: {
+          job_id: "job-java-repair",
+          status: "completed",
+          model: "Qwen/Test",
+          output:
+            "```java Scanner; public class FibonacciProgram { public static void main(String[] args) { Scanner scanner = new Scanner(System.in); print(\"Enter a number: \" ); println(fibonacci(scanner.nextInt())); } public static long fibonacci(int n) { return n <= 1 ? n : fibonacci(n - 1) + fibonacci(n - 2); } } ```",
+        },
+      }),
+    { message: prompt },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.needs_repair, false);
+  assert.match(result.output, /import java\.util\.Scanner;/);
+  assert.match(result.output, /System\.out\.print\(/);
+  assert.match(result.output, /System\.out\.println\(/);
+  assert.deepEqual(result.quality_flags, []);
+});
+
+test("pollChatJob rejects Java that remains structurally invalid after normalization", async () => {
+  const prompt = "Create a Java program where main calls a Fibonacci function.";
+  const result = await pollChatJob(
+    "job-java-invalid",
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () =>
+      jsonResponse({
+        job: {
+          job_id: "job-java-invalid",
+          status: "completed",
+          model: "Qwen/Test",
+          output: "```java\npublic class FibonacciProgram { public static long fibonacci(int n) { return n; }\n```",
+        },
+      }),
+    { message: prompt },
+  );
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.output, "");
+  assert.match(result.error, /does not define public static void main|unbalanced Java delimiters/);
+  assert.ok(result.quality_flags.some((flag) => flag.code === "invalid_complete_code"));
+});
+
+test("pollChatJob rejects incomplete Python and C++ runnable programs", async () => {
+  const cases = [
+    {
+      id: "python",
+      prompt: "Create a complete runnable Python program with a main function.",
+      output: "```python\ndef fibonacci(n):\n    return n if n < 2 else fibonacci(n - 1) + fibonacci(n - 2)\n```",
+      error: /Python main entrypoint/,
+    },
+    {
+      id: "cpp",
+      prompt: "Create a complete runnable C++ program with main.",
+      output: "```cpp\nint main() { std::cout << 1; }\n```",
+      error: /including iostream/,
+    },
+  ];
+
+  for (const testCase of cases) {
+    const result = await pollChatJob(
+      `job-${testCase.id}-invalid`,
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async () => jsonResponse({
+        job: {
+          job_id: `job-${testCase.id}-invalid`,
+          status: "completed",
+          output: testCase.output,
+        },
+      }),
+      { message: testCase.prompt },
+    );
+    assert.equal(result.status, "failed");
+    assert.match(result.error, testCase.error);
+  }
+});
+
+test("pollChatJob accepts structurally complete Python and Go programs", async () => {
+  const cases = [
+    {
+      id: "python",
+      prompt: "Create a complete runnable Python program with a main function.",
+      output: "```python\ndef main():\n    print('hello')\n\nif __name__ == '__main__':\n    main()\n```",
+    },
+    {
+      id: "go",
+      prompt: "Create a complete runnable Go program with main.",
+      output: "```go\npackage main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello\") }\n```",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const result = await pollChatJob(
+      `job-${testCase.id}-valid`,
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async () => jsonResponse({
+        job: {
+          job_id: `job-${testCase.id}-valid`,
+          status: "completed",
+          output: testCase.output,
+        },
+      }),
+      { message: testCase.prompt },
+    );
+    assert.equal(result.status, "completed");
+    assert.deepEqual(result.quality_flags, []);
+  }
 });
 
 test("pollChatJob does not reject restated intent while verifier is disabled", async () => {
