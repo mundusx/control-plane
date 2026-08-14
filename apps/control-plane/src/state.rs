@@ -1433,18 +1433,42 @@ impl ControlPlaneState {
                 && candidate.policy_allowed
                 && candidate.backend == Backend::Vllm
         });
-        let schedulable_retry_nodes = self
-            .nodes
-            .values()
-            .filter(|candidate| {
-                Self::node_is_schedulable_state(candidate) && candidate.policy_allowed
-            })
-            .map(|candidate| candidate.node_id.clone())
-            .collect::<Vec<_>>();
         let selected = self
             .jobs
             .iter()
             .filter_map(|(job_id, job)| {
+                let ready_graph_node_id = job
+                    .graph_execution_enabled
+                    .then(|| next_ready_graph_node_id(&job.graph))
+                    .flatten();
+                let schedulable_retry_nodes = self
+                    .nodes
+                    .values()
+                    .filter(|candidate| {
+                        Self::node_is_schedulable_state(candidate)
+                            && candidate.policy_allowed
+                            && self.node_has_available_slot_for_job(candidate, job)
+                            && Self::node_backend_matches(
+                                job,
+                                candidate.backend,
+                                ready_m_exists,
+                                ready_cuda_exists,
+                                ready_vllm_exists,
+                            )
+                            && Self::node_can_run_job(candidate, job)
+                            && Self::node_meets_graph_capacity_strict(
+                                candidate,
+                                job,
+                                ready_graph_node_id.as_deref(),
+                            )
+                            && Self::node_can_run_graph_role(
+                                candidate,
+                                job,
+                                ready_graph_node_id.as_deref(),
+                            )
+                    })
+                    .map(|candidate| candidate.node_id.clone())
+                    .collect::<Vec<_>>();
                 let mut active_graph_node_id = if job.graph_execution_enabled {
                     next_claimable_graph_node_id_for_node(
                         &job.graph,
@@ -7932,6 +7956,13 @@ mod tests {
     #[test]
     fn compact_reviewed_code_retries_invalid_implementation_before_review() {
         let mut state = ready_state();
+        state.register(m_series_registration("node-low-context"));
+        let mut low_context_heartbeat = ready_heartbeat("node-low-context", "1");
+        low_context_heartbeat
+            .worker_health
+            .capabilities
+            .max_context_tokens = Some(1_536);
+        state.heartbeat(low_context_heartbeat, "1".to_string());
         let mut request = classification_request(
             "Create a Node.js Express CRUD API for customers, with Markdown documentation and a code review.",
         );
@@ -7990,7 +8021,7 @@ mod tests {
         let retry_claim = state
             .claim_job("node-1", "4".to_string())
             .job
-            .expect("implementation retry claim");
+            .expect("qualified node can reclaim despite another ineligible node");
         assert_eq!(
             retry_claim.active_graph_node_id.as_deref(),
             Some("job.backend")
