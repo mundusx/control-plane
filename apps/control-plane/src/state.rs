@@ -3678,6 +3678,7 @@ fn graph_node_max_tokens(
                 1 => 3_072,
                 _ => 4_096,
             },
+            "job.documentation" => 1_024,
             "job.code_review" => 512,
             _ => 512,
         },
@@ -3733,6 +3734,7 @@ fn graph_node_max_tokens(
     let budget = if job.plan.strategy == "compact_reviewed_code_delivery" {
         let stage_ceiling = match node.id.as_str() {
             "job.backend" => 2_048,
+            "job.documentation" => 1_024,
             "job.code_review" => 512,
             _ => 512,
         };
@@ -5917,11 +5919,11 @@ fn compact_reviewed_code_plan_jobs() -> Vec<PlannedJob> {
     push_planned_job(
         &mut jobs,
         "job.backend",
-        "Complete implementation and documentation",
+        "Complete runnable implementation",
         "backend",
         Vec::new(),
-        "Produce one complete runnable implementation that satisfies the requested API and data-model contract. Include input validation, error handling, and focused executable checks where appropriate. After the code, include concise Markdown setup, run, endpoint, request-field, and example documentation. Do not emit placeholders, TODOs, or review prose.",
-        "A low-complexity code project is faster and more coherent when one worker owns the implementation contract without a separate scope-generation call.",
+        "Produce one complete runnable source file in a closed, language-tagged Markdown fence that satisfies the requested API and data-model contract. Include input validation, error handling, and focused executable checks where appropriate. Do not emit documentation, placeholders, TODOs, or review prose.",
+        "A low-complexity code project is faster and more coherent when one worker owns the implementation contract without also spending its bounded output budget on documentation.",
     );
     let implementation = jobs.last_mut().expect("implementation job");
     implementation.recommended_max_tokens = Some(2_048);
@@ -5929,12 +5931,25 @@ fn compact_reviewed_code_plan_jobs() -> Vec<PlannedJob> {
     implementation.workload.context_budget_tokens = 4_096;
     push_planned_job(
         &mut jobs,
+        "job.documentation",
+        "Markdown documentation",
+        "documentation",
+        vec!["job.backend".to_string()],
+        "Document the accepted implementation with concise Markdown setup, run, endpoint, request-field, and request/response examples. Do not repeat the full source file and do not wrap the documentation in a markdown code fence.",
+        "Documentation must follow the accepted source contract but can run independently from code review.",
+    );
+    let documentation = jobs.last_mut().expect("documentation job");
+    documentation.recommended_max_tokens = Some(1_024);
+    documentation.minimum_max_tokens = Some(512);
+    documentation.workload.context_budget_tokens = 4_096;
+    push_planned_job(
+        &mut jobs,
         "job.code_review",
         "Independent code review",
         "validation",
         vec!["job.backend".to_string()],
         "Review the completed implementation for correctness, requested contract coverage, validation, error handling, maintainability, and concrete defects. Report concise findings and do not rewrite or repeat the full source code.",
-        "Independent review must see the completed implementation and documentation, but it does not need to trigger another model synthesis.",
+        "Independent review must see the completed implementation, but it can run alongside documentation and does not need another model synthesis.",
     );
     let review = jobs.last_mut().expect("review job");
     review.recommended_max_tokens = Some(512);
@@ -7512,6 +7527,10 @@ mod tests {
             2_048
         );
         assert_eq!(
+            graph_node_max_tokens(&record, "job.documentation", Some(node)),
+            1_024
+        );
+        assert_eq!(
             graph_node_max_tokens(&record, "job.code_review", Some(node)),
             512
         );
@@ -7917,7 +7936,7 @@ mod tests {
 
         assert_eq!(classification.task_type, RequestTaskType::Coding);
         assert_eq!(plan.strategy, "compact_reviewed_code_delivery");
-        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs.len(), 3);
         let backend = plan
             .jobs
             .iter()
@@ -7928,9 +7947,16 @@ mod tests {
             .iter()
             .find(|job| job.id == "job.code_review")
             .expect("review");
+        let documentation = plan
+            .jobs
+            .iter()
+            .find(|job| job.id == "job.documentation")
+            .expect("documentation");
         assert!(backend.depends_on.is_empty());
+        assert_eq!(documentation.depends_on, vec!["job.backend".to_string()]);
         assert_eq!(review.depends_on, vec!["job.backend".to_string()]);
-        assert!(backend.required_output.contains("Markdown"));
+        assert!(backend.required_output.contains("runnable source file"));
+        assert!(documentation.required_output.contains("Markdown"));
         assert_eq!(backend.workload.context_budget_tokens, 4_096);
         assert_eq!(review.workload.context_budget_tokens, 4_096);
         assert!(plan.jobs.iter().all(|job| job.id != "job.scope"));
@@ -7952,7 +7978,7 @@ mod tests {
 
         assert_eq!(record.plan.strategy, "compact_reviewed_code_delivery");
         assert_eq!(record.graph.final_node_id, None);
-        assert_eq!(record.graph.nodes.len(), 2);
+        assert_eq!(record.graph.nodes.len(), 3);
         assert_eq!(record.graph.nodes[0].id, "job.backend");
         assert_eq!(record.graph.nodes[0].status, JobGraphNodeStatus::Ready);
 
@@ -7974,7 +8000,7 @@ mod tests {
             .filter(|node| node.status == JobGraphNodeStatus::Ready)
             .map(|node| node.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ready_ids, vec!["job.code_review"]);
+        assert_eq!(ready_ids, vec!["job.documentation", "job.code_review"]);
         let review_prompt = graph_node_execution_prompt(
             state.jobs.get("job-1").expect("job"),
             "job.code_review",
@@ -8084,7 +8110,8 @@ mod tests {
             node.status = JobGraphNodeStatus::Completed;
             node.output = Some(
                 match node.id.as_str() {
-                    "job.backend" => "```js\nconst express = require('express');\n```\n\nInstall dependencies and run the server.",
+                    "job.backend" => "```js\nconst express = require('express');\n```",
+                    "job.documentation" => "Install dependencies and run the server.",
                     "job.code_review" => "No blocking correctness defects found.",
                     _ => unreachable!("unexpected compact-plan node"),
                 }
@@ -8103,7 +8130,8 @@ mod tests {
             .final_manifest
             .as_ref()
             .is_some_and(|manifest| manifest.complete));
-        assert!(output.starts_with("Complete implementation and documentation\n```js"));
+        assert!(output.starts_with("Complete runnable implementation\n```js"));
+        assert!(output.contains("Markdown documentation\nInstall dependencies"));
         assert!(output.contains("Install dependencies and run the server"));
         assert!(output.contains("Independent code review\nNo blocking"));
     }
