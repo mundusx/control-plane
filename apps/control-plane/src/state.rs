@@ -2912,6 +2912,7 @@ fn complete_graph_execution_job(
     compact_reducer_node: bool,
 ) -> JobRecord {
     let automatic_budget = !job_has_explicit_max_tokens(job);
+    let compact_reviewed_code = job.plan.strategy == "compact_reviewed_code_delivery";
     let active_node_id = graph_node_assigned_to_node(&job.graph, &completion.node_id);
     let compact_final_reducer_fallback_output =
         if completion.status == JobStatus::Failed && compact_reducer_node {
@@ -2959,7 +2960,45 @@ fn complete_graph_execution_job(
                             .map(|(output, budget)| output_appears_token_limited(output, budget))
                             .unwrap_or(false)
                         && graph_node.attempt_count < graph_node.max_attempts;
-                    if truncated_synthesis {
+                    let invalid_compact_implementation = compact_reviewed_code
+                        .then(|| graph_node.id == "job.backend")
+                        .filter(|is_backend| *is_backend)
+                        .and_then(|_| {
+                            compact_code_output_failure_reason(
+                                completion.output.as_deref().unwrap_or_default(),
+                                graph_node.effective_max_tokens.unwrap_or(2_048),
+                            )
+                        });
+                    if let Some(reason) = invalid_compact_implementation {
+                        if !graph_node
+                            .failed_node_ids
+                            .iter()
+                            .any(|node_id| node_id == &completion.node_id)
+                        {
+                            graph_node.failed_node_ids.push(completion.node_id.clone());
+                        }
+                        graph_node.output = None;
+                        if graph_node.attempt_count >= graph_node.max_attempts {
+                            graph_node.status = JobGraphNodeStatus::Failed;
+                            graph_node.error = Some(format!(
+                                "implementation output failed structural validation after {} attempts: {}",
+                                graph_node.attempt_count, reason
+                            ));
+                        } else {
+                            let previous_budget = graph_node.effective_max_tokens.unwrap_or(2_048);
+                            graph_node.recommended_max_tokens = Some(
+                                previous_budget
+                                    .saturating_mul(3)
+                                    .saturating_div(2)
+                                    .min(4_096),
+                            );
+                            graph_node.status = JobGraphNodeStatus::Ready;
+                            graph_node.error = Some(format!(
+                                "automatic retry: implementation output failed structural validation: {}",
+                                reason
+                            ));
+                        }
+                    } else if truncated_synthesis {
                         let previous_budget = graph_node.effective_max_tokens.unwrap_or(1_024);
                         graph_node.recommended_max_tokens =
                             Some(previous_budget.saturating_mul(2).min(8_192));
@@ -3157,6 +3196,47 @@ fn output_appears_token_limited(output: &str, effective_max_tokens: u32) -> bool
     near_budget && !structurally_complete
 }
 
+fn compact_code_output_failure_reason(output: &str, effective_max_tokens: u32) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Some("completed implementation did not include output".to_string());
+    }
+
+    let fence_count = trimmed
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    if fence_count == 0 {
+        return Some("missing a fenced source file".to_string());
+    }
+    if fence_count % 2 != 0 {
+        return Some("has an unmatched Markdown code fence".to_string());
+    }
+    if output_appears_token_limited(trimmed, effective_max_tokens) {
+        return Some(format!(
+            "reached its {} token budget and appears incomplete",
+            effective_max_tokens
+        ));
+    }
+
+    let mut declarations = std::collections::BTreeMap::<String, usize>::new();
+    for line in trimmed.lines().map(str::trim) {
+        let declaration = line.starts_with("function ")
+            || line.starts_with("class ")
+            || line.starts_with("public class ")
+            || line.starts_with("def ")
+            || line.starts_with("fn ");
+        if declaration && line.len() >= 12 {
+            *declarations.entry(line.to_string()).or_default() += 1;
+        }
+    }
+    if declarations.values().any(|count| *count >= 3) {
+        return Some("contains repeated source declarations".to_string());
+    }
+
+    None
+}
+
 fn graph_node_assigned_to_node(graph: &JobGraph, node_id: &str) -> Option<String> {
     graph
         .nodes
@@ -3321,13 +3401,19 @@ fn graph_node_execution_prompt(
                 dependency_context
             )
         };
+        let retry_guidance = if node.attempt_count > 1 {
+            "\n\nThis is a structural-validation retry. Start with a complete source file in a language-tagged Markdown fence and close every fence. Do not repeat declarations, functions, classes, paragraphs, or sections. Finish the source before adding concise documentation."
+        } else {
+            ""
+        };
         return format!(
-            "Original user request:\n{}\n\nYou are completing one code work unit for a larger answer.\nWork unit title: {}\nWork unit type: {}\nDeliverable: {}\n\n{}\n\nReturn only the deliverable for this work unit. Do not repeat these instructions, do not describe other work units, and do not continue the user's prompt. Keep names consistent with accepted dependency output. You may introduce private helper functions only when they are needed by this work unit; list any helper names you introduce.",
+            "Original user request:\n{}\n\nYou are completing one code work unit for a larger answer.\nWork unit title: {}\nWork unit type: {}\nDeliverable: {}\n\n{}\n\nReturn only the deliverable for this work unit. Do not repeat these instructions, do not describe other work units, and do not continue the user's prompt. Keep names consistent with accepted dependency output. You may introduce private helper functions only when they are needed by this work unit; list any helper names you introduce.{}",
             job.prompt,
             node.name,
             node.responsibility,
             node.required_output,
             dependency_block,
+            retry_guidance,
         );
     }
 
@@ -3538,7 +3624,11 @@ fn graph_node_max_tokens(
             _ => 768,
         },
         "compact_reviewed_code_delivery" => match node.id.as_str() {
-            "job.backend" => 2_048,
+            "job.backend" => match node.attempt_count {
+                0 => 2_048,
+                1 => 3_072,
+                _ => 4_096,
+            },
             "job.code_review" => 512,
             _ => 512,
         },
@@ -7493,6 +7583,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_or_repetitive_compact_code_outputs() {
+        let valid = "```javascript\nconst express = require('express');\nfunction start() { return express(); }\nmodule.exports = { start };\n```\n\n## Run\nUse `node server.js`.";
+        assert_eq!(compact_code_output_failure_reason(valid, 2_048), None);
+
+        let unmatched = "```javascript\nfunction start() {\n  return true;\n";
+        assert_eq!(
+            compact_code_output_failure_reason(unmatched, 2_048).as_deref(),
+            Some("has an unmatched Markdown code fence")
+        );
+
+        let repetitive = "```javascript\nfunction validate(input) {\n  return input;\n}\nfunction validate(input) {\n  return input;\n}\nfunction validate(input) {\n  return input;\n}\n```";
+        assert_eq!(
+            compact_code_output_failure_reason(repetitive, 2_048).as_deref(),
+            Some("contains repeated source declarations")
+        );
+    }
+
+    #[test]
     fn stale_busy_node_is_marked_stopped_and_not_counted_online() {
         let mut state = ControlPlaneState::default();
         state.register(m_series_registration("node-1"));
@@ -7819,6 +7927,86 @@ mod tests {
         );
         assert!(review_prompt.contains("Accepted dependency output"));
         assert!(review_prompt.contains("const express = require('express')"));
+    }
+
+    #[test]
+    fn compact_reviewed_code_retries_invalid_implementation_before_review() {
+        let mut state = ready_state();
+        let mut request = classification_request(
+            "Create a Node.js Express CRUD API for customers, with Markdown documentation and a code review.",
+        );
+        request.execution_mode = JobExecutionMode::Decompose;
+        request.max_tokens_source = Some("auto".to_string());
+        state.submit_job(request, "1".to_string());
+
+        let first_claim = state
+            .claim_job("node-1", "2".to_string())
+            .job
+            .expect("implementation claim");
+        assert_eq!(
+            first_claim.active_graph_node_id.as_deref(),
+            Some("job.backend")
+        );
+
+        let retried = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-1".to_string(),
+                    node_id: "node-1".to_string(),
+                    worker_id: "worker-1".to_string(),
+                    backend: Backend::M,
+                    status: JobStatus::Completed,
+                    output: Some("```javascript\nfunction createCustomer() {".to_string()),
+                    error: None,
+                    latency_ms: Some(10),
+                },
+                "3".to_string(),
+            )
+            .expect("invalid implementation completion");
+
+        assert_eq!(retried.status, JobStatus::Queued);
+        let backend = retried
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "job.backend")
+            .expect("backend node");
+        assert_eq!(backend.status, JobGraphNodeStatus::Ready);
+        assert!(backend
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("unmatched Markdown code fence")));
+        assert_eq!(
+            retried
+                .graph
+                .nodes
+                .iter()
+                .find(|node| node.id == "job.code_review")
+                .expect("review node")
+                .status,
+            JobGraphNodeStatus::Waiting
+        );
+
+        let retry_claim = state
+            .claim_job("node-1", "4".to_string())
+            .job
+            .expect("implementation retry claim");
+        assert_eq!(
+            retry_claim.active_graph_node_id.as_deref(),
+            Some("job.backend")
+        );
+        assert!(retry_claim.max_tokens >= first_claim.max_tokens);
+        assert_eq!(
+            retry_claim
+                .graph
+                .nodes
+                .iter()
+                .find(|node| node.id == "job.backend")
+                .and_then(|node| node.recommended_max_tokens),
+            Some(3_072)
+        );
+        assert!(retry_claim.prompt.contains("structural-validation retry"));
+        assert!(retry_claim.prompt.contains("Do not repeat declarations"));
     }
 
     #[test]
