@@ -3394,22 +3394,24 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
       return recordAssistantTurn(conversationId, config, fetchImpl, deterministicMathJob);
     }
 
-    const weatherLocation = extractWeatherLocation(toolMessage);
-    if (weatherLocation) {
-      return recordAssistantTurn(
-        conversationId,
-        config,
-        fetchImpl,
-        await fetchWeatherJob(toolMessage, weatherLocation, config, fetchImpl),
-      );
-    }
-    if (looksLikeWeatherRequest(toolMessage.toLowerCase())) {
-      return recordAssistantTurn(
-        conversationId,
-        config,
-        fetchImpl,
-        fetchWeatherLocationClarificationJob(toolMessage),
-      );
+    if (!isWeatherResourceRequest(toolMessage)) {
+      const weatherLocation = extractWeatherLocation(toolMessage);
+      if (weatherLocation) {
+        return recordAssistantTurn(
+          conversationId,
+          config,
+          fetchImpl,
+          await fetchWeatherJob(toolMessage, weatherLocation, config, fetchImpl),
+        );
+      }
+      if (looksLikeWeatherRequest(toolMessage.toLowerCase())) {
+        return recordAssistantTurn(
+          conversationId,
+          config,
+          fetchImpl,
+          fetchWeatherLocationClarificationJob(toolMessage),
+        );
+      }
     }
 
     const identityTopic = extractAssistantIdentityTopic(toolMessage);
@@ -5891,6 +5893,9 @@ export function extractWeatherLocation(message) {
   if (!text) {
     return null;
   }
+  if (isWeatherResourceRequest(text)) {
+    return null;
+  }
   const lower = text.toLowerCase();
   if (!/\b(weather|forecast|temperature|temp)\b/.test(lower)) {
     return null;
@@ -5915,6 +5920,17 @@ export function extractWeatherLocation(message) {
   // "the berlin weather today" names the place before the subject, so the
   // patterns above see only "weather today" and find nothing.
   return extractLeadingWeatherLocation(text);
+}
+
+export function isWeatherResourceRequest(message) {
+  const text = normalizeWeatherWordTypos(String(message ?? "").trim());
+  if (!text || !/\b(?:weather|forecast|temperature|temp)\b/i.test(text)) {
+    return false;
+  }
+
+  const asksForResource = /\b(?:recommend|suggest|find|list|share|provide|show|which|what|best|reliable|official|use|using)\b/i.test(text);
+  const namesResource = /\b(?:websites?|sites?|apps?|applications?|resources?|sources?|services?|tools?|providers?|portals?)\b/i.test(text);
+  return asksForResource && namesResource;
 }
 
 export function extractWeatherDayOffset(message) {

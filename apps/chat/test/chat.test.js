@@ -22,6 +22,7 @@ import {
   extractWeatherDayOffset,
   inferChatRequestTimeoutSeconds,
   isFocusedQuotedRequest,
+  isWeatherResourceRequest,
   normalizeWeatherWordTypos,
   fetchChatConversation,
   fetchNetworkSummary,
@@ -1318,6 +1319,43 @@ test("routes weather questions to wttr without queuing an LLM job", async () => 
   assert.equal(result.response.facts.Humidity, "70%");
   assert.match(result.output, /Weather for Manila, National Capital Region, Philippines/);
   assert.match(result.output, /Partly cloudy, 31C\/88F/);
+});
+
+test("routes weather resource recommendations to chat instead of wttr", async () => {
+  const prompt = "Can you recommend any weather-related websites or apps for New Zealand?";
+  const calls = [];
+  const result = await submitChatJob(
+    { message: prompt, toolMode: true },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url, init = {}) => {
+      calls.push(url);
+      assert.doesNotMatch(url, /^https:\/\/wttr\.in\//);
+      if (url === "https://uat.mundusx.ai/v1/nodes?page=1&page_size=25") {
+        return jsonResponse({ items: [] });
+      }
+      assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+      const body = JSON.parse(init.body);
+      assert.equal(body.prompt, prompt);
+      return jsonResponse({
+        job_id: "job-weather-resources",
+        status: "queued",
+        job: {
+          job_id: "job-weather-resources",
+          status: "queued",
+          execution_mode: "auto",
+          graph_execution_enabled: false,
+          graph: { nodes: [] },
+        },
+      });
+    },
+  );
+
+  assert.deepEqual(calls, [
+    "https://uat.mundusx.ai/v1/nodes?page=1&page_size=25",
+    "https://uat.mundusx.ai/v1/jobs",
+  ]);
+  assert.equal(result.job_id, "job-weather-resources");
+  assert.notEqual(result.tool, "weather");
 });
 
 test("records tool rewards when an operator token is configured", async () => {
@@ -5368,6 +5406,14 @@ test("does not invent a location from words that are not places", () => {
   assert.equal(extractWeatherLocation("how is the weather today"), null);
   assert.equal(extractWeatherLocation("show me the current weather"), null);
   assert.equal(extractWeatherLocation("tell me the weather"), null);
+});
+
+test("does not route weather resource recommendations as live conditions", () => {
+  const recommendation = "Can you recommend any weather-related websites or apps for New Zealand?";
+  assert.equal(isWeatherResourceRequest(recommendation), true);
+  assert.equal(extractWeatherLocation(recommendation), null);
+  assert.equal(isWeatherResourceRequest("What is the weather in New Zealand?"), false);
+  assert.equal(extractWeatherLocation("What is the weather in New Zealand?"), "New Zealand");
 });
 
 test("still prefers the explicit location that follows weather", () => {
