@@ -2959,6 +2959,15 @@ fn complete_graph_execution_job(
         {
             match completion.status {
                 JobStatus::Completed => {
+                    let accepted_output = if compact_reviewed_code && graph_node.id == "job.backend"
+                    {
+                        completion
+                            .output
+                            .as_deref()
+                            .map(normalize_compact_code_output)
+                    } else {
+                        completion.output.clone()
+                    };
                     let unusable_section_output = graph_node.responsibility == "section"
                         && completion
                             .output
@@ -2989,7 +2998,7 @@ fn complete_graph_execution_job(
                         .filter(|is_backend| *is_backend)
                         .and_then(|_| {
                             compact_code_output_failure_reason(
-                                completion.output.as_deref().unwrap_or_default(),
+                                accepted_output.as_deref().unwrap_or_default(),
                                 graph_node.effective_max_tokens.unwrap_or(2_048),
                             )
                         });
@@ -3051,7 +3060,7 @@ fn complete_graph_execution_job(
                         };
                     } else {
                         graph_node.status = JobGraphNodeStatus::Completed;
-                        graph_node.output = completion.output.clone();
+                        graph_node.output = accepted_output;
                         graph_node.error = None;
                     }
                 }
@@ -3284,6 +3293,51 @@ fn compact_code_output_failure_reason(output: &str, effective_max_tokens: u32) -
     }
 
     None
+}
+
+fn normalize_compact_code_output(output: &str) -> String {
+    let mut normalized = Vec::new();
+    let mut fence_open = false;
+    let mut saw_source_fence = false;
+
+    for line in output.lines() {
+        let fence = line.trim_start();
+        let Some(suffix) = fence.strip_prefix("```") else {
+            normalized.push(line);
+            continue;
+        };
+        let info = suffix.trim();
+        if fence_open {
+            normalized.push(line);
+            if info.is_empty() {
+                fence_open = false;
+            }
+            continue;
+        }
+
+        let language = info
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if saw_source_fence && matches!(language.as_str(), "markdown" | "md") {
+            continue;
+        }
+        if saw_source_fence && info.is_empty() {
+            continue;
+        }
+
+        normalized.push(line);
+        if !info.is_empty() {
+            saw_source_fence |= !matches!(
+                language.as_str(),
+                "markdown" | "md" | "json" | "jsonc" | "text" | "plaintext"
+            );
+            fence_open = true;
+        }
+    }
+
+    normalized.join("\n").trim().to_string()
 }
 
 fn graph_node_assigned_to_node(graph: &JobGraph, node_id: &str) -> Option<String> {
@@ -7672,6 +7726,11 @@ mod tests {
             compact_code_output_failure_reason(nested, 2_048).as_deref(),
             Some("has a nested Markdown code fence")
         );
+        let normalized = normalize_compact_code_output(nested);
+        assert_eq!(compact_code_output_failure_reason(&normalized, 2_048), None);
+        assert!(normalized.contains("```javascript"));
+        assert!(normalized.contains("```json"));
+        assert!(!normalized.contains("```markdown"));
     }
 
     #[test]
