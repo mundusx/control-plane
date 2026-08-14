@@ -3226,15 +3226,40 @@ fn compact_code_output_failure_reason(output: &str, effective_max_tokens: u32) -
         return Some("completed implementation did not include output".to_string());
     }
 
-    let fence_count = trimmed
-        .lines()
-        .filter(|line| line.trim_start().starts_with("```"))
-        .count();
-    if fence_count == 0 {
-        return Some("missing a fenced source file".to_string());
+    let mut fence_open = false;
+    let mut saw_source_fence = false;
+    for line in trimmed.lines() {
+        let fence = line.trim_start();
+        let Some(suffix) = fence.strip_prefix("```") else {
+            continue;
+        };
+        let info = suffix.trim();
+        if fence_open {
+            if !info.is_empty() {
+                return Some("has a nested Markdown code fence".to_string());
+            }
+            fence_open = false;
+            continue;
+        }
+        if info.is_empty() {
+            return Some("has an unlabeled or unmatched Markdown code fence".to_string());
+        }
+        let language = info
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        saw_source_fence |= !matches!(
+            language.as_str(),
+            "markdown" | "md" | "json" | "jsonc" | "text" | "plaintext"
+        );
+        fence_open = true;
     }
-    if fence_count % 2 != 0 {
+    if fence_open {
         return Some("has an unmatched Markdown code fence".to_string());
+    }
+    if !saw_source_fence {
+        return Some("missing a fenced source file".to_string());
     }
     if output_appears_token_limited(trimmed, effective_max_tokens) {
         return Some(format!(
@@ -3426,7 +3451,7 @@ fn graph_node_execution_prompt(
             )
         };
         let retry_guidance = if node.attempt_count > 1 {
-            "\n\nThis is a structural-validation retry. Start with a complete source file in a language-tagged Markdown fence and close every fence. Do not repeat declarations, functions, classes, paragraphs, or sections. Finish the source before adding concise documentation."
+            "\n\nThis is a structural-validation retry. Start with a complete source file in a language-tagged Markdown fence and close every fence. Do not wrap the documentation in a markdown code fence or nest fenced examples inside another fence. Do not repeat declarations, functions, classes, paragraphs, or sections. Finish the source before adding concise documentation."
         } else {
             ""
         };
@@ -7621,6 +7646,12 @@ mod tests {
         assert_eq!(
             compact_code_output_failure_reason(repetitive, 2_048).as_deref(),
             Some("contains repeated source declarations")
+        );
+
+        let nested = "```javascript\nmodule.exports = {};\n```\n```markdown\n## Example\n```json\n{}\n```\n```";
+        assert_eq!(
+            compact_code_output_failure_reason(nested, 2_048).as_deref(),
+            Some("has a nested Markdown code fence")
         );
     }
 
