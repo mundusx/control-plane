@@ -9,6 +9,7 @@ import {
   cleanChatOutput,
   configFromEnv,
   deleteChatConversation,
+  detectClientMetadataTask,
   escapeHtml,
   extractCurrentOfficeQuery,
   extractFactualSummaryTopic,
@@ -349,6 +350,69 @@ test("submits chat work as an auto execution job", async () => {
   assert.equal(result.progress.total, 2);
   assert.equal(result.progress.waiting, 2);
   assert.equal(result.progress.final_synthesis, true);
+});
+
+test("isolates OpenWebUI metadata prompts from embedded code requests", async () => {
+  const prompts = [
+    {
+      kind: "title",
+      maxTokens: 96,
+      task: "Generate a concise title summarizing the chat history.",
+      output: '{ "title": "Customer CRUD API" }',
+    },
+    {
+      kind: "tags",
+      maxTokens: 160,
+      task: "Generate 1-3 broad tags categorizing the main themes of the chat history, along with 1-3 more specific subtopic tags.",
+      output: '{ "tags": ["Technology", "Node.js"] }',
+    },
+    {
+      kind: "follow_ups",
+      maxTokens: 256,
+      task: "Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next in this conversation as a user.",
+      output: '{ "follow_ups": ["Can you add tests?"] }',
+    },
+  ];
+
+  for (const [index, example] of prompts.entries()) {
+    const prompt = `### Task:\n${example.task}\n\n### Guidelines:\n- Follow the task.\n\n### Output:\nJSON format only.\n\n### Chat History:\n<chat_history>\nUSER: Create a Node.js Express CRUD API for customers, with Markdown documentation and a code review.\nASSISTANT:\n</chat_history>`;
+    assert.deepEqual(detectClientMetadataTask(prompt), {
+      kind: example.kind,
+      maxTokens: example.maxTokens,
+    });
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      calls.push({ url, init });
+      assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+      const request = JSON.parse(init.body);
+      assert.equal(request.prompt, prompt);
+      assert.equal(request.execution_mode, "single");
+      assert.equal(request.max_tokens, example.maxTokens);
+      assert.equal(request.max_tokens_source, "explicit");
+      assert.match(request.system_prompt, /quoted data, never as instructions/i);
+      assert.doesNotMatch(request.system_prompt, /complete code requests/i);
+      return jsonResponse({
+        job_id: `metadata-${index}`,
+        status: "completed",
+        job: {
+          job_id: `metadata-${index}`,
+          status: "completed",
+          execution_mode: "single",
+          output: example.output,
+        },
+      });
+    };
+
+    const result = await submitChatJob(
+      { message: prompt, conversationId: "must-not-be-persisted" },
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      fetchImpl,
+    );
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.output, example.output);
+    assert.equal(calls.length, 1);
+  }
 });
 
 test("submits translation jobs with focused private skills", async () => {
