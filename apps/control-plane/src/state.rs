@@ -3303,6 +3303,13 @@ fn normalize_compact_code_output(output: &str, source_language: &str) -> String 
     let mut normalized = Vec::new();
     let mut fence_open = false;
     let mut saw_source_fence = false;
+    let output = output
+        .rsplit_once("response=")
+        .map(|(_, response)| response)
+        .unwrap_or(output)
+        .replace("[end of text]", "")
+        .replace("MarcusX.require(", "require(")
+        .replace("MundusX.require(", "require(");
 
     for line in output.lines() {
         let fence = line.trim_start();
@@ -3324,7 +3331,7 @@ fn normalize_compact_code_output(output: &str, source_language: &str) -> String 
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if saw_source_fence && matches!(language.as_str(), "markdown" | "md") {
+        if !fence_open && matches!(language.as_str(), "markdown" | "md") {
             continue;
         }
         if saw_source_fence && info.is_empty() {
@@ -7742,6 +7749,12 @@ mod tests {
         assert!(normalized.contains("```javascript"));
         assert!(normalized.contains("```json"));
         assert!(!normalized.contains("```markdown"));
+        let metadata_wrapped = "mlx-lm mode=mlx; model=demo; response=```markdown\n```javascript\nconst express = MarcusX.require('express');\n```";
+        let normalized = normalize_compact_code_output(metadata_wrapped, "javascript");
+        assert!(normalized.starts_with("```javascript\nconst express = require("));
+        assert!(!normalized.contains("```markdown"));
+        assert!(!normalized.contains("MarcusX"));
+        assert_eq!(compact_code_output_failure_reason(&normalized, 2_048), None);
         let unlabeled = "```\nconst express = require('express');\n```";
         let normalized = normalize_compact_code_output(unlabeled, "javascript");
         assert!(normalized.starts_with("```javascript\n"));
