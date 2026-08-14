@@ -358,19 +358,22 @@ test("isolates OpenWebUI metadata prompts from embedded code requests", async ()
       kind: "title",
       maxTokens: 96,
       task: "Generate a concise title summarizing the chat history.",
-      output: '{ "title": "Customer CRUD API" }',
+      rawOutput: 'JSON { "title": "Customer CRUD API" }',
+      output: '{"title":"Customer CRUD API"}',
     },
     {
       kind: "tags",
       maxTokens: 160,
       task: "Generate 1-3 broad tags categorizing the main themes of the chat history, along with 1-3 more specific subtopic tags.",
-      output: '{ "tags": ["Technology", "Node.js"] }',
+      rawOutput: '```json\n{ "tags": ["Technology", "Node.js"] }\n```',
+      output: '{"tags":["Technology","Node.js"]}',
     },
     {
       kind: "follow_ups",
       maxTokens: 256,
       task: "Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next in this conversation as a user.",
-      output: '{ "follow_ups": ["Can you add tests?"] }',
+      rawOutput: 'JSON format: { "follow_ups": ["Can you add tests?"] }',
+      output: '{"follow_ups":["Can you add tests?"]}',
     },
   ];
 
@@ -398,7 +401,7 @@ test("isolates OpenWebUI metadata prompts from embedded code requests", async ()
           job_id: `metadata-${index}`,
           status: "completed",
           execution_mode: "single",
-          output: example.output,
+          output: example.rawOutput,
         },
       });
     };
