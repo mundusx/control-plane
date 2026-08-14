@@ -3516,7 +3516,7 @@ fn graph_node_execution_prompt(
             )
         };
         let retry_guidance = if node.attempt_count > 1 {
-            "\n\nThis is a structural-validation retry. Start with a complete source file in a language-tagged Markdown fence and close every fence. Do not wrap the documentation in a markdown code fence or nest fenced examples inside another fence. Do not repeat declarations, functions, classes, paragraphs, or sections. Finish the source before adding concise documentation."
+            "\n\nThis is a structural-validation retry. Return only the smallest complete runnable source file in one language-tagged Markdown fence and close it. Keep the source under 120 logical lines. When persistence was not requested, use in-memory storage. Do not add documentation, examples, review prose, repeated declarations, functions, classes, paragraphs, or sections."
         } else {
             ""
         };
@@ -5987,7 +5987,7 @@ fn compact_reviewed_code_plan_jobs() -> Vec<PlannedJob> {
         "Complete runnable implementation",
         "backend",
         Vec::new(),
-        "Produce one complete runnable source file in a closed, language-tagged Markdown fence that satisfies the requested API and data-model contract. Include input validation, error handling, and focused executable checks where appropriate. Do not emit documentation, placeholders, TODOs, or review prose.",
+        "Produce the smallest complete runnable source file in one closed, language-tagged Markdown fence that satisfies the requested API and data-model contract. Keep the source under 120 logical lines. When persistence was not requested, use in-memory storage. Include concise input validation and error handling. Do not emit documentation, examples, placeholders, TODOs, or review prose.",
         "A low-complexity code project is faster and more coherent when one worker owns the implementation contract without also spending its bounded output budget on documentation.",
     );
     let implementation = jobs.last_mut().expect("implementation job");
@@ -8030,6 +8030,7 @@ mod tests {
         assert_eq!(documentation.depends_on, vec!["job.backend".to_string()]);
         assert_eq!(review.depends_on, vec!["job.backend".to_string()]);
         assert!(backend.required_output.contains("runnable source file"));
+        assert!(backend.required_output.contains("under 120 logical lines"));
         assert!(documentation.required_output.contains("Markdown"));
         assert_eq!(backend.workload.context_budget_tokens, 4_096);
         assert_eq!(review.workload.context_budget_tokens, 4_096);
@@ -8168,7 +8169,7 @@ mod tests {
             Some(3_072)
         );
         assert!(retry_claim.prompt.contains("structural-validation retry"));
-        assert!(retry_claim.prompt.contains("Do not repeat declarations"));
+        assert!(retry_claim.prompt.contains("repeated declarations"));
     }
 
     #[test]
