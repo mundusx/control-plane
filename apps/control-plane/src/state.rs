@@ -2937,6 +2937,11 @@ fn complete_graph_execution_job(
 ) -> JobRecord {
     let automatic_budget = !job_has_explicit_max_tokens(job);
     let compact_reviewed_code = job.plan.strategy == "compact_reviewed_code_delivery";
+    let compact_source_language = job
+        .scheduling_requirements
+        .language
+        .clone()
+        .unwrap_or_else(|| "javascript".to_string());
     let active_node_id = graph_node_assigned_to_node(&job.graph, &completion.node_id);
     let compact_final_reducer_fallback_output =
         if completion.status == JobStatus::Failed && compact_reducer_node {
@@ -2961,10 +2966,9 @@ fn complete_graph_execution_job(
                 JobStatus::Completed => {
                     let accepted_output = if compact_reviewed_code && graph_node.id == "job.backend"
                     {
-                        completion
-                            .output
-                            .as_deref()
-                            .map(normalize_compact_code_output)
+                        completion.output.as_deref().map(|output| {
+                            normalize_compact_code_output(output, &compact_source_language)
+                        })
                     } else {
                         completion.output.clone()
                     };
@@ -3295,7 +3299,7 @@ fn compact_code_output_failure_reason(output: &str, effective_max_tokens: u32) -
     None
 }
 
-fn normalize_compact_code_output(output: &str) -> String {
+fn normalize_compact_code_output(output: &str, source_language: &str) -> String {
     let mut normalized = Vec::new();
     let mut fence_open = false;
     let mut saw_source_fence = false;
@@ -3303,12 +3307,12 @@ fn normalize_compact_code_output(output: &str) -> String {
     for line in output.lines() {
         let fence = line.trim_start();
         let Some(suffix) = fence.strip_prefix("```") else {
-            normalized.push(line);
+            normalized.push(line.to_string());
             continue;
         };
         let info = suffix.trim();
         if fence_open {
-            normalized.push(line);
+            normalized.push(line.to_string());
             if info.is_empty() {
                 fence_open = false;
             }
@@ -3327,7 +3331,14 @@ fn normalize_compact_code_output(output: &str) -> String {
             continue;
         }
 
-        normalized.push(line);
+        if !saw_source_fence && info.is_empty() {
+            normalized.push(format!("```{source_language}"));
+            saw_source_fence = true;
+            fence_open = true;
+            continue;
+        }
+
+        normalized.push(line.to_string());
         if !info.is_empty() {
             saw_source_fence |= !matches!(
                 language.as_str(),
@@ -7726,11 +7737,15 @@ mod tests {
             compact_code_output_failure_reason(nested, 2_048).as_deref(),
             Some("has a nested Markdown code fence")
         );
-        let normalized = normalize_compact_code_output(nested);
+        let normalized = normalize_compact_code_output(nested, "javascript");
         assert_eq!(compact_code_output_failure_reason(&normalized, 2_048), None);
         assert!(normalized.contains("```javascript"));
         assert!(normalized.contains("```json"));
         assert!(!normalized.contains("```markdown"));
+        let unlabeled = "```\nconst express = require('express');\n```";
+        let normalized = normalize_compact_code_output(unlabeled, "javascript");
+        assert!(normalized.starts_with("```javascript\n"));
+        assert_eq!(compact_code_output_failure_reason(&normalized, 2_048), None);
     }
 
     #[test]
