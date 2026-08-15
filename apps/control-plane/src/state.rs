@@ -5,11 +5,11 @@ use crate::contracts::{
     ExpectedOutputFormat, FallbackDecision, FallbackDecisionStatus, FallbackPolicy, Heartbeat,
     JobClaimResponse, JobCompletion, JobEventRecord, JobExecutionMode, JobGraph, JobGraphNode,
     JobGraphNodeStatus, JobGraphStatus, JobPlan, JobRecord, JobRequest, JobResultRecord,
-    JobResultVerificationStatus, JobSchedulingRequirements, JobStatus, NodePolicyOverride,
-    NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, NodeRole, NodeTrustRecord,
-    OrchestrationTimelineEvent, PlannedJob, PrivacyLevel, RequestClassification, RequestComplexity,
-    RequestTaskType, ResultArtifact, ResultArtifactKind, RoutingMode, RuntimeMode,
-    SchedulerDecision, StepWorkloadRequirements, SynthesisManifest, SynthesisStatus,
+    JobResultVerificationStatus, JobSchedulingRequirements, JobStatus, ModelCapability,
+    NodePolicyOverride, NodePolicyOverrideInput, NodePolicyOverrideTarget, NodeRecord, NodeRole,
+    NodeTrustRecord, OrchestrationTimelineEvent, PlannedJob, PrivacyLevel, RequestClassification,
+    RequestComplexity, RequestTaskType, ResultArtifact, ResultArtifactKind, RoutingMode,
+    RuntimeMode, SchedulerDecision, StepWorkloadRequirements, SynthesisManifest, SynthesisStatus,
     ToolRewardRequest, ValidationEvidenceKind, ValidationEvidenceProvenance, WorkerHealthReport,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,14 @@ enum ReducerProfile {
     Compact,
     Standard,
     Strong,
+}
+
+#[derive(Clone, Debug)]
+struct ModelSelection {
+    name: String,
+    capabilities: Vec<String>,
+    score: i32,
+    reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -719,8 +727,10 @@ impl ControlPlaneState {
         let mut capacity_counts = BTreeMap::<String, u32>::new();
         let mut role_counts = BTreeMap::<String, u32>::new();
         let mut tool_counts = BTreeMap::<String, u32>::new();
+        let mut model_capability_counts = BTreeMap::<String, u32>::new();
         let mut eligible_nodes = 0_u32;
         let mut eligible_parallel_slots = 0_u32;
+        let mut servable_models = 0_u32;
         let mut max_context_tokens = 0_u32;
 
         for node in self.nodes.values().filter(|node| {
@@ -748,6 +758,15 @@ impl ControlPlaneState {
                     *tool_counts.entry(normalized).or_default() += 1;
                 }
             }
+            for model in &health.capabilities.models {
+                servable_models = servable_models.saturating_add(1);
+                for capability in &model.task_capabilities {
+                    let normalized = capability.trim().to_ascii_lowercase();
+                    if !normalized.is_empty() && normalized.len() <= 64 {
+                        *model_capability_counts.entry(normalized).or_default() += 1;
+                    }
+                }
+            }
             max_context_tokens =
                 max_context_tokens.max(health.capabilities.max_context_tokens.unwrap_or_default());
             let reported_slots = u32::from(health.parallel_slots.max(1))
@@ -761,11 +780,13 @@ impl ControlPlaneState {
             "schema_version": 1,
             "eligible_nodes": eligible_nodes,
             "eligible_parallel_slots": eligible_parallel_slots,
+            "servable_models": servable_models,
             "max_context_tokens": max_context_tokens,
             "backend_counts": backend_counts,
             "capacity_class_counts": capacity_counts,
             "role_counts": role_counts,
             "tool_counts": tool_counts,
+            "model_capability_counts": model_capability_counts,
             "privacy": "aggregate_only_no_node_or_model_identifiers"
         })
     }
@@ -1011,6 +1032,236 @@ impl ControlPlaneState {
         true
     }
 
+    fn model_inventory(node: &NodeRecord) -> Vec<ModelCapability> {
+        let Some(health) = node.worker_health.as_ref() else {
+            return Vec::new();
+        };
+        if !health.capabilities.models.is_empty() {
+            return health.capabilities.models.clone();
+        }
+        health
+            .model_name
+            .as_ref()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| ModelCapability {
+                name: name.clone(),
+                context_tokens: health.capabilities.max_context_tokens,
+                active: true,
+                warm: health.runtime_mode.contains("warm")
+                    || health.runtime_mode == "vllm"
+                    || health.runtime_mode == "contributed-cluster",
+                capacity_class: health.capabilities.capacity_class.clone(),
+                // Legacy agents only advertised node-wide roles. Keep these empty
+                // so the existing node-level graph-role compatibility rules remain
+                // authoritative until a schema-v4 model inventory arrives.
+                roles: Vec::new(),
+                task_capabilities: Vec::new(),
+                supports_vision: health.capabilities.supports_vision,
+                supports_embeddings: health.capabilities.supports_embeddings,
+                supports_tools: health.capabilities.supports_tools,
+                ..ModelCapability::default()
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn required_model_capability(
+        job: &JobRecord,
+        active_graph_node_id: Option<&str>,
+    ) -> &'static str {
+        if let Some(role) = Self::graph_node_role(job, active_graph_node_id) {
+            return match role {
+                NodeRole::Coding => match job.scheduling_requirements.context_size {
+                    ContextSize::Small => "small_coding",
+                    ContextSize::Medium => "medium_coding",
+                    ContextSize::Large => "large_coding",
+                },
+                NodeRole::Reducer | NodeRole::Synthesizer => "synthesizer",
+                NodeRole::ChunkAnalysis => "research",
+                NodeRole::ToolUse => "tool_use",
+                NodeRole::Vision => "vision",
+                NodeRole::Embedding => "embedding",
+                NodeRole::Chat | NodeRole::Batch => "chat",
+            };
+        }
+        match job.scheduling_requirements.task_type {
+            RequestTaskType::Coding => match job.scheduling_requirements.context_size {
+                ContextSize::Small => "small_coding",
+                ContextSize::Medium => "medium_coding",
+                ContextSize::Large => "large_coding",
+            },
+            RequestTaskType::Document
+                if job.scheduling_requirements.context_size != ContextSize::Small =>
+            {
+                "research"
+            }
+            RequestTaskType::Inference
+                if job.scheduling_requirements.context_size != ContextSize::Small =>
+            {
+                "reasoning"
+            }
+            RequestTaskType::Chat | RequestTaskType::Document | RequestTaskType::Inference => {
+                "chat"
+            }
+        }
+    }
+
+    fn model_can_run_job(
+        node: &NodeRecord,
+        model: &ModelCapability,
+        job: &JobRecord,
+        active_graph_node_id: Option<&str>,
+    ) -> bool {
+        if model.name.trim().is_empty()
+            || model
+                .task_capabilities
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case("unavailable"))
+        {
+            return false;
+        }
+        if let Some(required_model) = job
+            .scheduling_requirements
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let matches = model.name.eq_ignore_ascii_case(required_model)
+                || model
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(required_model));
+            if !matches {
+                return false;
+            }
+        }
+        let workload = Self::graph_workload(job, active_graph_node_id);
+        let required_context = workload
+            .map(|value| value.context_budget_tokens)
+            .filter(|value| *value > 0)
+            .unwrap_or(match job.scheduling_requirements.context_size {
+                ContextSize::Small => 4_096,
+                ContextSize::Medium => 8_192,
+                ContextSize::Large => 16_384,
+            });
+        if model
+            .context_tokens
+            .is_some_and(|available| available < required_context)
+        {
+            return false;
+        }
+        let required_output = workload
+            .and_then(|_| {
+                active_graph_node_id.and_then(|id| {
+                    job.graph
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .and_then(|node| node.minimum_max_tokens)
+                })
+            })
+            .or(job.max_tokens)
+            .unwrap_or_default();
+        if required_output > 0
+            && model
+                .max_output_tokens
+                .is_some_and(|available| available < required_output)
+        {
+            return false;
+        }
+        if let Some(estimated_vram_mb) = model.estimated_vram_mb {
+            let available_vram_mb = node
+                .worker_health
+                .as_ref()
+                .and_then(|health| health.capabilities.available_vram_mb)
+                .unwrap_or_default();
+            if available_vram_mb > 0 && estimated_vram_mb > available_vram_mb {
+                return false;
+            }
+        }
+        let required_capability = Self::required_model_capability(job, active_graph_node_id);
+        if !model.task_capabilities.is_empty()
+            && !model
+                .task_capabilities
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(required_capability))
+        {
+            return false;
+        }
+        if let Some(required_role) = Self::graph_node_role(job, active_graph_node_id) {
+            if !model.roles.is_empty()
+                && !model.roles.contains(&required_role)
+                && !(required_role == NodeRole::ChunkAnalysis
+                    && model.roles.contains(&NodeRole::Batch))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn select_model_for_job(
+        node: &NodeRecord,
+        job: &JobRecord,
+        active_graph_node_id: Option<&str>,
+    ) -> Option<ModelSelection> {
+        let required = Self::required_model_capability(job, active_graph_node_id);
+        Self::model_inventory(node)
+            .into_iter()
+            .filter(|model| Self::model_can_run_job(node, model, job, active_graph_node_id))
+            .map(|model| {
+                let mut score = 0;
+                let mut reasons = vec![format!("model_capability_required:{required}")];
+                if model
+                    .task_capabilities
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(required))
+                {
+                    score += 20;
+                    reasons.push(format!("model_capability_match:{required}"));
+                } else {
+                    reasons.push("legacy_model_capability_fallback".to_string());
+                }
+                if model.active || model.warm {
+                    score += 10;
+                    reasons.push("model_warm_or_active".to_string());
+                }
+                let tier = model_tier_for_name(&model.name);
+                let (tier_score, tier_reason) = model_tier_score_for_job(job, tier);
+                score += tier_score;
+                reasons.push(format!("model_tier:{}:{tier_reason}", tier.as_str()));
+                reasons.push(format!("model tier {}", tier.as_str()));
+                let capacity = parse_capacity_class(&model.capacity_class)
+                    .unwrap_or_else(|| capacity_class_for_model_tier(tier));
+                let desired = desired_model_capacity(job, active_graph_node_id);
+                let excess =
+                    capacity_rank_value(capacity).saturating_sub(capacity_rank_value(desired));
+                if excess > 0 && job.routing_mode != RoutingMode::Max {
+                    score -= i32::from(excess) * 5;
+                    reasons.push(format!(
+                        "best_fit_penalty:{}_above_{}",
+                        capacity.as_str(),
+                        desired.as_str()
+                    ));
+                } else if capacity >= desired {
+                    score += 5;
+                    reasons.push(format!("capacity_fit:{}", capacity.as_str()));
+                }
+                ModelSelection {
+                    name: model.name,
+                    capabilities: model.task_capabilities,
+                    score,
+                    reasons,
+                }
+            })
+            .max_by(|left, right| {
+                left.score
+                    .cmp(&right.score)
+                    .then_with(|| right.name.cmp(&left.name))
+            })
+    }
+
     fn node_can_run_job(node: &NodeRecord, job: &JobRecord) -> bool {
         let Some(worker_health) = node.worker_health.as_ref() else {
             return false;
@@ -1035,21 +1286,7 @@ impl ControlPlaneState {
             return false;
         }
 
-        let model_was_explicitly_requested = job.scheduling_requirements.model.is_some();
-        if let Some(required_model) = job.model.as_deref().map(str::trim).filter(|value| {
-            !value.is_empty() && (!job.graph_execution_enabled || model_was_explicitly_requested)
-        }) {
-            let model_matches = worker_health
-                .model_name
-                .as_deref()
-                .map(|available| available.eq_ignore_ascii_case(required_model))
-                .unwrap_or(false);
-            if !model_matches {
-                return false;
-            }
-        }
-
-        true
+        Self::select_model_for_job(node, job, None).is_some()
     }
 
     fn graph_node_role(job: &JobRecord, active_graph_node_id: Option<&str>) -> Option<NodeRole> {
@@ -1135,6 +1372,9 @@ impl ControlPlaneState {
         {
             return true;
         }
+        if Self::select_model_for_job(node, job, active_graph_node_id).is_none() {
+            return false;
+        }
         if let Some(workload) = Self::graph_workload(job, active_graph_node_id) {
             if Self::capacity_class_for(node) < workload.minimum_capacity_class
                 && !graph_node_allows_degraded_capacity_retry(job, active_graph_node_id)
@@ -1208,6 +1448,12 @@ impl ControlPlaneState {
         let capacity = Self::capacity_class_for(node);
         reasons.push(format!("capacity_class:{}", capacity.as_str()));
         reasons.push(format!("routing_mode:{}", job.routing_mode.as_str()));
+        let model_selection = Self::select_model_for_job(node, job, active_graph_node_id);
+        if let Some(selection) = model_selection.as_ref() {
+            score += selection.score;
+            reasons.extend(selection.reasons.clone());
+            reasons.push(format!("selected_model:{}", selection.name));
+        }
         let weight = match capacity {
             CapacityClass::Micro => 1,
             CapacityClass::Standard => 2,
@@ -1312,20 +1558,6 @@ impl ControlPlaneState {
                 reasons.push("requested model is already present".to_string());
             }
 
-            if requirements.model.is_none() {
-                if let Some(model_name) = worker_health.model_name.as_deref() {
-                    let tier = model_tier_for_name(model_name);
-                    let (tier_score, tier_reason) = model_tier_score_for_job(job, tier);
-                    score += tier_score;
-                    reasons.push(format!(
-                        "model routing:{} tier {} ({})",
-                        model_name,
-                        tier.as_str(),
-                        tier_reason
-                    ));
-                }
-            }
-
             if worker_health.streaming_supported {
                 score += 3;
                 reasons.push("streaming capable".to_string());
@@ -1374,6 +1606,13 @@ impl ControlPlaneState {
 
         let mut decision = SchedulerDecision {
             node_id: node.node_id.clone(),
+            model: model_selection
+                .as_ref()
+                .map(|selection| selection.name.clone()),
+            model_capabilities: model_selection
+                .as_ref()
+                .map(|selection| selection.capabilities.clone())
+                .unwrap_or_default(),
             score,
             reasons,
         };
@@ -1449,6 +1688,8 @@ impl ControlPlaneState {
                     });
                 SchedulerDecision {
                     node_id: String::new(),
+                    model: None,
+                    model_capabilities: Vec::new(),
                     score: 0,
                     reasons: vec![role_reason.unwrap_or_else(|| {
                         format!(
@@ -1674,15 +1915,15 @@ impl ControlPlaneState {
         };
 
         if let Some(job) = self.jobs.get_mut(&job_id) {
-            if !job.graph_execution_enabled && job.model.is_none() {
-                if let Some(selected_model) = claiming_node
+            let selected_model = scheduler_decision.model.clone().or_else(|| {
+                claiming_node
                     .worker_health
                     .as_ref()
                     .and_then(|health| health.model_name.clone())
                     .filter(|model| !model.trim().is_empty())
-                {
-                    job.model = Some(selected_model);
-                }
+            });
+            if !job.graph_execution_enabled && job.scheduling_requirements.model.is_none() {
+                job.model = selected_model.clone();
             }
 
             let active_graph_node_id = selected_graph_node_id;
@@ -1701,11 +1942,7 @@ impl ControlPlaneState {
                     graph_node_max_tokens(job, active_node_id, Some(&claiming_node));
                 let ready_at = graph_node_ready_at(job, active_node_id);
                 let queue_wait_ms = elapsed_ms_between(&ready_at, &claimed_at);
-                let model = claiming_node
-                    .worker_health
-                    .as_ref()
-                    .and_then(|health| health.model_name.clone())
-                    .or_else(|| job.model.clone());
+                let model = selected_model.clone().or_else(|| job.model.clone());
                 let runtime_mode = Some(job.runtime_mode.as_str().to_string());
                 if let Some(graph_node) = job
                     .graph
@@ -1756,6 +1993,9 @@ impl ControlPlaneState {
 
             refresh_job_graph(&mut job.graph);
             let mut claim_job = job.clone();
+            if job.scheduling_requirements.model.is_none() {
+                claim_job.model = selected_model;
+            }
             if let Some(active_node_id) = active_graph_node_id.as_deref() {
                 claim_job.prompt =
                     graph_node_execution_prompt(job, active_node_id, Some(&claiming_node));
@@ -2524,6 +2764,61 @@ fn model_tier_for_name(model_name: &str) -> ModelTier {
         ModelTier::Strong
     } else {
         ModelTier::Normal
+    }
+}
+
+fn parse_capacity_class(value: &str) -> Option<CapacityClass> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "micro" => Some(CapacityClass::Micro),
+        "standard" => Some(CapacityClass::Standard),
+        "performance" => Some(CapacityClass::Performance),
+        "heavy" => Some(CapacityClass::Heavy),
+        "synthesis" => Some(CapacityClass::Synthesis),
+        "server" => Some(CapacityClass::Server),
+        _ => None,
+    }
+}
+
+fn capacity_class_for_model_tier(tier: ModelTier) -> CapacityClass {
+    match tier {
+        ModelTier::Tiny => CapacityClass::Micro,
+        ModelTier::Small => CapacityClass::Standard,
+        ModelTier::Normal => CapacityClass::Performance,
+        ModelTier::Strong => CapacityClass::Heavy,
+    }
+}
+
+fn capacity_rank_value(capacity: CapacityClass) -> u8 {
+    match capacity {
+        CapacityClass::Micro => 1,
+        CapacityClass::Standard => 2,
+        CapacityClass::Performance => 3,
+        CapacityClass::Heavy => 4,
+        CapacityClass::Synthesis => 5,
+        CapacityClass::Server => 6,
+    }
+}
+
+fn desired_model_capacity(job: &JobRecord, active_graph_node_id: Option<&str>) -> CapacityClass {
+    if let Some(workload) = active_graph_node_id.and_then(|id| {
+        job.graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| &node.workload)
+    }) {
+        return workload.recommended_capacity_class;
+    }
+    match (
+        job.scheduling_requirements.task_type,
+        job.scheduling_requirements.context_size,
+    ) {
+        (RequestTaskType::Coding, ContextSize::Large) => CapacityClass::Heavy,
+        (RequestTaskType::Coding, ContextSize::Medium) => CapacityClass::Performance,
+        (RequestTaskType::Coding, ContextSize::Small) => CapacityClass::Standard,
+        (_, ContextSize::Large) => CapacityClass::Heavy,
+        (_, ContextSize::Medium) => CapacityClass::Performance,
+        (_, ContextSize::Small) => CapacityClass::Micro,
     }
 }
 
@@ -4110,6 +4405,8 @@ fn complete_compact_reducer_fallback(
     job.last_completed_graph_node_id = Some(final_node_id);
     job.scheduler_decision = Some(SchedulerDecision {
         node_id: node_id.to_string(),
+        model: None,
+        model_capabilities: Vec::new(),
         score: 0,
         reasons: vec!["reducer: compact node triggered deterministic section fallback".to_string()],
     });
@@ -12075,6 +12372,89 @@ mod tests {
             .job
             .expect("claim");
         assert_eq!(claim.model.as_deref(), Some("Qwen/Qwen2.5-0.5B-Instruct"));
+    }
+
+    #[test]
+    fn scheduler_selects_best_fit_from_a_model_scoped_inventory() {
+        let mut state = ready_state();
+        let health = state
+            .nodes
+            .get_mut("node-1")
+            .and_then(|node| node.worker_health.as_mut())
+            .expect("node health");
+        health.capabilities.schema_version = 4;
+        health.capabilities.models = vec![
+            ModelCapability {
+                name: "Qwen/Qwen2.5-3B-Instruct".to_string(),
+                active: true,
+                warm: true,
+                context_tokens: Some(8_192),
+                max_output_tokens: Some(2_048),
+                capacity_class: "micro".to_string(),
+                roles: vec![NodeRole::Chat, NodeRole::Coding],
+                task_capabilities: vec!["chat".to_string(), "small_coding".to_string()],
+                ..ModelCapability::default()
+            },
+            ModelCapability {
+                name: "Qwen/Qwen3-Coder-32B".to_string(),
+                context_tokens: Some(32_768),
+                max_output_tokens: Some(8_192),
+                capacity_class: "heavy".to_string(),
+                roles: vec![
+                    NodeRole::Chat,
+                    NodeRole::Coding,
+                    NodeRole::Reducer,
+                    NodeRole::Synthesizer,
+                ],
+                task_capabilities: vec![
+                    "chat".to_string(),
+                    "small_coding".to_string(),
+                    "medium_coding".to_string(),
+                    "large_coding".to_string(),
+                    "synthesizer".to_string(),
+                ],
+                ..ModelCapability::default()
+            },
+        ];
+        state.submit_job(
+            JobRequest {
+                request_id: "job-model-fit".to_string(),
+                prompt: "Write a small Java function that adds two integers.".to_string(),
+                preferred_backend: Backend::Cuda,
+                routing_mode: RoutingMode::Normal,
+                runtime_mode: RuntimeMode::Local,
+                execution_mode: JobExecutionMode::Single,
+                stream: false,
+                model: None,
+                system_prompt: None,
+                max_tokens: None,
+                max_tokens_source: None,
+                temperature: None,
+                top_p: None,
+                seed: None,
+            },
+            "2".to_string(),
+        );
+
+        let job = state.jobs.get("job-model-fit").expect("job");
+        let selection = ControlPlaneState::select_model_for_job(
+            state.nodes.get("node-1").expect("node"),
+            job,
+            None,
+        )
+        .expect("model selection");
+        assert_eq!(selection.name, "Qwen/Qwen2.5-3B-Instruct");
+
+        let mut large_job = job.clone();
+        large_job.scheduling_requirements.task_type = RequestTaskType::Coding;
+        large_job.scheduling_requirements.context_size = ContextSize::Large;
+        let selection = ControlPlaneState::select_model_for_job(
+            state.nodes.get("node-1").expect("node"),
+            &large_job,
+            None,
+        )
+        .expect("large model selection");
+        assert_eq!(selection.name, "Qwen/Qwen3-Coder-32B");
     }
 
     #[test]

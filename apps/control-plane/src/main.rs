@@ -9139,6 +9139,8 @@ mod tests {
         record.active_graph_node_id = Some(final_node_id);
         record.scheduler_decision = Some(crate::contracts::SchedulerDecision {
             node_id: String::new(),
+            model: None,
+            model_capabilities: Vec::new(),
             score: 0,
             reasons: vec![
                 "waiting_for_role:synthesizer; no credible synthesizer is currently available"
