@@ -3087,11 +3087,16 @@ export async function submitChatTurn(body, config = configFromEnv(), fetchImpl =
   const result = ["completed", "failed"].includes(submitted.status)
     ? submitted
     : await waitForChatJob(submitted.job_id, body, config, fetchImpl);
-  const retryableQualityFailure = result?.quality_flags?.some((flag) =>
+  const retryableQualityFlag = result?.quality_flags?.find((flag) =>
     ["invalid_complete_code", "invalid_math_output", "invalid_structured_output", "output_token_limit", "broken_markdown", "degenerate_repetition"].includes(flag.code),
   );
-  if (result.status === "failed" && retryableQualityFailure && body?.qualityRetry !== true) {
-    return submitChatTurn({ ...body, qualityRetry: true, requestId: undefined }, config, fetchImpl);
+  if (result.status === "failed" && retryableQualityFlag && body?.qualityRetry !== true) {
+    return submitChatTurn({
+      ...body,
+      qualityRetry: true,
+      qualityRetryReason: retryableQualityFlag.code,
+      requestId: undefined,
+    }, config, fetchImpl);
   }
   return result;
 }
@@ -3524,12 +3529,16 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
     }
   }
 
-  const resolvedMaxTokens = inferMaxTokens(
+  const inferredMaxTokens = inferMaxTokens(
     message,
     body?.maxTokens,
     capacityProfile,
     codeTransformationFollowUp,
   );
+  const resolvedMaxTokens = body?.qualityRetryReason === "output_token_limit" &&
+    positiveInteger(body?.maxTokens, 0) === 0
+    ? expandedAutoRetryBudget(inferredMaxTokens, capacityProfile)
+    : inferredMaxTokens;
   const jobBody = buildGenericJobBody(message, config, {
     requestId: body?.requestId,
     model: body?.model,
@@ -7244,7 +7253,9 @@ function isRetryablePollError(error) {
 function formatChatJob(jobId, job, fallbackModel, options = {}) {
   const progress = summarizeChatProgress(job, options.contextUsage);
   const sourceOutput = String(job.output ?? "");
-  const rawOutput = job.status === "completed" ? cleanChatOutput(sourceOutput) : "";
+  const rawOutput = job.status === "completed"
+    ? cleanChatOutput(stripWorkerTruncationMarker(sourceOutput))
+    : "";
   const promotedOutput = job.status === "completed" ? promoteSectionOutputWhenFinalIsThin(rawOutput, progress) : "";
   const structuredOutput = job.status === "completed"
     ? normalizeRequestedStructuredOutput(promotedOutput, options.structuredOutput === true)
@@ -7278,7 +7289,7 @@ function formatChatJob(jobId, job, fallbackModel, options = {}) {
     : [];
   const finishReason = inferChatFinishReason(job, progress);
   const tokenLimitFlags = job.status === "completed" && finishReason === "length" &&
-    (options.structuredOutput === true || requiresValidatedStreaming(options.prompt))
+    (job.max_tokens_source === "auto" || options.structuredOutput === true || requiresValidatedStreaming(options.prompt))
     ? [{ code: "output_token_limit", severity: "reject", message: "MundusX reached the output token limit before completing a validated answer. Please retry." }]
     : [];
   const qualityFlags = [...verifierFlags, ...codeFlags, ...repetitionFlags, ...structuredFlags, ...tokenLimitFlags].filter(
@@ -7331,6 +7342,11 @@ function normalizeRequestedStructuredOutput(value, requested = false) {
 function inferChatFinishReason(job, progress) {
   const explicit = String(job?.finish_reason ?? job?.finishReason ?? "").toLowerCase();
   if (["stop", "length"].includes(explicit)) return explicit;
+  const workerReportedTruncation = [
+    job?.output,
+    ...(Array.isArray(progress?.nodes) ? progress.nodes.map((node) => node?.output) : []),
+  ].some((output) => /^\s*\[truncated:\s*hit the generation limit\]/i.test(String(output ?? "")));
+  if (workerReportedTruncation) return "length";
   const completedNodes = Array.isArray(progress?.nodes)
     ? progress.nodes.filter((node) => node.status === "completed")
     : [];
@@ -7340,6 +7356,13 @@ function inferChatFinishReason(job, progress) {
     return Number.isFinite(used) && Number.isFinite(limit) && limit > 0 && used >= limit;
   });
   return exhausted ? "length" : "stop";
+}
+
+function stripWorkerTruncationMarker(value) {
+  return String(value ?? "").replace(
+    /^\s*\[truncated:\s*hit the generation limit\]\s*/i,
+    "",
+  );
 }
 
 function promoteSectionOutputWhenFinalIsThin(output, progress) {
@@ -7940,6 +7963,11 @@ function inferMaxTokens(message, explicitValue, capacityProfile = null, codeTran
     return 48;
   }
   if (
+    looksLikeDetailedResearchRequest(lower)
+  ) {
+    return adaptiveTokenBudget("research", 2048, capacityProfile);
+  }
+  if (
     containsAny(lower, [
       "detailed",
       "complete",
@@ -7977,12 +8005,22 @@ function inferMaxTokens(message, explicitValue, capacityProfile = null, codeTran
 function adaptiveTokenBudget(kind, fallback, capacityProfile) {
   const tier = capacityProfile?.tier ?? "small";
   const budgets = {
-    small: { normal: 512, long: 768, detailed: 1024, codeSmall: 1536, code: 4096 },
-    medium: { normal: 768, long: 1024, detailed: 1536, codeSmall: 2048, code: 4096 },
-    large: { normal: 1024, long: 1536, detailed: 2048, codeSmall: 3072, code: 4096 },
-    xlarge: { normal: 2048, long: 3072, detailed: 4096, codeSmall: 4096, code: 6144 },
+    small: { normal: 512, long: 768, detailed: 1024, research: 2048, codeSmall: 1536, code: 4096 },
+    medium: { normal: 768, long: 1024, detailed: 1536, research: 3072, codeSmall: 2048, code: 4096 },
+    large: { normal: 1024, long: 1536, detailed: 2048, research: 4096, codeSmall: 3072, code: 4096 },
+    xlarge: { normal: 2048, long: 3072, detailed: 4096, research: 6144, codeSmall: 4096, code: 6144 },
   };
   return budgets[tier]?.[kind] ?? fallback;
+}
+
+function expandedAutoRetryBudget(currentBudget, capacityProfile) {
+  const current = positiveInteger(currentBudget, 1);
+  const contextWindow = positiveInteger(
+    capacityProfile?.contextWindowTokens,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+  );
+  const contextCeiling = Math.max(current, Math.floor(contextWindow / 2));
+  return Math.min(current * 2, contextCeiling, 8192);
 }
 
 function classifyChatRequestComplexity(message) {
