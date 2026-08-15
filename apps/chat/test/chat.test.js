@@ -580,6 +580,35 @@ test("uses compact token budgets for direct chat prompts", async () => {
   assert.equal(calls[4].max_tokens, 1024);
 });
 
+test("reserves a long-form budget for detailed history requests", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
+    calls.push(JSON.parse(init.body));
+    return jsonResponse({
+      job_id: "job-detailed-history",
+      job: {
+        job_id: "job-detailed-history",
+        status: "queued",
+        execution_mode: "auto",
+        graph: { nodes: [] },
+      },
+    });
+  };
+
+  await submitChatJob(
+    {
+      message: "Give me a detailed history of Tesla from its origins to today.",
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(calls[0].max_tokens, 2048);
+  assert.equal(calls[0].max_tokens_source, "auto");
+});
+
 test("uses a complete-code budget for short code conversion requests", async () => {
   const calls = [];
   const fetchImpl = async (_url, init) => {
@@ -3168,13 +3197,61 @@ test("OpenAI adapter preserves an upstream length finish reason", async () => {
       if (url.endsWith("/v1/jobs") && init.method === "POST") {
         return jsonResponse({
           job_id: "job-length",
-          job: { job_id: "job-length", status: "completed", output: "An intentionally partial story", finish_reason: "length" },
+          job: {
+            job_id: "job-length",
+            status: "completed",
+            output: "[truncated: hit the generation limit] An intentionally partial story",
+            max_tokens: 64,
+            max_tokens_source: "explicit",
+          },
         }, true, 202);
       }
       throw new Error(`unexpected URL ${url}`);
     },
   );
   assert.equal(result.choices[0].finish_reason, "length");
+  assert.equal(result.choices[0].message.content, "An intentionally partial story");
+});
+
+test("submitChatTurn retries a worker-reported auto-budget truncation with more tokens", async () => {
+  const submitted = [];
+  const result = await submitChatTurn(
+    {
+      message: "Give me a detailed history of Tesla from its origins to today.",
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url, init = {}) => {
+      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
+      if (url.endsWith("/v1/jobs") && init.method === "POST") {
+        const body = JSON.parse(init.body);
+        submitted.push(body);
+        const retry = submitted.length === 2;
+        return jsonResponse({
+          job_id: retry ? "job-history-retry" : "job-history-first",
+          job: {
+            job_id: retry ? "job-history-retry" : "job-history-first",
+            status: "completed",
+            output: retry
+              ? "Tesla was founded in 2003 and developed through several major product and manufacturing eras."
+              : "[truncated: hit the generation limit] Tesla was founded in 2003 and",
+            max_tokens: body.max_tokens,
+            max_tokens_source: body.max_tokens_source,
+            execution_mode: "auto",
+            graph: { nodes: [] },
+          },
+        }, true, 202);
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  );
+
+  assert.equal(submitted.length, 2);
+  assert.equal(submitted[0].max_tokens, 2048);
+  assert.equal(submitted[1].max_tokens, 4096);
+  assert.match(submitted[1].system_prompt, /internal validation retry/i);
+  assert.equal(result.status, "completed");
+  assert.doesNotMatch(result.output, /truncated: hit the generation limit/i);
 });
 
 test("OpenAI adapter correlates its stable id and OpenWebUI chat id", async () => {
