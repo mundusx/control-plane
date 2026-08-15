@@ -41,6 +41,11 @@ For the complete cross-repo setup path from local control-plane startup to CLI/n
 | `MUNDUSX_CONTROL_PLANE_HOST` | No | Override the bind host. Defaults to `0.0.0.0` when `PORT` is set. |
 | `MUNDUSX_CHAT_TIMEOUT_SECONDS` | No | Maximum synchronous OpenAI chat wait. Defaults to 300 seconds and is bounded to 5–900 seconds. |
 | `MUNDUSX_WEATHER_URL` | No | Weather-tool origin. Defaults to `https://wttr.in`; override only with a compatible trusted endpoint. |
+| `MUNDUSX_SPORTS_URL` | No | TheSportsDB-compatible v1 origin. Defaults to `https://www.thesportsdb.com/api/v1/json`; non-HTTPS overrides are rejected except loopback tests. |
+| `MUNDUSX_SPORTS_API_KEY` | Recommended for broad sports coverage | TheSportsDB v1 key. Defaults to the documented free key `123`, whose event coverage is intentionally limited. Store production keys only in deployment secrets. |
+| `MUNDUSX_WEB_SEARCH_URL` | Required for generic fresh web queries | Trusted HTTPS JSON search endpoint. MundusX appends `q=<encoded query>` and accepts either `results[]` or Brave-style `web.results[]` records. If unset, current questions without a dedicated tool fail honestly instead of falling through to model memory. |
+| `MUNDUSX_WEB_SEARCH_API_KEY` | Provider-dependent | Optional search-provider credential sent only by the control plane. Never place it in node jobs or client payloads. |
+| `MUNDUSX_WEB_SEARCH_API_KEY_HEADER` | No | Search-provider credential header. Defaults to `X-Subscription-Token`. |
 
 ### Local `.env`
 
@@ -118,7 +123,7 @@ These unauthenticated routes are the stable client boundary for Open WebUI, Herm
 | `GET` | `/v1/models` | Discover `mundusx-agnostic` in UAT or `ehda-agnostic` in Benz EHDA |
 | `POST` | `/v1/chat/completions` | Wait for validated output and return a completed OpenAI response |
 
-`stream: true` returns validated buffered SSE with a role chunk, content chunk, terminal chunk, and `[DONE]`. Genuine worker-token streaming remains a separate future enhancement. Live weather requests are handled inside the control plane through its weather tool; ordinary and mixed requests remain planner-owned.
+`stream: true` returns validated buffered SSE with a role chunk, content chunk, terminal chunk, and `[DONE]`. Genuine worker-token streaming remains a separate future enhancement. The trusted control-plane tool registry handles weather, current public office holders, sports results, and configured web search before model scheduling. Tool answers include sources and freshness metadata under the response's `mundusx` object. A recognized current-information request never silently falls back to model memory when its provider is unavailable; ordinary stable questions remain planner-owned.
 
 ---
 

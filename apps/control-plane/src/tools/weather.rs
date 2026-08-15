@@ -1,4 +1,4 @@
-use super::ToolAnswer;
+use super::{latest_user_message, ToolAnswer, ToolSource};
 use crate::contracts::ChatMessage;
 use regex::Regex;
 use serde_json::Value;
@@ -19,10 +19,10 @@ pub fn execute(messages: &[ChatMessage]) -> Result<Option<ToolAnswer>, String> {
     }
 
     let Some(location) = extract_weather_location(&normalized) else {
-        return Ok(Some(ToolAnswer {
-            content: "Which city or location would you like the weather for?".to_string(),
-            name: "weather_clarification",
-        }));
+        return Ok(Some(ToolAnswer::clarification(
+            "weather_clarification",
+            "Which city or location would you like the weather for?",
+        )));
     };
     let day_offset = weather_day_offset(&normalized);
     let payload = fetch_weather(&location)?;
@@ -31,19 +31,16 @@ pub fn execute(messages: &[ChatMessage]) -> Result<Option<ToolAnswer>, String> {
     } else {
         format_forecast(&location, day_offset, &payload)?
     };
-    Ok(Some(ToolAnswer {
+    Ok(Some(ToolAnswer::fresh(
+        "weather",
         content,
-        name: "weather",
-    }))
-}
-
-fn latest_user_message(messages: &[ChatMessage]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.role.eq_ignore_ascii_case("user"))
-        .map(ChatMessage::text)
-        .filter(|content| !content.is_empty())
+        vec![ToolSource {
+            title: format!("Weather for {location}"),
+            url: weather_url(&location),
+            provider: "wttr.in".to_string(),
+        }],
+        600,
+    )))
 }
 
 fn normalize_weather_typos(message: &str) -> String {
@@ -207,15 +204,7 @@ fn weather_day_offset(message: &str) -> usize {
 }
 
 fn fetch_weather(location: &str) -> Result<Value, String> {
-    let base = std::env::var("MUNDUSX_WEATHER_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_WEATHER_URL.to_string());
-    let url = format!(
-        "{}/{}?format=j1",
-        base.trim_end_matches('/'),
-        encode_path_component(location)
-    );
+    let url = weather_url(location);
     ureq::get(&url)
         .set("Accept", "application/json")
         .set("User-Agent", "MundusX-Control-Plane/0.1 weather-tool")
@@ -224,6 +213,18 @@ fn fetch_weather(location: &str) -> Result<Value, String> {
         .map_err(|error| format!("weather lookup failed for {location}: {error}"))?
         .into_json::<Value>()
         .map_err(|error| format!("weather lookup returned invalid data for {location}: {error}"))
+}
+
+fn weather_url(location: &str) -> String {
+    let base = std::env::var("MUNDUSX_WEATHER_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WEATHER_URL.to_string());
+    format!(
+        "{}/{}?format=j1",
+        base.trim_end_matches('/'),
+        encode_path_component(location)
+    )
 }
 
 fn encode_path_component(value: &str) -> String {

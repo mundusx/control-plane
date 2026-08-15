@@ -122,7 +122,15 @@ pub fn completion_response(
     }
     if let Some(tool) = tool {
         mundusx.insert("tool".to_string(), json!(tool.name));
-        mundusx.insert("status".to_string(), json!("completed"));
+        mundusx.insert("status".to_string(), json!(tool.status));
+        mundusx.insert("grounded".to_string(), json!(tool.grounded));
+        mundusx.insert("sources".to_string(), json!(&tool.sources));
+        if let Some(retrieved_at) = tool.retrieved_at_epoch {
+            mundusx.insert("retrieved_at_epoch".to_string(), json!(retrieved_at));
+        }
+        if let Some(expires_at) = tool.expires_at_epoch {
+            mundusx.insert("expires_at_epoch".to_string(), json!(expires_at));
+        }
     }
     json!({
         "id": id,
@@ -268,10 +276,11 @@ pub fn validate_request(request: &ChatCompletionRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        history_contains_sensitive_data, is_openwebui_metadata_request, models_response,
-        output_hit_generation_limit, public_model_id, sse_finish, sse_start,
+        completion_response, history_contains_sensitive_data, is_openwebui_metadata_request,
+        models_response, output_hit_generation_limit, public_model_id, sse_finish, sse_start,
         strip_generation_limit_marker, validate_model,
     };
+    use crate::tools::{ToolAnswer, ToolSource};
 
     #[test]
     fn exposes_environment_specific_virtual_model() {
@@ -301,6 +310,38 @@ mod tests {
         assert!(start.contains("\"role\":\"assistant\""));
         assert!(finish.contains("\"delta\":{\"content\":\"Done.\"}"));
         assert!(finish.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn exposes_grounding_sources_and_freshness_metadata() {
+        let tool = ToolAnswer::fresh(
+            "current_office_holder",
+            "Verified answer.",
+            vec![ToolSource {
+                title: "Official source".to_string(),
+                url: "https://example.com/source".to_string(),
+                provider: "test".to_string(),
+            }],
+            300,
+        );
+        let response = completion_response(
+            "chatcmpl-test",
+            1,
+            "mundusx-agnostic",
+            &tool.content,
+            "stop",
+            None,
+            Some(&tool),
+        );
+
+        assert_eq!(response["mundusx"]["grounded"], true);
+        assert_eq!(response["mundusx"]["tool"], "current_office_holder");
+        assert_eq!(
+            response["mundusx"]["sources"][0]["url"],
+            "https://example.com/source"
+        );
+        assert!(response["mundusx"]["retrieved_at_epoch"].is_u64());
+        assert!(response["mundusx"]["expires_at_epoch"].is_u64());
     }
 
     #[test]
