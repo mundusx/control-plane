@@ -1917,6 +1917,15 @@ impl ControlPlaneState {
         completion: JobCompletion,
         completed_at: String,
     ) -> Option<JobRecord> {
+        let completion_was_auto_truncated = completion.status == JobStatus::Completed
+            && completion
+                .output
+                .as_deref()
+                .is_some_and(crate::chat_gateway::output_hit_generation_limit)
+            && self
+                .jobs
+                .get(&completion.job_id)
+                .is_some_and(job_uses_auto_max_tokens);
         let compact_reducer_node = self
             .nodes
             .get(&completion.node_id)
@@ -1937,15 +1946,50 @@ impl ControlPlaneState {
                     return Some(job.clone());
                 }
                 let output = clean_direct_job_output(job, completion.output.clone());
-                job.status = completion.status;
-                job.worker_id = Some(completion.worker_id.clone());
-                job.backend = Some(completion.backend);
-                job.output = output;
-                job.error = completion.error.clone();
-                job.completed_at = Some(completed_at.clone());
-                apply_job_completion_to_graph(job, &completion);
-                job.graph.updated_at = completed_at.clone();
-                job.clone()
+                let hit_generation_limit = completion.status == JobStatus::Completed
+                    && completion
+                        .output
+                        .as_deref()
+                        .is_some_and(crate::chat_gateway::output_hit_generation_limit);
+                if hit_generation_limit && job_uses_auto_max_tokens(job) {
+                    if job_is_auto_token_retry(job) {
+                        job.status = JobStatus::Failed;
+                        job.output = None;
+                        job.error = Some(
+                            "automatic completion retry also reached the generation limit"
+                                .to_string(),
+                        );
+                        job.completed_at = Some(completed_at.clone());
+                    } else {
+                        let previous_budget = job.max_tokens.unwrap_or(1_024);
+                        job.max_tokens = Some(previous_budget.saturating_mul(2).min(8_192));
+                        job.max_tokens_source = Some("auto_retry".to_string());
+                        job.status = JobStatus::Queued;
+                        job.assigned_node_id = None;
+                        job.assigned_at = None;
+                        job.worker_id = None;
+                        job.backend = None;
+                        job.output = None;
+                        job.error = Some(format!(
+                            "automatic retry: output reached its {} token budget",
+                            previous_budget
+                        ));
+                        job.completed_at = None;
+                        job.scheduler_decision = None;
+                    }
+                    job.graph.updated_at = completed_at.clone();
+                    job.clone()
+                } else {
+                    job.status = completion.status;
+                    job.worker_id = Some(completion.worker_id.clone());
+                    job.backend = Some(completion.backend);
+                    job.output = output;
+                    job.error = completion.error.clone();
+                    job.completed_at = Some(completed_at.clone());
+                    apply_job_completion_to_graph(job, &completion);
+                    job.graph.updated_at = completed_at.clone();
+                    job.clone()
+                }
             }
         };
 
@@ -1960,7 +2004,9 @@ impl ControlPlaneState {
             }
             node.backend = completion.backend;
             node.updated_at = completed_at;
-            update_node_trust(&mut node.trust, &completion, node.updated_at.clone());
+            if !completion_was_auto_truncated {
+                update_node_trust(&mut node.trust, &completion, node.updated_at.clone());
+            }
             Self::apply_policy_override(node);
         }
 
@@ -2338,9 +2384,9 @@ fn external_plan_preserves_explicit_decomposition(
     deterministic_plan: &JobPlan,
     external_plan: &JobPlan,
 ) -> bool {
-    request.execution_mode != JobExecutionMode::Decompose
-        || deterministic_plan.jobs.len() <= 1
-        || external_plan.jobs.len() > 1
+    let decomposition_required = request.execution_mode == JobExecutionMode::Decompose
+        || looks_like_longitudinal_history_prompt(&request.prompt.to_ascii_lowercase());
+    !decomposition_required || deterministic_plan.jobs.len() <= 1 || external_plan.jobs.len() > 1
 }
 
 fn graph_execution_allowed(
@@ -3047,6 +3093,10 @@ fn complete_graph_execution_job(
         {
             match completion.status {
                 JobStatus::Completed => {
+                    let hit_generation_limit = completion
+                        .output
+                        .as_deref()
+                        .is_some_and(crate::chat_gateway::output_hit_generation_limit);
                     let accepted_output = if compact_reviewed_code && graph_node.id == "job.backend"
                     {
                         completion.output.as_deref().map(|output| {
@@ -3089,7 +3139,25 @@ fn complete_graph_execution_job(
                                 graph_node.effective_max_tokens.unwrap_or(2_048),
                             )
                         });
-                    if let Some(reason) = invalid_compact_implementation {
+                    if hit_generation_limit && automatic_budget {
+                        graph_node.output = None;
+                        if graph_node.attempt_count >= graph_node.max_attempts {
+                            graph_node.status = JobGraphNodeStatus::Failed;
+                            graph_node.error = Some(format!(
+                                "stage output reached the generation limit after {} attempts",
+                                graph_node.attempt_count
+                            ));
+                        } else {
+                            let previous_budget = graph_node.effective_max_tokens.unwrap_or(1_024);
+                            graph_node.recommended_max_tokens =
+                                Some(previous_budget.saturating_mul(2).min(8_192));
+                            graph_node.status = JobGraphNodeStatus::Ready;
+                            graph_node.error = Some(format!(
+                                "automatic retry: stage output reached its {} token budget",
+                                previous_budget
+                            ));
+                        }
+                    } else if let Some(reason) = invalid_compact_implementation {
                         if !graph_node
                             .failed_node_ids
                             .iter()
@@ -3653,7 +3721,57 @@ fn graph_node_execution_prompt(
 fn job_uses_auto_max_tokens(job: &JobRecord) -> bool {
     job.max_tokens_source
         .as_deref()
-        .map(|source| source.eq_ignore_ascii_case("auto"))
+        .map(|source| {
+            source.eq_ignore_ascii_case("auto") || source.eq_ignore_ascii_case("auto_retry")
+        })
+        .unwrap_or(false)
+}
+
+fn looks_like_detailed_research_prompt(lower_prompt: &str) -> bool {
+    let research_subject = contains_any(
+        lower_prompt,
+        &[
+            "history of",
+            "historical overview",
+            "timeline of",
+            "research report",
+        ],
+    );
+    let broad_coverage = contains_any(
+        lower_prompt,
+        &[
+            "detailed",
+            "complete",
+            "comprehensive",
+            "in-depth",
+            "from its origins",
+            "from the origins",
+            "from inception",
+            "to date",
+            "to today",
+            "present day",
+            "current position",
+        ],
+    );
+    research_subject && broad_coverage
+}
+
+fn looks_like_longitudinal_history_prompt(lower_prompt: &str) -> bool {
+    let begins_at_origin = contains_any(
+        lower_prompt,
+        &["from its origins", "from the origins", "from inception"],
+    );
+    let reaches_present = contains_any(
+        lower_prompt,
+        &["to date", "to today", "present day", "to the present"],
+    );
+    looks_like_detailed_research_prompt(lower_prompt) && begins_at_origin && reaches_present
+}
+
+fn job_is_auto_token_retry(job: &JobRecord) -> bool {
+    job.max_tokens_source
+        .as_deref()
+        .map(|source| source.eq_ignore_ascii_case("auto_retry"))
         .unwrap_or(false)
 }
 
@@ -4359,6 +4477,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
     let lower = request.prompt.to_ascii_lowercase();
     let prompt_chars = request.prompt.chars().count();
     let complete_code_prompt = looks_like_complete_code_prompt(&lower);
+    let detailed_research_prompt = looks_like_detailed_research_prompt(&lower);
 
     let task_type = if complete_code_prompt
         || contains_any(
@@ -4406,6 +4525,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
 
     let complexity = if prompt_chars > 4_000
         || complete_code_prompt
+        || detailed_research_prompt
         || contains_any(
             &lower,
             &[
@@ -4487,6 +4607,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
         ContextSize::Large
     } else if prompt_chars > 800
         || complete_code_prompt
+        || detailed_research_prompt
         || request.max_tokens.unwrap_or_default() > 1_024
     {
         ContextSize::Medium
@@ -5169,6 +5290,7 @@ fn sectionable_prompt_warrants_single_node_decomposition(
     classification: &RequestClassification,
 ) -> bool {
     classification.context_size == ContextSize::Large
+        || looks_like_longitudinal_history_prompt(&request.prompt.to_ascii_lowercase())
         || request.prompt.chars().count() > 1_800
         || request.max_tokens.unwrap_or_default() > 2_048
         || (classification.complexity == RequestComplexity::High
@@ -7298,8 +7420,10 @@ mod tests {
         let plan = plan_job_request(&request, &classification);
 
         assert_eq!(classification.task_type, RequestTaskType::Inference);
+        assert_eq!(classification.complexity, RequestComplexity::High);
         assert_eq!(classification.privacy_level, PrivacyLevel::Public);
         assert_eq!(classification.output_format, ExpectedOutputFormat::Text);
+        assert_eq!(classification.context_size, ContextSize::Medium);
         assert_eq!(plan.strategy, "sectioned_research");
         assert!(plan
             .jobs
@@ -7313,6 +7437,22 @@ mod tests {
         let record = state.submit_job(request, "2".to_string());
         assert!(record.graph_execution_enabled);
         assert_eq!(record.plan.strategy, "sectioned_research");
+    }
+
+    #[test]
+    fn longitudinal_history_keeps_sectioned_research_with_one_ready_node() {
+        let mut state = ready_state();
+        let mut request = classification_request(
+            "Give me a detailed history of Tesla from its origins to today.",
+        );
+        request.execution_mode = JobExecutionMode::Auto;
+        request.max_tokens_source = Some("auto".to_string());
+
+        let record = state.submit_job(request, "2".to_string());
+
+        assert!(record.graph_execution_enabled);
+        assert_eq!(record.plan.strategy, "sectioned_research");
+        assert!(record.plan.jobs.len() > 1);
     }
 
     #[test]
@@ -7808,6 +7948,124 @@ mod tests {
         let claimed_job = claim.job.expect("claimed job");
 
         assert_eq!(claimed_job.max_tokens, Some(512));
+    }
+
+    #[test]
+    fn auto_single_job_retries_generation_limit_once_then_fails_cleanly() {
+        let mut state = ready_state();
+        let mut request = classification_request("Explain local inference in detail.");
+        request.execution_mode = JobExecutionMode::Single;
+        request.max_tokens = Some(512);
+        request.max_tokens_source = Some("auto".to_string());
+        state.submit_job(request, "1".to_string());
+
+        let first_claim = state
+            .claim_job("node-1", "2".to_string())
+            .job
+            .expect("first claim");
+        assert_eq!(first_claim.max_tokens, Some(1_024));
+        let retry = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-1".to_string(),
+                    node_id: "node-1".to_string(),
+                    worker_id: "worker-1".to_string(),
+                    backend: Backend::M,
+                    status: JobStatus::Completed,
+                    output: Some(
+                        "[truncated: hit the generation limit] partial answer".to_string(),
+                    ),
+                    error: None,
+                    latency_ms: Some(10),
+                },
+                "3".to_string(),
+            )
+            .expect("retry state");
+        assert_eq!(retry.status, JobStatus::Queued);
+        assert_eq!(retry.max_tokens, Some(2_048));
+        assert_eq!(retry.max_tokens_source.as_deref(), Some("auto_retry"));
+        assert!(retry.output.is_none());
+
+        state
+            .claim_job("node-1", "4".to_string())
+            .job
+            .expect("retry claim");
+        let failed = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-1".to_string(),
+                    node_id: "node-1".to_string(),
+                    worker_id: "worker-2".to_string(),
+                    backend: Backend::M,
+                    status: JobStatus::Completed,
+                    output: Some("[truncated: hit the generation limit] still partial".to_string()),
+                    error: None,
+                    latency_ms: Some(10),
+                },
+                "5".to_string(),
+            )
+            .expect("terminal failure");
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert!(failed.output.is_none());
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("also reached the generation limit")));
+    }
+
+    #[test]
+    fn graph_stage_retries_explicit_worker_generation_limit_signal() {
+        let mut state = ready_state();
+        let mut request = classification_request(
+            "Give me a detailed history of Tesla from its origins to today.",
+        );
+        request.execution_mode = JobExecutionMode::Auto;
+        request.max_tokens_source = Some("auto".to_string());
+        state.submit_job(request, "1".to_string());
+
+        let claim = state
+            .claim_job("node-1", "2".to_string())
+            .job
+            .expect("graph claim");
+        let graph_node_id = claim.active_graph_node_id.expect("active graph node");
+        let previous_budget = claim
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_node_id)
+            .and_then(|node| node.effective_max_tokens)
+            .expect("effective stage budget");
+
+        let retry = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-1".to_string(),
+                    node_id: "node-1".to_string(),
+                    worker_id: "worker-1".to_string(),
+                    backend: Backend::M,
+                    status: JobStatus::Completed,
+                    output: Some(
+                        "[truncated: hit the generation limit] partial section".to_string(),
+                    ),
+                    error: None,
+                    latency_ms: Some(10),
+                },
+                "3".to_string(),
+            )
+            .expect("graph retry");
+        let retried_node = retry
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_node_id)
+            .expect("retried graph node");
+        assert_eq!(retry.status, JobStatus::Queued);
+        assert_eq!(retried_node.status, JobGraphNodeStatus::Ready);
+        assert_eq!(
+            retried_node.recommended_max_tokens,
+            Some(previous_budget.saturating_mul(2).min(8_192))
+        );
+        assert!(retried_node.output.is_none());
     }
 
     #[test]
@@ -8383,6 +8641,29 @@ mod tests {
             &request,
             &deterministic,
             &deterministic,
+        ));
+    }
+
+    #[test]
+    fn detailed_research_rejects_an_external_single_job_collapse_in_auto_mode() {
+        let mut request = classification_request(
+            "Give me a detailed history of Tesla from its origins to today.",
+        );
+        request.execution_mode = JobExecutionMode::Auto;
+        let classification = classify_job_request(&request);
+        let deterministic = plan_job_request(&request, &classification);
+        let collapsed = JobPlan {
+            plan_id: "external-single".to_string(),
+            strategy: "langgraph".to_string(),
+            summary: "External planner collapsed the request.".to_string(),
+            jobs: vec![deterministic.jobs[0].clone()],
+        };
+
+        assert!(deterministic.jobs.len() > 1);
+        assert!(!external_plan_preserves_explicit_decomposition(
+            &request,
+            &deterministic,
+            &collapsed,
         ));
     }
 
