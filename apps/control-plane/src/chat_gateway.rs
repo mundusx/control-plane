@@ -6,6 +6,44 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]";
+
+pub fn output_hit_generation_limit(output: &str) -> bool {
+    let normalized = output.trim_start().to_ascii_lowercase();
+    normalized.starts_with(GENERATION_LIMIT_MARKER)
+        || normalized
+            .split_once("response=")
+            .is_some_and(|(_, response)| response.trim_start().starts_with(GENERATION_LIMIT_MARKER))
+}
+
+pub fn strip_generation_limit_marker(output: &str) -> &str {
+    let trimmed = output.trim_start();
+    if trimmed
+        .to_ascii_lowercase()
+        .starts_with(GENERATION_LIMIT_MARKER)
+    {
+        trimmed
+            .get(GENERATION_LIMIT_MARKER.len()..)
+            .unwrap_or_default()
+            .trim_start()
+    } else if let Some((_, response)) = trimmed.split_once("response=") {
+        let response = response.trim_start();
+        if response
+            .to_ascii_lowercase()
+            .starts_with(GENERATION_LIMIT_MARKER)
+        {
+            response
+                .get(GENERATION_LIMIT_MARKER.len()..)
+                .unwrap_or_default()
+                .trim_start()
+        } else {
+            output
+        }
+    } else {
+        output
+    }
+}
+
 pub fn public_model_id(_environment: Option<&str>) -> &'static str {
     "ehda-agnostic"
 }
@@ -231,7 +269,8 @@ pub fn validate_request(request: &ChatCompletionRequest) -> Result<(), String> {
 mod tests {
     use super::{
         history_contains_sensitive_data, is_openwebui_metadata_request, models_response,
-        public_model_id, sse_finish, sse_start, validate_model,
+        output_hit_generation_limit, public_model_id, sse_finish, sse_start,
+        strip_generation_limit_marker, validate_model,
     };
 
     #[test]
@@ -283,5 +322,25 @@ mod tests {
         assert!(!history_contains_sensitive_data(
             "Discuss token budgets, private helper functions, and company history."
         ));
+    }
+
+    #[test]
+    fn recognizes_and_removes_worker_generation_limit_marker() {
+        let output = "[truncated: hit the generation limit] Certainly! Here is the answer";
+        assert!(output_hit_generation_limit(output));
+        assert_eq!(
+            strip_generation_limit_marker(output),
+            "Certainly! Here is the answer"
+        );
+        assert!(!output_hit_generation_limit("A complete answer."));
+        assert!(output_hit_generation_limit(
+            "mlx-lm mode=single response=[truncated: hit the generation limit] partial"
+        ));
+        assert_eq!(
+            strip_generation_limit_marker(
+                "mlx-lm mode=single response=[truncated: hit the generation limit] partial"
+            ),
+            "partial"
+        );
     }
 }

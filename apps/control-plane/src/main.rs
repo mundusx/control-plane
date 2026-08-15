@@ -5716,6 +5716,7 @@ fn completion_event_type(
         Some(JobGraphNodeStatus::Completed) => "graph_node_completed",
         Some(_) => "graph_node_rejected",
         None if job_status == JobStatus::Completed => "job_completed",
+        None if job_status == JobStatus::Queued => "job_requeued",
         None => "job_failed",
     }
 }
@@ -6641,13 +6642,19 @@ fn handle_connection(
                             return write_chat_error(&mut stream, status, &error);
                         }
                     };
-                    let content = completed.output.as_deref().unwrap_or_default();
+                    let raw_content = completed.output.as_deref().unwrap_or_default();
+                    let finish_reason = if chat_gateway::output_hit_generation_limit(raw_content) {
+                        "length"
+                    } else {
+                        "stop"
+                    };
+                    let content = chat_gateway::strip_generation_limit_marker(raw_content);
                     let completion = chat_gateway::completion_response(
                         &completion_id,
                         created,
                         public_model,
                         content,
-                        "stop",
+                        finish_reason,
                         Some(&completed),
                         None,
                     );
@@ -7027,6 +7034,10 @@ mod tests {
         assert_eq!(
             completion_event_type(JobStatus::Completed, Some(JobGraphNodeStatus::Completed)),
             "job_completed"
+        );
+        assert_eq!(
+            completion_event_type(JobStatus::Queued, None),
+            "job_requeued"
         );
     }
 
