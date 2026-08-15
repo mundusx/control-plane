@@ -1235,18 +1235,16 @@ impl ControlPlaneState {
                 let capacity = parse_capacity_class(&model.capacity_class)
                     .unwrap_or_else(|| capacity_class_for_model_tier(tier));
                 let desired = desired_model_capacity(job, active_graph_node_id);
-                let excess =
-                    capacity_rank_value(capacity).saturating_sub(capacity_rank_value(desired));
-                if excess > 0 && job.routing_mode != RoutingMode::Max {
-                    score -= i32::from(excess) * 5;
+                if capacity == desired {
+                    score += 4;
+                    reasons.push(format!("recommended_capacity_fit:{}", capacity.as_str()));
+                } else if capacity > desired {
+                    score += 3;
                     reasons.push(format!(
-                        "best_fit_penalty:{}_above_{}",
+                        "eligible_capacity_headroom:{}_for_{}",
                         capacity.as_str(),
                         desired.as_str()
                     ));
-                } else if capacity >= desired {
-                    score += 5;
-                    reasons.push(format!("capacity_fit:{}", capacity.as_str()));
                 }
                 ModelSelection {
                     name: model.name,
@@ -2788,17 +2786,6 @@ fn capacity_class_for_model_tier(tier: ModelTier) -> CapacityClass {
     }
 }
 
-fn capacity_rank_value(capacity: CapacityClass) -> u8 {
-    match capacity {
-        CapacityClass::Micro => 1,
-        CapacityClass::Standard => 2,
-        CapacityClass::Performance => 3,
-        CapacityClass::Heavy => 4,
-        CapacityClass::Synthesis => 5,
-        CapacityClass::Server => 6,
-    }
-}
-
 fn desired_model_capacity(job: &JobRecord, active_graph_node_id: Option<&str>) -> CapacityClass {
     if let Some(workload) = active_graph_node_id.and_then(|id| {
         job.graph
@@ -2837,11 +2824,10 @@ fn model_tier_score_for_job(job: &JobRecord, tier: ModelTier) -> (i32, &'static 
 
     if latency_sensitive_simple {
         return match tier {
-            ModelTier::Tiny | ModelTier::Small => {
-                (12, "lightweight model preferred for simple request")
-            }
-            ModelTier::Normal => (6, "normal model acceptable for simple request"),
-            ModelTier::Strong => (-4, "strong model deprioritized for simple request"),
+            ModelTier::Tiny => (0, "tiny model eligible for simple request"),
+            ModelTier::Small => (4, "small model eligible for simple request"),
+            ModelTier::Normal => (8, "normal model appropriate for simple request"),
+            ModelTier::Strong => (8, "strong model appropriate when available"),
         };
     }
 
@@ -12321,7 +12307,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_routes_simple_jobs_to_lightweight_advertised_model() {
+    fn scheduler_routes_simple_jobs_to_the_more_appropriate_available_model() {
         let mut state = ready_state();
         state.register(m_series_registration("node-2"));
         state.heartbeat(ready_heartbeat("node-2", "1"), "1".to_string());
@@ -12361,17 +12347,17 @@ mod tests {
 
         let job = state.jobs.get("job-1").expect("job");
         let decision = job.scheduler_decision.as_ref().expect("scheduler decision");
-        assert_eq!(decision.node_id, "node-1");
+        assert_eq!(decision.node_id, "node-2");
         assert!(decision
             .reasons
             .iter()
-            .any(|reason| reason.contains("tier small")));
+            .any(|reason| reason == "selected_model:Qwen/Qwen2.5-3B-Instruct"));
 
         let claim = state
-            .claim_job("node-1", "3".to_string())
+            .claim_job("node-2", "3".to_string())
             .job
             .expect("claim");
-        assert_eq!(claim.model.as_deref(), Some("Qwen/Qwen2.5-0.5B-Instruct"));
+        assert_eq!(claim.model.as_deref(), Some("Qwen/Qwen2.5-3B-Instruct"));
     }
 
     #[test]
