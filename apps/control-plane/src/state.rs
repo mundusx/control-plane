@@ -2414,9 +2414,9 @@ fn external_plan_preserves_explicit_decomposition(
     deterministic_plan: &JobPlan,
     external_plan: &JobPlan,
 ) -> bool {
-    let decomposition_required = request.execution_mode == JobExecutionMode::Decompose
-        || looks_like_longitudinal_history_prompt(&request.prompt.to_ascii_lowercase());
-    !decomposition_required || deterministic_plan.jobs.len() <= 1 || external_plan.jobs.len() > 1
+    request.execution_mode != JobExecutionMode::Decompose
+        || deterministic_plan.jobs.len() <= 1
+        || external_plan.jobs.len() > 1
 }
 
 fn graph_execution_allowed(
@@ -3784,18 +3784,6 @@ fn looks_like_detailed_research_prompt(lower_prompt: &str) -> bool {
         ],
     );
     research_subject && broad_coverage
-}
-
-fn looks_like_longitudinal_history_prompt(lower_prompt: &str) -> bool {
-    let begins_at_origin = contains_any(
-        lower_prompt,
-        &["from its origins", "from the origins", "from inception"],
-    );
-    let reaches_present = contains_any(
-        lower_prompt,
-        &["to date", "to today", "present day", "to the present"],
-    );
-    looks_like_detailed_research_prompt(lower_prompt) && begins_at_origin && reaches_present
 }
 
 fn job_is_auto_token_retry(job: &JobRecord) -> bool {
@@ -5320,7 +5308,6 @@ fn sectionable_prompt_warrants_single_node_decomposition(
     classification: &RequestClassification,
 ) -> bool {
     classification.context_size == ContextSize::Large
-        || looks_like_longitudinal_history_prompt(&request.prompt.to_ascii_lowercase())
         || request.prompt.chars().count() > 1_800
         || request.max_tokens.unwrap_or_default() > 2_048
         || (classification.complexity == RequestComplexity::High
@@ -7470,7 +7457,7 @@ mod tests {
     }
 
     #[test]
-    fn longitudinal_history_keeps_sectioned_research_with_one_ready_node() {
+    fn longitudinal_history_uses_one_budgeted_job_with_one_ready_node() {
         let mut state = ready_state();
         let mut request = classification_request(
             "Give me a detailed history of Tesla from its origins to today.",
@@ -7480,9 +7467,17 @@ mod tests {
 
         let record = state.submit_job(request, "2".to_string());
 
-        assert!(record.graph_execution_enabled);
-        assert_eq!(record.plan.strategy, "sectioned_research");
-        assert!(record.plan.jobs.len() > 1);
+        assert!(!record.graph_execution_enabled);
+        assert_eq!(record.plan.strategy, "single_job_latency_optimized");
+        assert_eq!(record.plan.jobs.len(), 1);
+        assert_eq!(record.classification.complexity, RequestComplexity::High);
+        assert_eq!(record.classification.context_size, ContextSize::Medium);
+
+        let claim = state
+            .claim_job("node-1", "3".to_string())
+            .job
+            .expect("single budgeted history claim");
+        assert_eq!(claim.max_tokens, Some(3_072));
     }
 
     #[test]
@@ -8049,7 +8044,7 @@ mod tests {
         let mut request = classification_request(
             "Give me a detailed history of Tesla from its origins to today.",
         );
-        request.execution_mode = JobExecutionMode::Auto;
+        request.execution_mode = JobExecutionMode::Decompose;
         request.max_tokens_source = Some("auto".to_string());
         state.submit_job(request, "1".to_string());
 
@@ -8675,7 +8670,7 @@ mod tests {
     }
 
     #[test]
-    fn detailed_research_rejects_an_external_single_job_collapse_in_auto_mode() {
+    fn detailed_research_allows_an_external_single_job_in_auto_mode() {
         let mut request = classification_request(
             "Give me a detailed history of Tesla from its origins to today.",
         );
@@ -8690,7 +8685,7 @@ mod tests {
         };
 
         assert!(deterministic.jobs.len() > 1);
-        assert!(!external_plan_preserves_explicit_decomposition(
+        assert!(external_plan_preserves_explicit_decomposition(
             &request,
             &deterministic,
             &collapsed,
@@ -10100,7 +10095,7 @@ mod tests {
         let mut state = ready_state();
         let mut request =
             classification_request("Give me a detailed history of BMW from its origins to today.");
-        request.execution_mode = JobExecutionMode::Auto;
+        request.execution_mode = JobExecutionMode::Decompose;
         state.submit_job(request, "2".to_string());
 
         let first_claim = state
