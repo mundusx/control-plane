@@ -3805,7 +3805,10 @@ fn model_generation_ceiling(model_name: Option<&str>) -> u32 {
         return 4_096;
     };
 
-    if model_name.contains("70b") || model_name.contains("72b") || model_name.contains("64b") {
+    if model_name.contains("coder-next") {
+        8_192
+    } else if model_name.contains("70b") || model_name.contains("72b") || model_name.contains("64b")
+    {
         8_192
     } else if model_name.contains("32b") || model_name.contains("34b") {
         8_192
@@ -3847,7 +3850,11 @@ fn node_generation_ceiling(node: Option<&NodeRecord>) -> u32 {
             .as_ref()
             .and_then(|health| health.model_name.as_deref()),
     );
-    let memory_ceiling = memory_generation_ceiling(node.available_memory_mb);
+    let memory_ceiling = if matches!(node.backend, Backend::Cuda | Backend::Vllm) {
+        u32::MAX
+    } else {
+        memory_generation_ceiling(node.available_memory_mb)
+    };
     let context_ceiling = node
         .worker_health
         .as_ref()
@@ -3884,6 +3891,11 @@ fn job_max_tokens_for_node(job: &JobRecord, claiming_node: &NodeRecord) -> u32 {
             _ => 512,
         }
     });
+    let requested = if !job.graph_execution_enabled && job.plan.jobs.len() == 1 {
+        requested.max(job.plan.jobs[0].recommended_max_tokens.unwrap_or_default())
+    } else {
+        requested
+    };
 
     if job_uses_auto_max_tokens(job) {
         scale_auto_generation_budget(requested, node_generation_ceiling(Some(claiming_node)))
@@ -5126,7 +5138,14 @@ fn plan_job_request_for_submission(
                 reason:
                     "Auto mode avoided sectioned decomposition because it would run sequentially on the current available node slot set."
                         .to_string(),
-                recommended_max_tokens: None,
+                recommended_max_tokens: Some(match (
+                    classification.complexity,
+                    classification.context_size,
+                ) {
+                    (RequestComplexity::High, _) | (_, ContextSize::Large) => 3_072,
+                    (RequestComplexity::Medium, _) | (_, ContextSize::Medium) => 1_024,
+                    _ => 512,
+                }),
                 minimum_max_tokens: None,
             workload: StepWorkloadRequirements::default(),
             }],
@@ -7463,6 +7482,7 @@ mod tests {
             "Give me a detailed history of Tesla from its origins to today.",
         );
         request.execution_mode = JobExecutionMode::Auto;
+        request.max_tokens = Some(512);
         request.max_tokens_source = Some("auto".to_string());
 
         let record = state.submit_job(request, "2".to_string());
@@ -7477,7 +7497,7 @@ mod tests {
             .claim_job("node-1", "3".to_string())
             .job
             .expect("single budgeted history claim");
-        assert_eq!(claim.max_tokens, Some(3_072));
+        assert_eq!(claim.max_tokens, Some(4_096));
     }
 
     #[test]
