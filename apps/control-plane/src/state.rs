@@ -24,6 +24,7 @@ const CODING_GRAPH_NODE_LEASE_SECONDS: u64 = 1_800;
 const DEFAULT_QUEUED_JOB_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CRITICAL_ROLE_WAIT_SECONDS: u64 = 60;
 const DEFAULT_NODE_HEARTBEAT_STALE_SECONDS: u64 = 60;
+const READY_SINGLE_SLOT_CLAIM_GRACE_SECONDS: u64 = 45;
 const REDUCER_SECTION_CHARS_COMPACT: usize = 1_200;
 const REDUCER_SECTION_CHARS_STANDARD: usize = 4_000;
 const REDUCER_SECTION_CHARS_STRONG: usize = 6_000;
@@ -2169,6 +2170,20 @@ impl ControlPlaneState {
         let Some(now) = parse_unix_seconds(now) else {
             return Vec::new();
         };
+        let ready_single_slot_heartbeats = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.reported_state == AgentState::Ready)
+            .filter(|(_, node)| {
+                node.worker_health
+                    .as_ref()
+                    .map(|health| health.capabilities.max_parallel_jobs.max(1) == 1)
+                    .unwrap_or(true)
+            })
+            .filter_map(|(node_id, node)| {
+                parse_unix_seconds(&node.updated_at).map(|updated_at| (node_id.clone(), updated_at))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut changed_jobs = Vec::new();
 
         for job in self.jobs.values_mut() {
@@ -2186,20 +2201,35 @@ impl ControlPlaneState {
                 else {
                     continue;
                 };
-                if now.saturating_sub(assigned_at) < lease_seconds {
+                let assignment_age = now.saturating_sub(assigned_at);
+                let stale_node_id = node.assigned_node_id.clone();
+                let node_reported_ready_after_assignment = stale_node_id
+                    .as_ref()
+                    .and_then(|node_id| ready_single_slot_heartbeats.get(node_id))
+                    .is_some_and(|heartbeat_at| *heartbeat_at > assigned_at);
+                let abandoned_ready_claim = node_reported_ready_after_assignment
+                    && assignment_age >= READY_SINGLE_SLOT_CLAIM_GRACE_SECONDS;
+                if assignment_age < lease_seconds && !abandoned_ready_claim {
                     continue;
                 }
 
-                let stale_node_id = node.assigned_node_id.clone();
                 if let Some(node_id) = stale_node_id.as_ref() {
                     if !node.failed_node_ids.iter().any(|failed| failed == node_id) {
                         node.failed_node_ids.push(node_id.clone());
                     }
                 }
-                let stale_error = format!(
-                    "stale assignment timed out after {lease_seconds}s on {}",
-                    stale_node_id.as_deref().unwrap_or("unknown node")
-                );
+                let stale_error = if abandoned_ready_claim {
+                    format!(
+                        "single-slot node reported ready without completing its assignment after {}s on {}",
+                        READY_SINGLE_SLOT_CLAIM_GRACE_SECONDS,
+                        stale_node_id.as_deref().unwrap_or("unknown node")
+                    )
+                } else {
+                    format!(
+                        "stale assignment timed out after {lease_seconds}s on {}",
+                        stale_node_id.as_deref().unwrap_or("unknown node")
+                    )
+                };
                 node.error = Some(stale_error);
                 node.output = None;
                 node.assigned_node_id = None;
@@ -10063,6 +10093,61 @@ mod tests {
         assert!(retried_node.failed_node_ids.contains(&"node-1".to_string()));
         assert_eq!(retried_node.assigned_node_id.as_deref(), Some("node-2"));
         assert_eq!(retried_node.worker_id, None);
+    }
+
+    #[test]
+    fn ready_single_slot_node_releases_lost_graph_claim_before_gateway_timeout() {
+        let mut state = ready_state();
+        let mut request =
+            classification_request("Give me a detailed history of BMW from its origins to today.");
+        request.execution_mode = JobExecutionMode::Auto;
+        state.submit_job(request, "2".to_string());
+
+        let first_claim = state
+            .claim_job("node-1", "3".to_string())
+            .job
+            .expect("first claim");
+        let graph_node_id = first_claim
+            .active_graph_node_id
+            .clone()
+            .expect("active graph node");
+
+        state.heartbeat(ready_heartbeat("node-1", "40"), "40".to_string());
+        state.run_maintenance("40");
+        assert_eq!(
+            state
+                .jobs
+                .get("job-1")
+                .expect("job")
+                .graph
+                .nodes
+                .iter()
+                .find(|node| node.id == graph_node_id)
+                .expect("running node")
+                .status,
+            JobGraphNodeStatus::Running
+        );
+
+        state.heartbeat(ready_heartbeat("node-1", "50"), "50".to_string());
+        state.run_maintenance("50");
+        let job = state.jobs.get("job-1").expect("job");
+        assert_eq!(job.status, JobStatus::Queued);
+        let released_node = job
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_node_id)
+            .expect("released graph node");
+        assert_eq!(released_node.status, JobGraphNodeStatus::Ready);
+        assert_eq!(released_node.attempt_count, 1);
+        assert_eq!(released_node.assigned_node_id, None);
+        assert!(released_node
+            .failed_node_ids
+            .contains(&"node-1".to_string()));
+        assert!(released_node
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reported ready without completing")));
     }
 
     #[test]
