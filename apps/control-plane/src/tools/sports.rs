@@ -116,12 +116,14 @@ fn extract_matchup(message: &str) -> Option<String> {
 }
 
 fn clean_team_name(value: &str) -> String {
-    let without_prefix = Regex::new(r"(?i)^(?:what(?:'s| is| was)?|who won|score|result|match|game|today|yesterday|tomorrow|the)+\s+")
+    let without_prefix = Regex::new(r"(?i)^(?:what(?:'s| is| was)?|who won|score|result|match|game|today|yesterday|tomorrow)\s+(?:the\s+)?")
         .expect("team prefix regex")
         .replace(value.trim(), "")
         .trim()
         .to_string();
-    Regex::new(r"(?i)\s+(?:today|tonight|yesterday|tomorrow|latest|live|now)\s*[?!.]*$")
+    Regex::new(
+        r"(?i)\s+(?:(?:score|result)\s+)?(?:on\s+)?(?:today|tonight|yesterday|tomorrow|latest|live|now|\d{4}-\d{2}-\d{2})\s*[?!.]*$",
+    )
         .expect("team suffix regex")
         .replace(&without_prefix, "")
         .trim_matches(|character: char| character.is_whitespace() || "?!.,”\"".contains(character))
@@ -305,6 +307,10 @@ mod tests {
     fn extracts_matchups_and_filters_events() {
         assert_eq!(
             extract_matchup("What was Arsenal vs Chelsea today?").as_deref(),
+            Some("Arsenal vs Chelsea")
+        );
+        assert_eq!(
+            extract_matchup("What was the Arsenal vs Chelsea score on 2015-04-26?").as_deref(),
             Some("Arsenal vs Chelsea")
         );
         let event = serde_json::json!({
