@@ -6971,7 +6971,7 @@ mod tests {
             "messages": [
                 {
                     "role": "user",
-                    "content": "Who is the current Philippines president?"
+                    "content": "Explain dependency injection."
                 }
             ],
             "temperature": 0.2,
@@ -7000,7 +7000,7 @@ mod tests {
         assert_eq!(job.runtime_mode, RuntimeMode::Local);
         assert_eq!(job.model, None);
         assert_eq!(job.scheduling_requirements.runtime_mode, RuntimeMode::Local);
-        assert_eq!(job.prompt, "Who is the current Philippines president?");
+        assert_eq!(job.prompt, "Explain dependency injection.");
     }
 
     #[test]
