@@ -370,6 +370,10 @@ impl Default for JobSchedulingRequirements {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct SchedulerDecision {
     pub node_id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub model_capabilities: Vec<String>,
     pub score: i32,
     pub reasons: Vec<String>,
 }
@@ -1068,6 +1072,18 @@ pub struct ModelCapability {
     pub quantization: Option<String>,
     #[serde(default)]
     pub estimated_vram_mb: Option<u32>,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub warm: bool,
+    #[serde(default)]
+    pub capacity_class: String,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub roles: Vec<NodeRole>,
+    #[serde(default)]
+    pub task_capabilities: Vec<String>,
     #[serde(default)]
     pub supports_vision: bool,
     #[serde(default)]
