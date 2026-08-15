@@ -3094,6 +3094,10 @@ fn complete_graph_execution_job(
     completed_at: String,
     compact_reducer_node: bool,
 ) -> JobRecord {
+    let cleaned_completion_output = completion
+        .output
+        .as_deref()
+        .map(strip_worker_transport_envelope);
     let automatic_budget = !job_has_explicit_max_tokens(job);
     let compact_reviewed_code = job.plan.strategy == "compact_reviewed_code_delivery";
     let compact_source_language = job
@@ -3129,15 +3133,14 @@ fn complete_graph_execution_job(
                         .is_some_and(crate::chat_gateway::output_hit_generation_limit);
                     let accepted_output = if compact_reviewed_code && graph_node.id == "job.backend"
                     {
-                        completion.output.as_deref().map(|output| {
+                        cleaned_completion_output.as_deref().map(|output| {
                             normalize_compact_code_output(output, &compact_source_language)
                         })
                     } else {
-                        completion.output.clone()
+                        cleaned_completion_output.clone()
                     };
                     let unusable_section_output = graph_node.responsibility == "section"
-                        && completion
-                            .output
+                        && cleaned_completion_output
                             .as_deref()
                             .map(|output| clean_section_output(&graph_node.name, output).is_empty())
                             .unwrap_or(true);
@@ -3153,8 +3156,7 @@ fn complete_graph_execution_job(
                             || stage_hint.contains("final"));
                     let truncated_synthesis = automatic_budget
                         && is_final_synthesis
-                        && completion
-                            .output
+                        && cleaned_completion_output
                             .as_deref()
                             .zip(graph_node.effective_max_tokens)
                             .map(|(output, budget)| output_appears_token_limited(output, budget))
@@ -3259,7 +3261,7 @@ fn complete_graph_execution_job(
                             graph_node.error = None;
                         } else {
                             graph_node.status = JobGraphNodeStatus::Failed;
-                            graph_node.output = completion.output.clone();
+                            graph_node.output = cleaned_completion_output.clone();
                             graph_node.error = completion.error.clone();
                         }
                     } else {
@@ -3284,7 +3286,7 @@ fn complete_graph_execution_job(
 
                         if graph_node.attempt_count >= graph_node.max_attempts {
                             graph_node.status = JobGraphNodeStatus::Failed;
-                            graph_node.output = completion.output.clone();
+                            graph_node.output = cleaned_completion_output.clone();
                             graph_node.error = completion.error.clone();
                         } else {
                             if retry_needs_more_output_budget {
@@ -3345,7 +3347,7 @@ fn complete_graph_execution_job(
     job.output = if completion_was_requeued {
         job.graph.final_output.clone()
     } else {
-        completion.output
+        cleaned_completion_output
     };
     job.error = if job.graph.status == JobGraphStatus::Failed {
         completion.error.or_else(|| job.graph.merge_error.clone())
@@ -9090,6 +9092,49 @@ mod tests {
         assert_eq!(
             completed.output.as_deref(),
             Some("Here's a clean Java program.")
+        );
+    }
+
+    #[test]
+    fn graph_completion_strips_contributed_cluster_transport_envelope() {
+        let mut state = ready_state();
+        let mut request = classification_request(
+            "Give me a detailed history of Tesla from its origins to today.",
+        );
+        request.execution_mode = JobExecutionMode::Decompose;
+        state.submit_job(request, "1".to_string());
+        let claim = state
+            .claim_job("node-1", "2".to_string())
+            .job
+            .expect("graph claim");
+        let graph_node_id = claim.active_graph_node_id.expect("active graph node");
+
+        let completed = state
+            .complete_job(
+                JobCompletion {
+                    job_id: "job-1".to_string(),
+                    node_id: "node-1".to_string(),
+                    worker_id: "worker-1".to_string(),
+                    backend: Backend::Vllm,
+                    status: JobStatus::Completed,
+                    output: Some("contributed-cluster kind=vllm; endpoint=http://127.0.0.1:8000; model=Qwen/Qwen3-Coder-Next-FP8; max_tokens=2048; temperature=0.2; top_p=0.9; seed=42; response=Tesla was founded in 2003. [end of text]".to_string()),
+                    error: None,
+                    latency_ms: Some(10),
+                },
+                "3".to_string(),
+            )
+            .expect("graph completion");
+
+        let graph_output = completed
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_node_id)
+            .and_then(|node| node.output.as_deref());
+        assert_eq!(graph_output, Some("Tesla was founded in 2003."));
+        assert_eq!(
+            completed.output.as_deref(),
+            Some("Tesla was founded in 2003.")
         );
     }
 
