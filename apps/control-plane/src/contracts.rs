@@ -990,6 +990,23 @@ pub struct JobCompletion {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JobStreamDelta {
+    pub job_id: String,
+    pub node_id: String,
+    pub assignment_id: String,
+    pub sequence: u64,
+    pub delta: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JobStreamAck {
+    pub job_id: String,
+    pub sequence: u64,
+    pub accepted: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerHealthReport {
     pub healthy: bool,
     pub model_dir: String,

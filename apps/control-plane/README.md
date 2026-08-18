@@ -13,7 +13,7 @@ Apple Silicon job routing now uses an explicit runtime contract between submitte
 - Jobs declare `runtime_mode` and `stream` alongside the existing backend preference.
 - Heartbeats report `runtime_ready`, `supported_runtime_modes`, `streaming_supported`, `model_dir`, and `model_path`.
 - The control plane only assigns a queued job when the node backend matches and the latest worker capability report explicitly supports that job's runtime requirements.
-- Chat completions are queued as `interactive` jobs and streaming chat requests still fail fast until node streaming support exists.
+- Chat completions are queued as `interactive` jobs. Eligible `stream:true` requests automatically use the signed live-delta relay when a streaming-capable node is available; otherwise they retain validated-buffered SSE.
 
 ## Planner Service Status
 

@@ -129,4 +129,4 @@ API key: not-required
 Model IDs filter: leave empty (auto-discovers ehda-agnostic)
 ```
 
-The control plane accepts Open WebUI's default `stream=true`. Until genuine worker-token streaming exists, it waits for validated output and emits OpenAI-compatible buffered SSE followed by `[DONE]`.
+The control plane accepts Open WebUI's default `stream=true`. When a streaming-capable node is available, ordinary text is automatically relayed as live OpenAI-compatible SSE. Structured modes and tool responses remain validated-buffered, and every stream ends with `[DONE]`.
