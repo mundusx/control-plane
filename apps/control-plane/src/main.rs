@@ -11,8 +11,9 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, AdmissionPolicyUpdate, AgentRegistration,
     AppendChatMessageRequest, Backend, ChatCompletionRequest, ChatMessagesResponse,
     CreditsLedgerRecord, Heartbeat, JobCompletion, JobExecutionMode, JobGraphNodeStatus, JobRecord,
-    JobRequest, JobStatus, NodePolicyOverrideInput, NodeRecord, OperatorContributionPercentUpdate,
-    OperatorNodePolicyOverrideUpdate, RoutingMode, RuntimeMode, ToolRewardRequest,
+    JobRequest, JobStatus, JobStreamAck, JobStreamDelta, NodePolicyOverrideInput, NodeRecord,
+    OperatorContributionPercentUpdate, OperatorNodePolicyOverrideUpdate, RoutingMode, RuntimeMode,
+    ToolRewardRequest,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use migrations::apply_migrations;
@@ -4958,6 +4959,7 @@ fn requires_device_signature(method: &str, path: &str) -> bool {
         ("POST", "/v1/register")
             | ("POST", "/v1/heartbeat")
             | ("GET", "/v1/jobs/next")
+            | ("POST", "/v1/jobs/delta")
             | ("POST", "/v1/jobs/complete")
     )
 }
@@ -5463,9 +5465,10 @@ fn completion_event_type(
     }
 }
 
-fn handle_connection(
+fn handle_connection_with_streams(
     mut stream: TcpStream,
     state: Arc<Mutex<ControlPlaneState>>,
+    live_streams: Arc<Mutex<chat_gateway::LiveStreamRegistry>>,
     sync_status: Arc<Mutex<SupabaseSyncStatus>>,
     supabase: Option<&DatabaseMirror>,
     storage_source: StorageSource,
@@ -6232,17 +6235,6 @@ fn handle_connection(
                             return write_chat_error(&mut stream, "400 Bad Request", &error);
                         }
                     };
-                    if wants_stream {
-                        if let Err(error) = stream.write_all(
-                            chat_gateway::sse_start(&completion_id, created, public_model)
-                                .as_bytes(),
-                        ) {
-                            eprintln!("failed to start chat stream: {error}");
-                            return;
-                        }
-                        let _ = stream.flush();
-                    }
-
                     match if mode.is_none() {
                         tools::execute(&request_body.messages)
                     } else {
@@ -6259,6 +6251,20 @@ fn handle_connection(
                                 Some(&tool),
                             );
                             if wants_stream {
+                                if stream
+                                    .write_all(
+                                        chat_gateway::sse_start(
+                                            &completion_id,
+                                            created,
+                                            public_model,
+                                            false,
+                                        )
+                                        .as_bytes(),
+                                    )
+                                    .is_err()
+                                {
+                                    return;
+                                }
                                 let _ = stream
                                     .write_all(chat_gateway::sse_finish(&completion).as_bytes());
                                 return;
@@ -6268,6 +6274,20 @@ fn handle_connection(
                         Ok(None) => {}
                         Err(error) => {
                             if wants_stream {
+                                if stream
+                                    .write_all(
+                                        chat_gateway::sse_start(
+                                            &completion_id,
+                                            created,
+                                            public_model,
+                                            false,
+                                        )
+                                        .as_bytes(),
+                                    )
+                                    .is_err()
+                                {
+                                    return;
+                                }
                                 let completion = chat_gateway::completion_response(
                                     &completion_id,
                                     created,
@@ -6284,18 +6304,50 @@ fn handle_connection(
                             return write_chat_error(&mut stream, "502 Bad Gateway", &error);
                         }
                     }
+                    let streaming_node_available = state
+                        .lock()
+                        .expect("state lock")
+                        .nodes
+                        .values()
+                        .any(|node| {
+                            node.policy_allowed
+                                && node.worker_health.as_ref().is_some_and(|health| {
+                                    health.healthy && health.streaming_supported
+                                })
+                        });
+                    let live_stream_job =
+                        wants_stream && mode.is_none() && streaming_node_available;
+                    if wants_stream {
+                        if let Err(error) = stream.write_all(
+                            chat_gateway::sse_start(
+                                &completion_id,
+                                created,
+                                public_model,
+                                live_stream_job,
+                            )
+                            .as_bytes(),
+                        ) {
+                            eprintln!("failed to start chat stream: {error}");
+                            return;
+                        }
+                        let _ = stream.flush();
+                    }
                     let job_request = JobRequest {
                         request_id: completion_id.clone(),
                         prompt,
                         preferred_backend: crate::contracts::Backend::Auto,
                         routing_mode: RoutingMode::Normal,
                         runtime_mode: RuntimeMode::Local,
-                        execution_mode: if mode.is_some() || metadata_request || sensitive_history {
+                        execution_mode: if live_stream_job
+                            || mode.is_some()
+                            || metadata_request
+                            || sensitive_history
+                        {
                             JobExecutionMode::Single
                         } else {
                             JobExecutionMode::Auto
                         },
-                        stream: false,
+                        stream: live_stream_job,
                         model: None,
                         system_prompt,
                         max_tokens,
@@ -6334,9 +6386,41 @@ fn handle_connection(
                             note_supabase_failure(&sync_status, error);
                         }
                     }
+                    if live_stream_job {
+                        live_streams
+                            .lock()
+                            .expect("live stream registry lock")
+                            .register(&record.job_id);
+                    }
                     drop(guard);
 
-                    let completed_result = if wants_stream {
+                    let mut streamed_content = String::new();
+                    let completed_result = if live_stream_job {
+                        chat_gateway::wait_for_job_with_stream(
+                            &state,
+                            &live_streams,
+                            &record.job_id,
+                            chat_gateway::timeout_from_env(),
+                            |delta| {
+                                let event = match delta {
+                                    Some(delta) => {
+                                        streamed_content.push_str(delta);
+                                        chat_gateway::sse_delta(
+                                            &completion_id,
+                                            created,
+                                            public_model,
+                                            delta,
+                                        )
+                                    }
+                                    None => chat_gateway::sse_keep_alive().to_string(),
+                                };
+                                stream
+                                    .write_all(event.as_bytes())
+                                    .and_then(|_| stream.flush())
+                                    .map_err(|error| format!("chat stream disconnected: {error}"))
+                            },
+                        )
+                    } else if wants_stream {
                         chat_gateway::wait_for_job_with_keepalive(
                             &state,
                             &record.job_id,
@@ -6358,6 +6442,12 @@ fn handle_connection(
                     let completed = match completed_result {
                         Ok(job) => job,
                         Err(error) => {
+                            if live_stream_job {
+                                live_streams
+                                    .lock()
+                                    .expect("live stream registry lock")
+                                    .remove(&record.job_id);
+                            }
                             if wants_stream {
                                 let completion = chat_gateway::completion_response(
                                     &completion_id,
@@ -6397,7 +6487,53 @@ fn handle_connection(
                         None,
                     );
                     if wants_stream {
-                        let _ = stream.write_all(chat_gateway::sse_finish(&completion).as_bytes());
+                        if live_stream_job {
+                            live_streams
+                                .lock()
+                                .expect("live stream registry lock")
+                                .remove(&record.job_id);
+                            if let Ok(remainder) =
+                                chat_gateway::validated_stream_remainder(content, &streamed_content)
+                            {
+                                if !remainder.is_empty() {
+                                    let _ = stream.write_all(
+                                        chat_gateway::sse_delta(
+                                            &completion_id,
+                                            created,
+                                            public_model,
+                                            remainder,
+                                        )
+                                        .as_bytes(),
+                                    );
+                                }
+                                let _ = stream.write_all(
+                                    chat_gateway::sse_end(
+                                        &completion_id,
+                                        created,
+                                        public_model,
+                                        finish_reason,
+                                    )
+                                    .as_bytes(),
+                                );
+                            } else {
+                                eprintln!(
+                                    "live stream reconciliation failed for job {}; terminating without duplicating content",
+                                    record.job_id
+                                );
+                                let _ = stream.write_all(
+                                    chat_gateway::sse_end(
+                                        &completion_id,
+                                        created,
+                                        public_model,
+                                        "error",
+                                    )
+                                    .as_bytes(),
+                                );
+                            }
+                        } else {
+                            let _ =
+                                stream.write_all(chat_gateway::sse_finish(&completion).as_bytes());
+                        }
                         return;
                     }
                     json_response("200 OK", completion)
@@ -6405,6 +6541,64 @@ fn handle_connection(
                 Err(error) => json_response("400 Bad Request", openai_error(&error.to_string())),
             }
         }
+        ("POST", "/v1/jobs/delta") => match serde_json::from_str::<JobStreamDelta>(&request.body) {
+            Ok(delta) => {
+                let header_node_id =
+                    header_value(&request.headers, "x-mundusx-node-id").unwrap_or_default();
+                let validation = {
+                    let guard = state.lock().expect("state lock");
+                    guard
+                        .jobs
+                        .get(&delta.job_id)
+                        .ok_or_else(|| "stream job not found".to_string())
+                        .and_then(|job| {
+                            if delta.node_id != header_node_id {
+                                return Err("node id header mismatch".to_string());
+                            }
+                            if !job.stream {
+                                return Err("job is not live-stream enabled".to_string());
+                            }
+                            if job.status != JobStatus::Assigned {
+                                return Err("job is not assigned".to_string());
+                            }
+                            if job.assigned_node_id.as_deref() != Some(delta.node_id.as_str()) {
+                                return Err("job is assigned to a different node".to_string());
+                            }
+                            if job.assigned_at.as_deref() != Some(delta.assignment_id.as_str()) {
+                                return Err("stream assignment is stale".to_string());
+                            }
+                            Ok(())
+                        })
+                };
+                if let Err(error) = validation {
+                    json_response("409 Conflict", serde_json::json!({ "error": error }))
+                } else {
+                    let result = live_streams
+                        .lock()
+                        .expect("live stream registry lock")
+                        .push(&delta.job_id, delta.sequence, delta.delta);
+                    match result {
+                        Ok(outcome) => json_response(
+                            "200 OK",
+                            serde_json::to_value(JobStreamAck {
+                                job_id: delta.job_id,
+                                sequence: delta.sequence,
+                                accepted: outcome == chat_gateway::PushDeltaResult::Accepted,
+                                duplicate: outcome == chat_gateway::PushDeltaResult::Duplicate,
+                            })
+                            .expect("stream ack json"),
+                        ),
+                        Err(error) => {
+                            json_response("409 Conflict", serde_json::json!({ "error": error }))
+                        }
+                    }
+                }
+            }
+            Err(error) => json_response(
+                "400 Bad Request",
+                serde_json::json!({ "error": error.to_string() }),
+            ),
+        },
         ("POST", "/v1/jobs/complete") => match serde_json::from_str::<JobCompletion>(&request.body)
         {
             Ok(completion) => {
@@ -6496,6 +6690,24 @@ fn handle_connection(
     };
 
     let _ = stream.write_all(response.as_bytes());
+}
+
+#[cfg(test)]
+fn handle_connection(
+    stream: TcpStream,
+    state: Arc<Mutex<ControlPlaneState>>,
+    sync_status: Arc<Mutex<SupabaseSyncStatus>>,
+    supabase: Option<&DatabaseMirror>,
+    storage_source: StorageSource,
+) {
+    handle_connection_with_streams(
+        stream,
+        state,
+        Arc::new(Mutex::new(chat_gateway::LiveStreamRegistry::default())),
+        sync_status,
+        supabase,
+        storage_source,
+    );
 }
 
 fn main() {
@@ -6617,6 +6829,7 @@ fn main() {
         }
     };
     let state = Arc::new(Mutex::new(restored_state));
+    let live_streams = Arc::new(Mutex::new(chat_gateway::LiveStreamRegistry::default()));
     let sync_status = Arc::new(Mutex::new(sync_status));
 
     println!("control plane listening on http://{bind_addr}");
@@ -6657,12 +6870,14 @@ fn main() {
         match incoming {
             Ok(stream) => {
                 let state = Arc::clone(&state);
+                let live_streams = Arc::clone(&live_streams);
                 let sync_status = Arc::clone(&sync_status);
                 let database = supabase.clone();
                 thread::spawn(move || {
-                    handle_connection(
+                    handle_connection_with_streams(
                         stream,
                         state,
+                        live_streams,
                         sync_status,
                         database.as_ref(),
                         storage_source,
@@ -6684,7 +6899,7 @@ mod tests {
         legacy_supabase_enabled_from_value, migration_database_url_from_values, now_unix_seconds,
         operator_auth_mode_from_env, operator_auth_startup_config_error,
         operator_auth_token_from_env, parse_conversation_messages_path, parse_conversation_path,
-        parse_request, read_http_request, requires_operator_auth,
+        parse_request, read_http_request, requires_device_signature, requires_operator_auth,
         status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
         HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource, SupabaseSyncStatus,
         AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV, CONTROL_PLANE_LOGO_PATH,
@@ -8930,6 +9145,12 @@ mod tests {
     fn keeps_openai_client_routes_public() {
         assert!(!requires_operator_auth("GET", "/v1/models"));
         assert!(!requires_operator_auth("POST", "/v1/chat/completions"));
+    }
+
+    #[test]
+    fn protects_live_job_deltas_with_device_signatures() {
+        assert!(requires_device_signature("POST", "/v1/jobs/delta"));
+        assert!(!requires_operator_auth("POST", "/v1/jobs/delta"));
     }
 
     #[test]

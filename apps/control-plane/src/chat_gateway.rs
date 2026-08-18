@@ -2,11 +2,104 @@ use crate::contracts::{ChatCompletionRequest, JobRecord, JobStatus};
 use crate::state::ControlPlaneState;
 use crate::tools::ToolAnswer;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]";
+const MAX_STREAM_DELTA_BYTES: usize = 64 * 1024;
+const MAX_STREAM_BUFFER_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug)]
+struct LiveStreamBuffer {
+    next_sequence: u64,
+    last_delta: Option<String>,
+    buffered_bytes: usize,
+    deltas: VecDeque<String>,
+}
+
+impl Default for LiveStreamBuffer {
+    fn default() -> Self {
+        Self {
+            next_sequence: 1,
+            last_delta: None,
+            buffered_bytes: 0,
+            deltas: VecDeque::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LiveStreamRegistry {
+    jobs: BTreeMap<String, LiveStreamBuffer>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PushDeltaResult {
+    Accepted,
+    Duplicate,
+}
+
+impl LiveStreamRegistry {
+    pub fn register(&mut self, job_id: &str) {
+        self.jobs.entry(job_id.to_string()).or_default();
+    }
+
+    pub fn push(
+        &mut self,
+        job_id: &str,
+        sequence: u64,
+        delta: String,
+    ) -> Result<PushDeltaResult, String> {
+        let buffer = self
+            .jobs
+            .get_mut(job_id)
+            .ok_or_else(|| "live stream is not registered for this job".to_string())?;
+        if sequence < buffer.next_sequence {
+            if sequence + 1 == buffer.next_sequence
+                && buffer.last_delta.as_deref() == Some(delta.as_str())
+            {
+                return Ok(PushDeltaResult::Duplicate);
+            }
+            return Err(
+                "duplicate stream delta does not match the last accepted payload".to_string(),
+            );
+        }
+        if sequence > buffer.next_sequence {
+            return Err(format!(
+                "out-of-order stream delta: expected {}, received {sequence}",
+                buffer.next_sequence
+            ));
+        }
+        if delta.is_empty() {
+            return Err("stream delta must not be empty".to_string());
+        }
+        if delta.len() > MAX_STREAM_DELTA_BYTES {
+            return Err("stream delta exceeds the 64 KiB limit".to_string());
+        }
+        if buffer.buffered_bytes.saturating_add(delta.len()) > MAX_STREAM_BUFFER_BYTES {
+            return Err("live stream buffer exceeds the 256 KiB limit".to_string());
+        }
+        buffer.buffered_bytes += delta.len();
+        buffer.last_delta = Some(delta.clone());
+        buffer.deltas.push_back(delta);
+        buffer.next_sequence += 1;
+        Ok(PushDeltaResult::Accepted)
+    }
+
+    pub fn drain(&mut self, job_id: &str) -> Vec<String> {
+        let Some(buffer) = self.jobs.get_mut(job_id) else {
+            return Vec::new();
+        };
+        buffer.buffered_bytes = 0;
+        buffer.deltas.drain(..).collect()
+    }
+
+    pub fn remove(&mut self, job_id: &str) {
+        self.jobs.remove(job_id);
+    }
+}
 
 pub fn output_hit_generation_limit(output: &str) -> bool {
     let normalized = output.trim_start().to_ascii_lowercase();
@@ -154,7 +247,7 @@ pub fn completion_response(
     })
 }
 
-pub fn sse_start(id: &str, created: u64, model: &str) -> String {
+pub fn sse_start(id: &str, created: u64, model: &str, live: bool) -> String {
     let start = json!({
         "id": id,
         "object": "chat.completion.chunk",
@@ -162,9 +255,45 @@ pub fn sse_start(id: &str, created: u64, model: &str) -> String {
         "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": Value::Null}]
     });
+    let mode = if live {
+        "live-delta"
+    } else {
+        "validated-buffered"
+    };
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: validated-buffered\r\nConnection: close\r\n\r\ndata: {start}\n\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nConnection: close\r\n\r\ndata: {start}\n\n"
     )
+}
+
+pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
+    let chunk = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": Value::Null}]
+    });
+    format!("data: {chunk}\n\n")
+}
+
+pub fn sse_end(id: &str, created: u64, model: &str, finish_reason: &str) -> String {
+    let end = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
+    });
+    format!("data: {end}\n\ndata: [DONE]\n\n")
+}
+
+pub fn validated_stream_remainder<'a>(
+    final_content: &'a str,
+    streamed_content: &str,
+) -> Result<&'a str, String> {
+    final_content.strip_prefix(streamed_content).ok_or_else(|| {
+        "streamed content is not an exact prefix of the validated final output".to_string()
+    })
 }
 
 pub fn sse_finish(completion: &Value) -> String {
@@ -177,21 +306,11 @@ pub fn sse_finish(completion: &Value) -> String {
     let finish_reason = completion["choices"][0]["finish_reason"]
         .as_str()
         .unwrap_or("stop");
-    let content_chunk = json!({
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": Value::Null}]
-    });
-    let end = json!({
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
-    });
-    format!("data: {content_chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n")
+    format!(
+        "{}{}",
+        sse_delta(id, created, model, content),
+        sse_end(id, created, model, finish_reason)
+    )
 }
 
 pub fn sse_keep_alive() -> &'static str {
@@ -258,6 +377,74 @@ where
     }
 }
 
+pub fn wait_for_job_with_stream<F>(
+    state: &Arc<Mutex<ControlPlaneState>>,
+    streams: &Arc<Mutex<LiveStreamRegistry>>,
+    job_id: &str,
+    timeout: Duration,
+    mut write_event: F,
+) -> Result<JobRecord, String>
+where
+    F: FnMut(Option<&str>) -> Result<(), String>,
+{
+    let started = Instant::now();
+    let mut last_keep_alive = Instant::now();
+    loop {
+        let deltas = streams
+            .lock()
+            .map_err(|_| "live stream registry lock poisoned".to_string())?
+            .drain(job_id);
+        for delta in deltas {
+            write_event(Some(&delta))?;
+        }
+
+        let job = state
+            .lock()
+            .map_err(|_| "control-plane state lock poisoned".to_string())?
+            .jobs
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| format!("chat job {job_id} disappeared"))?;
+        match job.status {
+            JobStatus::Completed => {
+                let trailing = streams
+                    .lock()
+                    .map_err(|_| "live stream registry lock poisoned".to_string())?
+                    .drain(job_id);
+                for delta in trailing {
+                    write_event(Some(&delta))?;
+                }
+                if job
+                    .output
+                    .as_deref()
+                    .is_some_and(|output| !output.trim().is_empty())
+                {
+                    return Ok(job);
+                }
+                return Err("completed chat job has no validated output".to_string());
+            }
+            JobStatus::Failed => {
+                return Err(job
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "chat job failed".to_string()));
+            }
+            JobStatus::Queued | JobStatus::Assigned => {}
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "chat completion timed out after {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        if last_keep_alive.elapsed() >= Duration::from_secs(10) {
+            write_event(None)?;
+            last_keep_alive = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 pub fn timeout_from_env() -> Duration {
     let seconds = std::env::var("MUNDUSX_CHAT_TIMEOUT_SECONDS")
         .ok()
@@ -286,7 +473,8 @@ mod tests {
     use super::{
         completion_response, history_contains_sensitive_data, is_openwebui_metadata_request,
         models_response, output_hit_generation_limit, public_model_id, sse_finish, sse_start,
-        strip_generation_limit_marker, validate_model,
+        strip_generation_limit_marker, validate_model, validated_stream_remainder,
+        LiveStreamRegistry, PushDeltaResult,
     };
     use crate::tools::{ToolAnswer, ToolSource};
 
@@ -311,13 +499,53 @@ mod tests {
             "model": "mundusx-agnostic",
             "choices": [{"message": {"content": "Done."}, "finish_reason": "stop"}]
         });
-        let start = sse_start("chatcmpl-test", 1, "mundusx-agnostic");
+        let start = sse_start("chatcmpl-test", 1, "mundusx-agnostic", false);
         let finish = sse_finish(&completion);
         assert!(start.starts_with("HTTP/1.1 200 OK"));
         assert!(start.contains("Content-Type: text/event-stream"));
         assert!(start.contains("\"role\":\"assistant\""));
         assert!(finish.contains("\"delta\":{\"content\":\"Done.\"}"));
         assert!(finish.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn live_stream_registry_enforces_order_and_idempotency() {
+        let mut streams = LiveStreamRegistry::default();
+        streams.register("job-1");
+        assert_eq!(
+            streams.push("job-1", 1, "Hello".to_string()),
+            Ok(PushDeltaResult::Accepted)
+        );
+        assert_eq!(
+            streams.push("job-1", 1, "Hello".to_string()),
+            Ok(PushDeltaResult::Duplicate)
+        );
+        assert!(streams.push("job-1", 1, "Altered".to_string()).is_err());
+        assert!(streams.push("job-1", 3, "!".to_string()).is_err());
+        assert_eq!(streams.drain("job-1"), vec!["Hello"]);
+        assert_eq!(
+            streams.push("job-1", 2, " world".to_string()),
+            Ok(PushDeltaResult::Accepted)
+        );
+    }
+
+    #[test]
+    fn live_sse_advertises_delta_mode() {
+        let start = sse_start("chatcmpl-live", 1, "mundusx-agnostic", true);
+        assert!(start.contains("X-MundusX-Stream-Mode: live-delta"));
+    }
+
+    #[test]
+    fn live_stream_reconciliation_appends_only_the_validated_remainder() {
+        assert_eq!(
+            validated_stream_remainder("Hello world", "Hello").unwrap(),
+            " world"
+        );
+        assert_eq!(
+            validated_stream_remainder("Hello world", "Hello world").unwrap(),
+            ""
+        );
+        assert!(validated_stream_remainder("Hello world", "Altered").is_err());
     }
 
     #[test]

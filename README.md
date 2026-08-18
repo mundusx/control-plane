@@ -123,13 +123,13 @@ These unauthenticated routes are the stable client boundary for Open WebUI, Herm
 | `GET` | `/v1/models` | Discover `mundusx-agnostic` in UAT or `ehda-agnostic` in Benz EHDA |
 | `POST` | `/v1/chat/completions` | Wait for validated output and return a completed OpenAI response |
 
-`stream: true` returns validated buffered SSE with a role chunk, content chunk, terminal chunk, and `[DONE]`. Genuine worker-token streaming remains a separate future enhancement. The trusted control-plane tool registry handles weather, current public office holders, sports results, and configured web search before model scheduling. Tool answers include sources and freshness metadata under the response's `mundusx` object. A recognized current-information request never silently falls back to model memory when its provider is unavailable; ordinary stable questions remain planner-owned.
+`stream: true` returns OpenAI-compatible SSE with a role chunk, content chunks, a terminal chunk, and `[DONE]`. Eligible ordinary text requests automatically use authenticated live worker deltas when a healthy streaming-capable node is available and advertise `X-MundusX-Stream-Mode: live-delta`; tools, structured modes, and unsupported nodes retain `validated-buffered` delivery. The trusted control-plane tool registry handles weather, current public office holders, sports results, and configured web search before model scheduling. Tool answers include sources and freshness metadata under the response's `mundusx` object. A recognized current-information request never silently falls back to model memory when its provider is unavailable; ordinary stable questions remain planner-owned.
 
 ---
 
 ## Known gaps
 
-- **Validated buffered streaming only** — the OpenAI gateway holds structured output until job validation succeeds; it does not yet relay live worker tokens.
+- **Hybrid validated streaming** — eligible ordinary text can relay live deltas in UAT; structured and tool output remains buffered until validation succeeds.
 - **`operatorAuth: disabled (MUNDUSX_AUTH_DISABLED=true)`** in logs means operator endpoints are deliberately open for local/UAT smoke tests. Startup rejects this setting when `MUNDUSX_ENVIRONMENT` is `production` or another non-local environment.
 - **`operatorAuth: disabled (MUNDUSX_OPERATOR_TOKEN missing)`** in logs means operator endpoints are open because no token was configured.
 - **`operatorAuth warning: OPENGPU_OPERATOR_TOKEN is deprecated`** in logs means the process is using the old token alias and should be renamed to `MUNDUSX_OPERATOR_TOKEN`.
