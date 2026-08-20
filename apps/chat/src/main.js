@@ -3292,13 +3292,12 @@ export function requiresValidatedStreaming(message, body = {}) {
 
 export function canLiveStreamChatTurn(body = {}) {
   const message = String(body?.message ?? "").trim();
-  if (!message || detectClientMetadataTask(message) || requiresValidatedStreaming(message, body)) {
+  if (!message || detectClientMetadataTask(message)) {
     return false;
   }
   const toolMessage = stripToolModePrefix(message);
   if (
     isMultiIntentPlanningCandidate(toolMessage) ||
-    isNodeExpressMysqlCustomerCrudRequest(toolMessage) ||
     fetchMathJobForPrompt(toolMessage) ||
     extractWeatherLocation(toolMessage) ||
     looksLikeWeatherRequest(toolMessage.toLowerCase()) ||
@@ -3318,7 +3317,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     throw httpError(400, "message is required");
   }
   if (!canLiveStreamChatTurn(body)) {
-    return sendJson(response, 409, { fallback: true, reason: "validated_or_tool_routed" });
+    return sendJson(response, 409, { fallback: true, reason: "deterministic_or_tool_routed" });
   }
 
   const message = redactSensitiveText(rawMessage);

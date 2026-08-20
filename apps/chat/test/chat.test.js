@@ -3302,10 +3302,12 @@ test("OpenAI adapter correlates its stable id and OpenWebUI chat id", async () =
   assert.deepEqual(conversationWrites.map((entry) => entry.role), ["user", "assistant"]);
 });
 
-test("ordinary Chat-U requests use live streaming while validated and tool routes fall back", () => {
+test("generative Chat-U requests stream while deterministic and tool routes fall back", () => {
   assert.equal(canLiveStreamChatTurn({ message: "Explain distributed systems.", toolMode: false }), true);
-  assert.equal(canLiveStreamChatTurn({ message: "Create a complete Java program", toolMode: false }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Create a complete Java program", toolMode: false }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "Return a JSON schema for a customer record", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), false);
   assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), false);
 });
 
@@ -3367,7 +3369,7 @@ test("streaming relay exposes the first upstream delta before completion", async
   assert.equal(events.at(-1).type, "end");
 });
 
-test("validated Chat-U requests return an explicit polling fallback without upstream work", async () => {
+test("deterministic Chat-U requests return an explicit polling fallback without upstream work", async () => {
   const events = [];
   const response = {
     writeHead: (status, headers) => events.push({ status, headers }),
@@ -3376,7 +3378,7 @@ test("validated Chat-U requests return an explicit polling fallback without upst
   let fetchCalled = false;
   await streamChatTurn(
     response,
-    { message: "Return a complete Java program", toolMode: false },
+    { message: "Weather in Warsaw?", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async () => {
       fetchCalled = true;
@@ -3385,7 +3387,7 @@ test("validated Chat-U requests return an explicit polling fallback without upst
   );
   assert.equal(fetchCalled, false);
   assert.equal(events[0].status, 409);
-  assert.deepEqual(JSON.parse(events[1].value), { fallback: true, reason: "validated_or_tool_routed" });
+  assert.deepEqual(JSON.parse(events[1].value), { fallback: true, reason: "deterministic_or_tool_routed" });
 });
 
 test("live Chat-U stream preserves history and persists one user and assistant turn", async () => {
