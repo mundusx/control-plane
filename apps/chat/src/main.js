@@ -999,26 +999,59 @@ export function page(config = configFromEnv()) {
       background: #12141c;
       border-radius: 10px;
       overflow: hidden;
+      box-shadow: 0 10px 26px rgba(18, 20, 28, 0.12);
+    }
+    .code-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid #1f2430;
+      padding: 7px 8px 7px 12px;
+      background: #0d0f15;
     }
     .code-label {
-      border-bottom: 1px solid #1f2430;
-      padding: 7px 12px;
       color: #8a93a6;
       font-size: 11px;
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
+    .code-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .code-action {
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #aeb7c8;
+      cursor: pointer;
+      padding: 5px 7px;
+      font: inherit;
+      font-size: 11px;
+      line-height: 1;
+      transition: background var(--motion-fast), color var(--motion-fast);
+    }
+    .code-action:hover,
+    .code-action:focus-visible {
+      background: #252937;
+      color: #fff;
+      outline: none;
+    }
+    .code-action[data-state="success"] {
+      color: #65d6a6;
+    }
     .code-block pre {
       margin: 0;
-      padding: 14px;
       max-width: 100%;
-      overflow: hidden;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      word-break: break-word;
+      overflow: auto;
+      white-space: pre;
       font-family: "SF Mono", Menlo, Consolas, monospace;
       font-size: 13px;
-      line-height: 1.5;
+      line-height: 1.6;
+      tab-size: 2;
+      scrollbar-color: #3a4050 transparent;
     }
     .code-block code {
       color: #d9edff;
@@ -1027,8 +1060,40 @@ export function page(config = configFromEnv()) {
       border-radius: 0;
       padding: 0;
       white-space: inherit;
-      overflow-wrap: inherit;
-      word-break: inherit;
+      counter-reset: code-line;
+      display: block;
+      min-width: max-content;
+    }
+    .code-line {
+      counter-increment: code-line;
+      display: block;
+      min-height: 1.6em;
+      padding: 0 16px 0 0;
+    }
+    .code-line:first-child { padding-top: 12px; }
+    .code-line:last-child { padding-bottom: 12px; }
+    .code-line::before {
+      content: counter(code-line);
+      display: inline-block;
+      width: 42px;
+      margin-right: 14px;
+      border-right: 1px solid #282d3a;
+      padding-right: 10px;
+      color: #596175;
+      text-align: right;
+      user-select: none;
+    }
+    .code-block.is-collapsed pre { display: none; }
+    .code-block.is-collapsed .code-header { border-bottom: 0; }
+    .syntax-comment { color: #718096; font-style: italic; }
+    .syntax-string { color: #9fe3a8; }
+    .syntax-number { color: #f2b56b; }
+    .syntax-keyword { color: #c8a7ff; font-weight: 650; }
+    .syntax-literal { color: #78c6ff; }
+    .syntax-function { color: #ffe083; }
+    @media (max-width: 640px) {
+      .code-action { padding: 6px; }
+      .code-line::before { width: 34px; margin-right: 10px; }
     }
 
     .work-trace { display: grid; gap: 12px; }
@@ -2389,17 +2454,17 @@ export function page(config = configFromEnv()) {
         }
         const contentStart = start + fence.length;
         const end = text.indexOf(fence, contentStart);
-        if (end === -1) break;
-        const raw = text.slice(contentStart, end).replace(/^\\n/, "");
+        const raw = text.slice(contentStart, end === -1 ? text.length : end).replace(/^\\n/, "");
         const firstBreak = raw.indexOf("\\n");
-        const firstLine = firstBreak === -1 ? "" : raw.slice(0, firstBreak).trim();
+        const firstLine = firstBreak === -1 ? raw.trim() : raw.slice(0, firstBreak).trim();
         const hasLanguage = /^[a-zA-Z0-9_+#.-]{1,24}$/.test(firstLine);
         parts.push({
           type: "code",
           language: hasLanguage ? firstLine : "code",
-          value: hasLanguage ? raw.slice(firstBreak + 1) : raw,
+          value: hasLanguage ? (firstBreak === -1 ? "" : raw.slice(firstBreak + 1)) : raw,
         });
-        index = end + fence.length;
+        index = end === -1 ? text.length : end + fence.length;
+        if (end === -1) break;
       }
       if (index < text.length) {
         parts.push({ type: "text", value: text.slice(index) });
@@ -2468,16 +2533,171 @@ export function page(config = configFromEnv()) {
     function createCodeBlock(language, code) {
       const wrapper = document.createElement("div");
       wrapper.className = "code-block";
+      const normalizedLanguage = normalizeCodeLanguage(language);
+      const header = document.createElement("div");
+      header.className = "code-header";
       const label = document.createElement("div");
       label.className = "code-label";
-      label.textContent = language || "code";
+      label.textContent = normalizedLanguage;
+      const actions = document.createElement("div");
+      actions.className = "code-actions";
+      const collapseButton = createCodeAction("Collapse", "Collapse code");
+      collapseButton.setAttribute("aria-expanded", "true");
+      collapseButton.addEventListener("click", () => {
+        const collapsed = wrapper.classList.toggle("is-collapsed");
+        collapseButton.textContent = collapsed ? "Expand" : "Collapse";
+        collapseButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        collapseButton.setAttribute("aria-label", collapsed ? "Expand code" : "Collapse code");
+      });
+      const saveButton = createCodeAction("Save", "Save code to a file");
+      saveButton.addEventListener("click", () => {
+        saveCodeFile(code, normalizedLanguage);
+        saveButton.textContent = "Saved";
+        saveButton.dataset.state = "success";
+        setTimeout(() => {
+          saveButton.textContent = "Save";
+          delete saveButton.dataset.state;
+        }, 1600);
+      });
+      const copyButton = createCodeAction("Copy", "Copy code");
+      copyButton.addEventListener("click", async () => {
+        const copied = await copyCodeToClipboard(code);
+        if (!copied) return;
+        copyButton.textContent = "Copied";
+        copyButton.dataset.state = "success";
+        setTimeout(() => {
+          copyButton.textContent = "Copy";
+          delete copyButton.dataset.state;
+        }, 1600);
+      });
+      actions.append(collapseButton, saveButton, copyButton);
+      header.append(label, actions);
       const pre = document.createElement("pre");
       const codeNode = document.createElement("code");
-      codeNode.textContent = code;
+      codeNode.dataset.language = normalizedLanguage;
+      appendHighlightedCode(codeNode, code, normalizedLanguage);
       pre.appendChild(codeNode);
-      wrapper.appendChild(label);
-      wrapper.appendChild(pre);
+      wrapper.append(header, pre);
       return wrapper;
+    }
+
+    function createCodeAction(text, ariaLabel) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "code-action";
+      button.textContent = text;
+      button.setAttribute("aria-label", ariaLabel);
+      return button;
+    }
+
+    function normalizeCodeLanguage(language) {
+      const value = String(language || "code").trim().toLowerCase();
+      const aliases = {
+        csharp: "c#",
+        cs: "c#",
+        js: "javascript",
+        jsx: "javascript",
+        node: "javascript",
+        nodejs: "javascript",
+        py: "python",
+        sh: "bash",
+        shell: "bash",
+        ts: "typescript",
+        tsx: "typescript",
+      };
+      return aliases[value] || value || "code";
+    }
+
+    function appendHighlightedCode(codeNode, code, language) {
+      const lines = String(code || "").replace(/\\r\\n/g, "\\n").split("\\n");
+      for (const line of lines) {
+        const lineNode = document.createElement("span");
+        lineNode.className = "code-line";
+        appendHighlightedLine(lineNode, line, language);
+        codeNode.appendChild(lineNode);
+      }
+    }
+
+    function appendHighlightedLine(parent, line, language) {
+      const hashComments = ["bash", "python", "ruby", "yaml"].includes(language);
+      const pattern = hashComments
+        ? /("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|#.*$|\\b\\d+(?:\\.\\d+)?\\b|\\b[A-Za-z_$][\\w$]*\\b)/g
+        : /("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|\\/\\/.*$|\\b\\d+(?:\\.\\d+)?\\b|\\b[A-Za-z_$][\\w$]*\\b)/g;
+      let cursor = 0;
+      for (const match of line.matchAll(pattern)) {
+        if (match.index > cursor) parent.appendChild(document.createTextNode(line.slice(cursor, match.index)));
+        const token = match[0];
+        const className = syntaxTokenClass(token, line, match.index, language);
+        if (className) {
+          const span = document.createElement("span");
+          span.className = className;
+          span.textContent = token;
+          parent.appendChild(span);
+        } else {
+          parent.appendChild(document.createTextNode(token));
+        }
+        cursor = match.index + token.length;
+      }
+      if (cursor < line.length) parent.appendChild(document.createTextNode(line.slice(cursor)));
+      if (!line.length) parent.appendChild(document.createTextNode(" "));
+    }
+
+    const codeKeywords = new Set([
+      "abstract", "async", "await", "boolean", "break", "case", "catch", "char", "class",
+      "const", "continue", "def", "default", "do", "double", "else", "enum", "export",
+      "extends", "final", "finally", "float", "for", "from", "function", "if", "implements",
+      "import", "in", "instanceof", "int", "interface", "let", "long", "new", "package",
+      "private", "protected", "public", "return", "short", "static", "super", "switch", "this",
+      "throw", "throws", "try", "typeof", "var", "void", "while", "with", "yield",
+    ]);
+
+    function syntaxTokenClass(token, line, index, language) {
+      if (token.startsWith("//") || token.startsWith("#")) return "syntax-comment";
+      if (/^["']/.test(token)) return "syntax-string";
+      if (/^\\d/.test(token)) return "syntax-number";
+      if (/^(true|false|null|undefined|None|True|False)$/.test(token)) return "syntax-literal";
+      if (codeKeywords.has(token)) return "syntax-keyword";
+      if (/^\\s*\\(/.test(line.slice(index + token.length))) return "syntax-function";
+      return "";
+    }
+
+    async function copyCodeToClipboard(code) {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(String(code || ""));
+          return true;
+        }
+        const textarea = document.createElement("textarea");
+        textarea.value = String(code || "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand("copy");
+        textarea.remove();
+        return copied;
+      } catch {
+        return false;
+      }
+    }
+
+    function saveCodeFile(code, language) {
+      const extensions = {
+        bash: "sh", "c#": "cs", "c++": "cpp", css: "css", go: "go", html: "html",
+        java: "java", javascript: "js", json: "json", kotlin: "kt", php: "php",
+        python: "py", ruby: "rb", rust: "rs", sql: "sql", swift: "swift",
+        typescript: "ts", xml: "xml", yaml: "yaml",
+      };
+      const extension = extensions[language] || "txt";
+      const blob = new Blob([String(code || "")], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "mundusx-code." + extension;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     }
 
     function looksLikeCode(text) {
