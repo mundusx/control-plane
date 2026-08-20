@@ -4918,12 +4918,17 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
             ExpectedOutputFormat::Text
         };
 
+    let compact_low_complexity_coding = task_type == RequestTaskType::Coding
+        && complexity == RequestComplexity::Low
+        && prompt_chars <= 800
+        && !complete_code_prompt
+        && request.max_tokens.unwrap_or_default() <= 2_048;
     let context_size = if prompt_chars > 4_000 || request.max_tokens.unwrap_or_default() > 4_096 {
         ContextSize::Large
     } else if prompt_chars > 800
         || complete_code_prompt
         || detailed_research_prompt
-        || request.max_tokens.unwrap_or_default() > 1_024
+        || (!compact_low_complexity_coding && request.max_tokens.unwrap_or_default() > 1_024)
     {
         ContextSize::Medium
     } else {
@@ -7699,6 +7704,27 @@ mod tests {
         assert_eq!(classification.task_type, RequestTaskType::Coding);
         assert_eq!(classification.complexity, RequestComplexity::Medium);
         assert_eq!(classification.output_format, ExpectedOutputFormat::Code);
+    }
+
+    #[test]
+    fn compact_low_complexity_code_keeps_small_context_with_a_1536_token_output_budget() {
+        let mut request =
+            classification_request("give me a code in java magic square 3x3");
+        request.stream = true;
+        request.max_tokens = Some(1_536);
+
+        let classification = classify_job_request(&request);
+
+        assert_eq!(classification.task_type, RequestTaskType::Coding);
+        assert_eq!(classification.complexity, RequestComplexity::Low);
+        assert_eq!(classification.context_size, ContextSize::Small);
+
+        let mut state = ready_state();
+        let record = state.submit_job(request, "2".to_string());
+        assert_eq!(
+            ControlPlaneState::required_model_capability(&record, None),
+            "small_coding"
+        );
     }
 
     #[test]
