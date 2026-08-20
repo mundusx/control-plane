@@ -260,7 +260,9 @@ test("composes chat system prompts from selected markdown skills", () => {
   assert.doesNotMatch(prompt, /# Code Generation Skill/);
   assert.doesNotMatch(prompt, /# Chunk Planner Skill/);
   assert.doesNotMatch(prompt, /# Verifier Skill/);
-  assert.match(prompt, /Start with the complete compilable source file in a fenced code block/);
+  assert.match(prompt, /Before the code, give a concise helpful introduction/);
+  assert.match(prompt, /begin with a brief useful introduction of one to three short sentences/);
+  assert.match(prompt, /After the introduction, provide the complete compilable source file/);
   assert.match(prompt, /Do not introduce the answer with a rewritten version of the user's request/);
   assert.match(prompt, /Answer only what the user asked/);
   assert.doesNotMatch(prompt, /Use the Atlas persona/);
@@ -1003,7 +1005,8 @@ test("uses larger token budgets for complete program prompts", async () => {
   assert.equal(calls[3].execution_mode, "decompose");
   assert.equal(calls[4].execution_mode, "auto");
   assert.match(calls[1].system_prompt, /complete compilable source file/i);
-  assert.match(calls[1].system_prompt, /start the answer with the complete compilable source file/i);
+  assert.match(calls[1].system_prompt, /begin with a brief useful introduction/i);
+  assert.match(calls[1].system_prompt, /After the introduction, provide the complete compilable source file/i);
   assert.match(calls[1].system_prompt, /explanation, compile notes, or usage notes after the code/i);
   assert.match(calls[1].system_prompt, /Do not use ellipses, TODO comments, placeholder bodies/i);
 });
@@ -4381,14 +4384,15 @@ test("removes assistant preambles before rendering chat output", () => {
   assert.doesNotMatch(output, /MundusX Chat|Certainly|Here is/i);
 });
 
-test("removes expanded request leakage before complete-code answers", () => {
+test("removes expanded request leakage while preserving a helpful code introduction", () => {
   const output = cleanChatOutput(
     "I want to understand how it works. Please provide a complete source code, including all necessary imports, classes, methods, file operations, menu/input handling, and error handling. I want to see how the magic square works and how it is generated. Please provide a detailed explanation of the code. Certainly! Below is a complete Java program that generates a 3x3 magic square. A magic square is a square grid of numbers where each row adds to the same value.\n```java\nimport java.util.Scanner;\npublic class MagicSquare {\n  public static void main(String[] args) {}\n}\n```",
   );
 
-  assert.match(output, /^```java/);
+  assert.match(output, /^This solution generates a 3x3 magic square/);
+  assert.match(output, /A magic square is a square grid/);
   assert.match(output, /```java[\s\S]*public class MagicSquare/);
-  assert.doesNotMatch(output, /I want to understand|Please provide|Certainly|Below is|A magic square is/i);
+  assert.doesNotMatch(output, /I want to understand|Please provide|Certainly|Below is/i);
 });
 
 test("removes prompt-completion leakage and duplicate fenced code blocks", () => {
@@ -4399,6 +4403,16 @@ test("removes prompt-completion leakage and duplicate fenced code blocks", () =>
   assert.match(output, /^```python/);
   assert.equal((output.match(/```python/g) || []).length, 1);
   assert.doesNotMatch(output, /I want to use it|Can you provide me/i);
+});
+
+test("preserves concise solution-specific context before fenced code", () => {
+  const output = cleanChatOutput(
+    "A 3x3 magic square uses the numbers 1 through 9 so every row, column, and diagonal totals 15. This implementation returns the classic Lo Shu arrangement.\n\n```javascript\nfunction magicSquare() {\n  return [[8, 1, 6], [3, 5, 7], [4, 9, 2]];\n}\n```",
+  );
+
+  assert.match(output, /^A 3x3 magic square/);
+  assert.match(output, /This implementation returns the classic Lo Shu arrangement/);
+  assert.match(output, /```javascript[\s\S]*function magicSquare/);
 });
 
 test("preserves complete control-plane code assemblies before prose cleanup", () => {
@@ -4451,7 +4465,7 @@ test("removes orphaned prompt continuation fragments before answers", () => {
   assert.doesNotMatch(output, /^matrix\.|The program should/i);
 });
 
-test("removes pre-code narration so complete program answers start with code", () => {
+test("removes instruction-like pre-code narration while keeping the fenced program", () => {
   const output = cleanChatOutput(
     "The program should take a 3x3 matrix as input, perform the magic square operation on it, and then print the result. The explanation is below.\n```java\npublic class MagicSquare {\n  public static void main(String[] args) {}\n}\n```\nThis code reads input and prints the result.",
   );
