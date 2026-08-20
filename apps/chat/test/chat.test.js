@@ -6,6 +6,7 @@ import {
   buildCompressedHistoryContext,
   buildRelevantHistoryContext,
   buildChatSystemPrompt,
+  canLiveStreamChatTurn,
   cleanChatOutput,
   configFromEnv,
   deleteChatConversation,
@@ -36,10 +37,12 @@ import {
   redactSensitiveText,
   selectChatSkills,
   requiresValidatedStreaming,
+  relayControlPlaneOpenAiStream,
   submitChatJob,
   submitChatTurn,
   submitOpenAiChatCompletion,
   streamOpenAiChatCompletion,
+  streamChatTurn,
   waitForChatJob,
 } from "../src/main.js";
 import {
@@ -175,6 +178,12 @@ test("renders a usable chat page", () => {
   assert.match(html, /function fetchConversationMessages/);
   assert.match(html, /function appendCachedConversationTurn/);
   assert.match(html, /function readCachedConversation/);
+  assert.match(html, /\/api\/chat\/stream/);
+  assert.match(html, /response\.body\.getReader/);
+  assert.match(html, /renderStreamingJob/);
+  const embeddedScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
+  assert.equal(embeddedScripts.length, 1);
+  assert.doesNotThrow(() => new Function(embeddedScripts[0]));
   assert.match(html, /await loadHistoryItem\(item\)/);
   assert.match(html, /conversationCachePrefix/);
   assert.match(html, /\/api\/conversations\//);
@@ -3293,50 +3302,142 @@ test("OpenAI adapter correlates its stable id and OpenWebUI chat id", async () =
   assert.deepEqual(conversationWrites.map((entry) => entry.role), ["user", "assistant"]);
 });
 
-test("streaming adapter opens SSE before the upstream answer is ready", async () => {
-  let releaseWeather;
-  const pendingWeather = new Promise((resolve) => { releaseWeather = resolve; });
+test("ordinary Chat-U requests use live streaming while validated and tool routes fall back", () => {
+  assert.equal(canLiveStreamChatTurn({ message: "Explain distributed systems.", toolMode: false }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "Create a complete Java program", toolMode: false }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), false);
+});
+
+test("streaming relay exposes the first upstream delta before completion", async () => {
+  const encoder = new TextEncoder();
+  let releaseStream;
+  const upstreamBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        'data: {"id":"chatcmpl-live","choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n' +
+        'data: {"id":"chatcmpl-live","choices":[{"delta":{"content":"Alpha "},"finish_reason":null}]}\n\n',
+      ));
+      releaseStream = () => {
+        controller.enqueue(encoder.encode(
+          'data: {"id":"chatcmpl-live","choices":[{"delta":{"content":"Beta"},"finish_reason":null}]}\n\n' +
+          'data: {"id":"chatcmpl-live","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+          'data: [DONE]\n\n',
+        ));
+        controller.close();
+      };
+    },
+  });
   const events = [];
   const response = {
     writableEnded: false,
     writeHead: (status, headers) => events.push({ type: "headers", status, headers }),
     flushHeaders: () => events.push({ type: "flush" }),
-    write: (value) => events.push({ type: "write", value }),
+    write: (value) => {
+      events.push({ type: "write", value });
+      return true;
+    },
     end(value) {
       this.writableEnded = true;
       events.push({ type: "end", value });
     },
   };
-  const streaming = streamOpenAiChatCompletion(
+  const streaming = relayControlPlaneOpenAiStream(
     response,
-    { stream: true, messages: [{ role: "user", content: "Weather in Warsaw?" }] },
+    { stream: true, messages: [{ role: "user", content: "Explain this." }] },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    async () => pendingWeather,
+    async () => new Response(upstreamBody, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream", "X-MundusX-Stream-Mode": "live-delta" },
+    }),
   );
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(events[0].type, "headers");
-  assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "ordinary");
+  assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "live-delta");
   assert.equal(events[0].headers["X-Accel-Buffering"], "no");
   assert.equal(events[1].type, "flush");
   assert.equal(events[2].type, "write");
-  const startChunk = JSON.parse(events[2].value.replace(/^data: /, "").trim());
-  assert.match(startChunk.id, /^chatcmpl-/);
-  assert.equal(startChunk.choices[0].delta.role, "assistant");
-  assert.equal(startChunk.choices[0].delta.content, "");
-  releaseWeather(jsonResponse({
-    nearest_area: [{ areaName: [{ value: "Warsaw" }], country: [{ value: "Poland" }] }],
-    current_condition: [{
-      weatherDesc: [{ value: "Sunny" }], temp_C: "24", temp_F: "75", FeelsLikeC: "23", FeelsLikeF: "73", humidity: "40", windspeedKmph: "8",
-    }],
-  }));
-  await streaming;
-  assert.match(events.at(-1).value, /data: \[DONE\]/);
-  const finalFrames = events
-    .filter((event) => event.type === "write" && event.value.startsWith("data: "))
-    .flatMap((event) => event.value.trim().split("\n\n"))
-    .filter((frame) => frame.startsWith("data: {") )
-    .map((frame) => JSON.parse(frame.slice(6)));
-  assert.ok(finalFrames.length >= 2);
-  assert.ok(finalFrames.every((frame) => frame.id === startChunk.id));
+  assert.match(events[2].value, /"content":"Alpha "/);
+  assert.equal(response.writableEnded, false);
+  releaseStream();
+  const result = await streaming;
+  assert.equal(result.content, "Alpha Beta");
+  assert.equal(result.completionId, "chatcmpl-live");
+  assert.equal(result.finishReason, "stop");
+  assert.equal(events.at(-1).type, "end");
+});
+
+test("validated Chat-U requests return an explicit polling fallback without upstream work", async () => {
+  const events = [];
+  const response = {
+    writeHead: (status, headers) => events.push({ status, headers }),
+    end: (value) => events.push({ value }),
+  };
+  let fetchCalled = false;
+  await streamChatTurn(
+    response,
+    { message: "Return a complete Java program", toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      fetchCalled = true;
+      throw new Error("unexpected fetch");
+    },
+  );
+  assert.equal(fetchCalled, false);
+  assert.equal(events[0].status, 409);
+  assert.deepEqual(JSON.parse(events[1].value), { fallback: true, reason: "validated_or_tool_routed" });
+});
+
+test("live Chat-U stream preserves history and persists one user and assistant turn", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  let upstreamRequest = null;
+  const response = {
+    writableEnded: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    write: () => true,
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/v1/conversations/conversation-live/messages")) {
+      writes.push(JSON.parse(init.body));
+      return jsonResponse({ stored: true });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      upstreamRequest = JSON.parse(init.body);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"id":"chatcmpl-browser","choices":[{"delta":{"content":"Streamed answer."},"finish_reason":null}]}\n\n' +
+            'data: {"id":"chatcmpl-browser","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+            'data: [DONE]\n\n',
+          ));
+          controller.close();
+        },
+      }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "Explain distributed systems briefly.",
+      historyMessages: [{ role: "user", content: "Earlier question" }, { role: "assistant", content: "Earlier answer" }],
+      conversationId: "conversation-live",
+      toolMode: false,
+      voicePersona: "atlas",
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(result.content, "Streamed answer.");
+  assert.equal(upstreamRequest.stream, true);
+  assert.deepEqual(upstreamRequest.messages.map((entry) => entry.role), ["system", "user", "assistant", "user"]);
+  assert.deepEqual(writes.map((entry) => entry.role), ["user", "assistant"]);
+  assert.equal(writes[1].jobId, "chatcmpl-browser");
 });
 
 test("Hermes model discovery intentionally hides heterogeneous implementation details", () => {

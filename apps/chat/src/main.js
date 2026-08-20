@@ -1897,39 +1897,10 @@ export function page(config = configFromEnv()) {
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
-        const created = await fetch("/api/chat/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, executionMode: "auto", voicePersona: selectedAssistantPersona(), toolMode: webSearchEnabled, conversationId }),
-        });
-        const submitted = await readApiPayload(created, "chat request failed");
-        if (!created.ok) {
-          throw new Error(submitted.error || "chat request failed");
+        const streamed = await tryLiveChatTurn(pending, message, conversationId);
+        if (!streamed) {
+          await runPolledChatTurn(pending, message, conversationId);
         }
-
-        renderPendingJob(pending, submitted);
-        let payload = submitted;
-        while (!["completed", "failed"].includes(payload.status)) {
-          await sleep(1500);
-          const pollParams = new URLSearchParams({
-            conversationId,
-            prompt: message,
-          });
-          const polled = await fetch(
-            "/api/chat/jobs/" + encodeURIComponent(submitted.job_id) + "?" + pollParams.toString(),
-          );
-          payload = await readApiPayload(polled, "chat poll failed");
-          if (!polled.ok) {
-            throw new Error(payload.error || "chat poll failed");
-          }
-          renderPendingJob(pending, payload);
-        }
-
-        if (payload.status === "failed") {
-          throw new Error(payload.error || "MundusX job failed");
-        }
-
-        renderCompletedJob(pending, payload, conversationId);
         syncNetworkRuntimeStatus(true);
       } catch (error) {
         pending.className = "message error";
@@ -1942,6 +1913,140 @@ export function page(config = configFromEnv()) {
         promptEl.focus();
       }
     });
+
+    async function runPolledChatTurn(pending, message, conversationId) {
+      const created = await fetch("/api/chat/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, executionMode: "auto", voicePersona: selectedAssistantPersona(), toolMode: webSearchEnabled, conversationId }),
+      });
+      const submitted = await readApiPayload(created, "chat request failed");
+      if (!created.ok) {
+        throw new Error(submitted.error || "chat request failed");
+      }
+
+      renderPendingJob(pending, submitted);
+      let payload = submitted;
+      while (!["completed", "failed"].includes(payload.status)) {
+        await sleep(1500);
+        const pollParams = new URLSearchParams({
+          conversationId,
+          prompt: message,
+        });
+        const polled = await fetch(
+          "/api/chat/jobs/" + encodeURIComponent(submitted.job_id) + "?" + pollParams.toString(),
+        );
+        payload = await readApiPayload(polled, "chat poll failed");
+        if (!polled.ok) {
+          throw new Error(payload.error || "chat poll failed");
+        }
+        renderPendingJob(pending, payload);
+      }
+
+      if (payload.status === "failed") {
+        throw new Error(payload.error || "MundusX job failed");
+      }
+
+      renderCompletedJob(pending, payload, conversationId);
+    }
+
+    async function tryLiveChatTurn(pending, message, conversationId) {
+      const historyMessages = readCachedConversation(conversationId)
+        .slice(0, -1)
+        .map((turn) => ({ role: turn.role, content: turn.content }))
+        .filter((turn) => turn.content);
+      const response = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          historyMessages,
+          executionMode: "auto",
+          voicePersona: selectedAssistantPersona(),
+          toolMode: webSearchEnabled,
+          conversationId,
+        }),
+      });
+      if (response.status === 409) return false;
+      if (!response.ok) {
+        const payload = await readApiPayload(response, "chat stream failed");
+        throw new Error(payload.error || "chat stream failed");
+      }
+      if (!response.body?.getReader) {
+        throw new Error("This browser cannot read the MundusX response stream");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let output = "";
+      let completionId = null;
+      let finishReason = null;
+      let sawDone = false;
+
+      const consumeEvent = (eventText) => {
+        const data = eventText
+          .split(/\\r?\\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\\n")
+          .trim();
+        if (!data) return;
+        if (data === "[DONE]") {
+          sawDone = true;
+          return;
+        }
+        const chunk = JSON.parse(data);
+        if (chunk.error) throw new Error(chunk.error.message || "MundusX stream failed");
+        completionId = completionId || chunk.id || null;
+        const choice = chunk.choices?.[0];
+        const delta = String(choice?.delta?.content || "");
+        if (delta) {
+          output += delta;
+          renderStreamingJob(pending, output, completionId);
+        }
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+      };
+
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        buffer += decoder.decode(next.value, { stream: true });
+        const events = buffer.split(/\\r?\\n\\r?\\n/);
+        buffer = events.pop() || "";
+        events.forEach(consumeEvent);
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) consumeEvent(buffer);
+      if (!sawDone) throw new Error("MundusX stream ended before completion");
+      if (!output.trim()) throw new Error("MundusX completed without assistant output");
+
+      renderCompletedJob(pending, {
+        status: "completed",
+        output,
+        job_id: completionId,
+        execution_mode: "single",
+        finish_reason: finishReason || "stop",
+        stream_mode: response.headers.get("x-mundusx-stream-mode") || "live-delta",
+      }, conversationId);
+      return true;
+    }
+
+    function renderStreamingJob(node, output, completionId) {
+      const body = node.querySelector(".message-body");
+      body.textContent = "";
+      const live = document.createElement("section");
+      live.className = "streaming-response";
+      live.setAttribute("aria-live", "polite");
+      appendRichMessage(live, output);
+      body.appendChild(live);
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = completionId ? "job " + completionId + " / streaming" : "Streaming...";
+      body.appendChild(meta);
+      setStatus("working", "Streaming");
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
 
     async function readApiPayload(response, fallbackMessage) {
       const text = await response.text();
@@ -3062,6 +3167,10 @@ export function createServerApp(config = configFromEnv()) {
         const result = await submitChatTurn(body, config);
         return sendJson(response, 200, result);
       }
+      if (request.method === "POST" && url.pathname === "/api/chat/stream") {
+        const body = await readJsonBody(request);
+        return streamChatTurn(response, body, config);
+      }
       if (request.method === "POST" && url.pathname === "/api/chat/jobs") {
         const body = await readJsonBody(request);
         const result = await submitChatJob(body, config);
@@ -3181,12 +3290,84 @@ export function requiresValidatedStreaming(message, body = {}) {
     /\b(?:json|json schema|structured output|xml|yaml|sql schema|csv)\b/i.test(text);
 }
 
+export function canLiveStreamChatTurn(body = {}) {
+  const message = String(body?.message ?? "").trim();
+  if (!message || detectClientMetadataTask(message) || requiresValidatedStreaming(message, body)) {
+    return false;
+  }
+  const toolMessage = stripToolModePrefix(message);
+  if (
+    isMultiIntentPlanningCandidate(toolMessage) ||
+    isNodeExpressMysqlCustomerCrudRequest(toolMessage) ||
+    fetchMathJobForPrompt(toolMessage) ||
+    extractWeatherLocation(toolMessage) ||
+    looksLikeWeatherRequest(toolMessage.toLowerCase()) ||
+    extractAssistantIdentityTopic(toolMessage) ||
+    extractMundusXKnowledgeTopic(toolMessage) ||
+    extractCurrentOfficeQuery(toolMessage) ||
+    extractFactualSummaryTopic(toolMessage)
+  ) {
+    return false;
+  }
+  return !(isToolModeEnabled(body) && needsGrounding(toolMessage));
+}
+
+export async function streamChatTurn(response, body, config = configFromEnv(), fetchImpl = fetch) {
+  const rawMessage = String(body?.message ?? "").trim();
+  if (!rawMessage) {
+    throw httpError(400, "message is required");
+  }
+  if (!canLiveStreamChatTurn(body)) {
+    return sendJson(response, 409, { fallback: true, reason: "validated_or_tool_routed" });
+  }
+
+  const message = redactSensitiveText(rawMessage);
+  const conversationId = String(body?.conversationId ?? "").trim() || null;
+  const historyMessages = Array.isArray(body?.historyMessages)
+    ? body.historyMessages
+      .map((entry) => ({ role: normalizeOpenAiRole(entry?.role), content: openAiMessageText(entry?.content) }))
+      .filter((entry) => entry.content)
+      .slice(-20)
+    : [];
+  if (conversationId) {
+    await appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
+      console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
+    });
+  }
+
+  const requestBody = {
+    stream: true,
+    messages: [
+      { role: "system", content: buildChatSystemPrompt(message, body?.voicePersona) },
+      ...historyMessages,
+      { role: "user", content: message },
+    ],
+    temperature: typeof body?.temperature === "number" ? body.temperature : 0.2,
+    top_p: typeof body?.topP === "number" ? body.topP : 0.9,
+    max_tokens: inferMaxTokens(message, body?.maxTokens),
+  };
+
+  return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
+    onComplete: async ({ content, completionId }) => {
+      if (!conversationId || !content) return;
+      await appendConversationMessage(conversationId, "assistant", content, config, fetchImpl, {
+        jobId: completionId,
+      }).catch((error) => {
+        console.warn(`[conversation] failed to persist streaming assistant message: ${error.message}`);
+      });
+    },
+  });
+}
+
 export async function streamOpenAiChatCompletion(response, body, config, fetchImpl = fetch) {
   const lastUserMessage = Array.isArray(body?.messages)
     ? [...body.messages].reverse().find((entry) => normalizeOpenAiRole(entry?.role) === "user")
     : null;
   const message = openAiMessageText(lastUserMessage?.content);
   const buffered = requiresValidatedStreaming(message, body);
+  if (!buffered) {
+    return relayControlPlaneOpenAiStream(response, body, config, fetchImpl);
+  }
   const completionId = normalizeOpenAiCompletionId(body?.request_id);
   const created = Math.floor(Date.now() / 1000);
   startOpenAiStream(response, buffered ? "validated" : "ordinary");
@@ -3210,6 +3391,101 @@ export async function streamOpenAiChatCompletion(response, body, config, fetchIm
     response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
   } finally {
     clearInterval(heartbeat);
+  }
+}
+
+export async function relayControlPlaneOpenAiStream(
+  response,
+  body,
+  config = configFromEnv(),
+  fetchImpl = fetch,
+  hooks = {},
+) {
+  const headers = {
+    Accept: "text/event-stream",
+    "Content-Type": "application/json",
+    ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
+  };
+  const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ ...body, stream: true }),
+  });
+  if (!upstream.ok) {
+    const text = await upstream.text();
+    throw httpError(upstream.status, text.trim().slice(0, 240) || `control plane returned ${upstream.status}`);
+  }
+  if (!upstream.body?.getReader) {
+    throw httpError(502, "control plane did not return a readable event stream");
+  }
+
+  const upstreamMode = upstream.headers?.get?.("x-mundusx-stream-mode") || "live-delta";
+  startOpenAiStream(response, upstreamMode);
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let parseBuffer = "";
+  let content = "";
+  let completionId = null;
+  let finishReason = null;
+  let sawDone = false;
+
+  const inspectEvent = (eventText) => {
+    const data = eventText
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!data) return;
+    if (data === "[DONE]") {
+      sawDone = true;
+      return;
+    }
+    try {
+      const chunk = JSON.parse(data);
+      if (chunk?.error) return;
+      completionId ||= String(chunk?.id ?? "").trim() || null;
+      const choice = chunk?.choices?.[0];
+      const delta = String(choice?.delta?.content ?? "");
+      if (delta) content += delta;
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+    } catch {
+      // Preserve and relay unknown upstream events without treating them as content.
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      if (!text) continue;
+      response.write(text);
+      parseBuffer += text;
+      const events = parseBuffer.split(/\r?\n\r?\n/);
+      parseBuffer = events.pop() ?? "";
+      events.forEach(inspectEvent);
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      response.write(tail);
+      parseBuffer += tail;
+    }
+    if (parseBuffer.trim()) inspectEvent(parseBuffer);
+    if (!sawDone) {
+      throw new Error("control-plane stream ended before [DONE]");
+    }
+    response.end();
+    await hooks.onComplete?.({ content, completionId, finishReason });
+    return { content, completionId, finishReason };
+  } catch (error) {
+    if (!response.writableEnded) {
+      const payload = { error: { message: error.message ?? "stream failed", type: "mundusx_stream_error" } };
+      response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
+    }
+    return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
+  } finally {
+    reader.releaseLock?.();
   }
 }
 
