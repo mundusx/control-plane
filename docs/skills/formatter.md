@@ -10,5 +10,5 @@ Rules:
 - If the answer contains code, use a fenced Markdown code block with the correct language tag.
 - If the answer contains math, keep equations readable and finish every expression.
 - If the model starts by continuing the user's prompt, remove that continuation and start with the answer.
-- Keep explanations after code when the user asks for source code.
+- For source-code answers, allow a brief solution-specific introduction before the code and keep longer explanations after it.
 

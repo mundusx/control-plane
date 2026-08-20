@@ -44,7 +44,7 @@ const CHAT_SKILLS = {
   formatter: loadMarkdownSkill("formatter.md", "# Formatter Skill\nAnswer directly and cleanly."),
   personaAtlas: loadMarkdownSkill("persona-atlas.md", "# Atlas Persona Skill\nMy name is Atlas."),
   translation: loadMarkdownSkill("translation.md", "# Translation Skill\nReturn only the translated text."),
-  code: loadMarkdownSkill("code.md", "# Code Generation Skill\nReturn complete code first."),
+  code: loadMarkdownSkill("code.md", "# Code Generation Skill\nGive brief useful context, then complete code."),
   math: loadMarkdownSkill("math.md", "# Math Skill\nReturn the final answer first."),
   weather: loadMarkdownSkill("weather.md", "# Weather Skill\nUse the weather tool for weather."),
   facts: loadMarkdownSkill("facts.md", "# Facts Skill\nUse grounded factual sources."),
@@ -8542,8 +8542,10 @@ export function buildChatSystemPrompt(message = "", voicePersona = "atlas") {
   }
   if (looksLikeCompleteProgramRequest(lower)) {
     rules.push(
-      "For complete code requests, start the answer with the complete compilable source file in a fenced code block.",
-      "Put any explanation, compile notes, or usage notes after the code, never before the code.",
+      "For complete code requests, begin with a brief useful introduction of one to three short sentences or a compact list explaining what the solution does, its key approach, and any important assumption.",
+      "Keep that introduction specific and informative; do not use greetings, praise, generic filler, or rewrite the user's request.",
+      "After the introduction, provide the complete compilable source file in a fenced code block.",
+      "Put longer explanation, compile notes, or usage notes after the code.",
       "Do not use ellipses, TODO comments, placeholder bodies, omitted implementation notes, or pseudo-code.",
       "Include all imports, classes, methods, file operations, menu/input handling, and error handling needed for the requested program.",
       "Format source code as readable multiline code with conventional indentation; do not compress an entire program onto one line.",
@@ -9191,7 +9193,8 @@ function cleanChatOutputInternal(value, emptyFallback) {
   // cleanup is safe; otherwise prose leak filters can interpret source tokens
   // as instructions and truncate an already-completed program.
   output = stripPreCodeNarration(output);
-  const fencedOutput = /^```/.test(output);
+  output = cleanPreCodeIntroduction(output);
+  const fencedOutput = /```/.test(output);
   if (!fencedOutput) {
     output = stripExpandedRequestLeak(output);
     output = stripAssistantPreamble(output);
@@ -9213,7 +9216,7 @@ function cleanChatOutputInternal(value, emptyFallback) {
   output = output.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
   if (isExplanationOnlyCodeAnswer(output)) {
-    return "MundusX returned an explanation instead of source code. Please retry the request; complete-code jobs must return the code first, with any explanation after it.";
+    return "MundusX returned an explanation instead of source code. Please retry the request; complete-code jobs must include the full source in a fenced code block after the brief introduction.";
   }
 
   if (isIncompletePlaceholderCode(output)) {
@@ -9378,18 +9381,52 @@ function stripPreCodeNarration(value) {
   const fenceIndex = output.search(/```(?:[a-zA-Z0-9_+#.-]{0,24})?\s*\n/);
   const fenceLead = fenceIndex > 0 ? output.slice(0, fenceIndex).trim() : "";
   const assembledArtifactHeading = /^Complete runnable implementation\s*$/i.test(fenceLead);
-  if (fenceIndex > 0 && (assembledArtifactHeading || isDisposableCodeLeadIn(fenceLead))) {
+  if (fenceIndex > 0 && assembledArtifactHeading) {
     return output.slice(fenceIndex).trim();
   }
 
-  const rawCodeMatch = output.match(
-    /\b(?:import\s+java\.|public\s+class\s+\w+|#include\s*<|using\s+System\s*;|def\s+\w+\s*\(|function\s+\w+\s*\(|const\s+\w+\s*=)/,
-  );
-  if (rawCodeMatch?.index > 0 && isDisposableCodeLeadIn(output.slice(0, rawCodeMatch.index))) {
-    return output.slice(rawCodeMatch.index).trim();
+  if (!/```/.test(output)) {
+    const rawCodeMatch = output.match(
+      /\b(?:import\s+java\.|public\s+class\s+\w+|#include\s*<|using\s+System\s*;|def\s+\w+\s*\(|function\s+\w+\s*\(|const\s+\w+\s*=)/,
+    );
+    if (rawCodeMatch?.index > 0 && isDisposableCodeLeadIn(output.slice(0, rawCodeMatch.index))) {
+      return output.slice(rawCodeMatch.index).trim();
+    }
   }
 
   return output;
+}
+
+function cleanPreCodeIntroduction(value) {
+  const output = String(value ?? "").trim();
+  const fenceIndex = output.search(/```(?:[a-zA-Z0-9_+#.-]{0,24})?\s*\n/);
+  if (fenceIndex <= 0) {
+    return output;
+  }
+
+  let introduction = output.slice(0, fenceIndex).trim();
+  introduction = stripExpandedRequestLeak(introduction);
+  introduction = stripAssistantPreamble(introduction);
+  introduction = stripOrphanedPromptContinuation(introduction);
+  introduction = stripEmbeddedRoleLeak(introduction);
+  introduction = stripUnaskedWhoExpansion(introduction);
+  introduction = stripPromptInstructionLeak(introduction);
+  introduction = stripSkillPromptLeak(introduction);
+  introduction = stripSystemPromptLeak(introduction);
+  introduction = collapseRepeatedOpeningClause(introduction).trim();
+  if (
+    /\b(?:i (?:also )?want|can you|please provide|the program should|this program should|the explanation is below)\b/i.test(introduction)
+  ) {
+    introduction = "";
+  } else {
+    introduction = introduction.replace(
+      /^(?:Java|JavaScript|TypeScript|Python|C\+\+|C#|Go|Rust|Ruby|PHP|Kotlin|Swift)\s+(?:program|code|implementation)\s+that\b/i,
+      "This solution",
+    );
+  }
+
+  const fencedAnswer = output.slice(fenceIndex).trim();
+  return introduction ? `${introduction}\n\n${fencedAnswer}` : fencedAnswer;
 }
 
 function isDisposableCodeLeadIn(value) {
