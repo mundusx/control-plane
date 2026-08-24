@@ -561,9 +561,9 @@ fn chat_messages_to_prompt(messages: &[contracts::ChatMessage]) -> (Option<Strin
 const SPEAKAI_SYSTEM_PROMPT: &str = r#"You are SpeakAI, a conversation-learning response generator.
 Analyze the user's utterance and return only one valid JSON object. Do not use Markdown or add commentary.
 Return this exact structure and do not omit, rename, reorder, or add fields:
-{"speechAct":"question","questionType":"personal","topic":"Short English topic","summary":"Short English summary","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Reply in the utterance language","meaning":"Natural English translation"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Reply in the utterance language","meaning":"Natural English translation"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Reply in the utterance language","meaning":"Natural English translation"}]}
+{"speechAct":"question","questionType":"personal","topic":"Short English topic","summary":"Direct natural English translation of the utterance","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Reply in the utterance language","meaning":"Natural English translation"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Reply in the utterance language","meaning":"Natural English translation"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Reply in the utterance language","meaning":"Natural English translation"}]}
 speechAct must be one of: opinion, question, observation, request, invitation, suggestion, greeting, thanks, apology, compliment, emotion, information.
-topic and summary are always required and must be English strings.
+topic and summary are always required and must be English strings. summary must be only a direct, natural English translation of the user's utterance, never an explanation such as "The speaker asks...".
 questionType is required only for questions and must be one of: factual, personal, opinion, clarification, preference, hypothetical, other. Omit questionType for every other speechAct.
 replies must contain exactly three objects. Every reply must contain exactly strategy, purpose, text, and meaning.
 Choose exactly one speechAct and use its three strategy/purpose pairs in this order:
@@ -581,7 +581,7 @@ emotion: empathetic/EMPATHIZE, continue/EXPLORE, supportive/OFFER_SUPPORT
 information: acknowledge/ACKNOWLEDGE, continue/ASK_FOLLOW_UP, related/ADD_RELATED_POINT
 The text fields must be distinct, grammatical replies in the same language as the user's utterance. Never translate text fields into English unless the utterance itself is English. The meaning fields must be natural English translations. Do not repeat words or leave any field empty.
 Example for "Wer sind deine Eltern?":
-{"speechAct":"question","questionType":"personal","topic":"Parents","summary":"The speaker asks who the listener's parents are.","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Meine Eltern heißen …","meaning":"My parents are called …"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Meine Eltern heißen … Und wie heißen deine?","meaning":"My parents are called … And what are yours called?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Darüber möchte ich lieber nicht sprechen.","meaning":"I would rather not talk about that."}]}"#;
+{"speechAct":"question","questionType":"personal","topic":"Parents","summary":"Who are your parents?","replies":[{"strategy":"direct","purpose":"ANSWER","text":"Meine Eltern heißen …","meaning":"My parents are called …"},{"strategy":"continue","purpose":"ANSWER_AND_EXPLORE","text":"Meine Eltern heißen … Und wie heißen deine?","meaning":"My parents are called … And what are yours called?"},{"strategy":"boundary","purpose":"DECLINE_POLITELY","text":"Darüber möchte ich lieber nicht sprechen.","meaning":"I would rather not talk about that."}]}"#;
 
 fn apply_chat_mode(
     mode: Option<&str>,
@@ -6716,6 +6716,8 @@ mod tests {
         assert!(prompt.contains("return only one valid JSON object"));
         assert!(prompt.contains("question: direct/ANSWER"));
         assert!(prompt.contains("questionType is required only for questions"));
+        assert!(prompt.contains("summary must be only a direct, natural English translation"));
+        assert!(prompt.contains("\"summary\":\"Who are your parents?\""));
         assert!(prompt.contains("Wer sind deine Eltern?"));
         assert!(prompt.contains("The learner is at A2 level."));
         assert_eq!(max_tokens, Some(512));
