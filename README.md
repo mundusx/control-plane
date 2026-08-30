@@ -19,6 +19,11 @@ See the component READMEs for local development details:
 
 For the complete cross-repo setup path from local control-plane startup to CLI/node-agent registration, job submission, dashboard verification, and active release-channel follow-ups, see `docs/operator-howto.md`.
 
+Versioned execution contracts:
+
+- `docs/capability-fabric-v1-contract.md` defines node eligibility, routing, and reservation authority.
+- `docs/coding-harness-v1-contract.md` defines isolated repository execution, tools, validation, evidence, and approval boundaries.
+
 ---
 
 ## Environment variables
