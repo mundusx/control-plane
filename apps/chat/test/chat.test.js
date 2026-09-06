@@ -3692,6 +3692,16 @@ test("Hermes router context stays within the model gateway budget and preserves 
   assert.ok(bounded.serializedTools.length <= 12_000);
   assert.doesNotThrow(() => JSON.parse(bounded.serializedTools));
   assert.ok(JSON.parse(bounded.serializedTools).length > 0);
+
+  const emergency = boundedHermesRouterContext("s".repeat(30_000), transcript, tools, {
+    systemLimit: 2_000,
+    transcriptLimit: 3_000,
+    toolLimit: 5_000,
+  });
+  assert.ok(emergency.systemContext.length < 2_100);
+  assert.ok(JSON.stringify(emergency.transcript).length < 3_100);
+  assert.ok(emergency.serializedTools.length <= 5_000);
+  assert.doesNotThrow(() => JSON.parse(emergency.serializedTools));
 });
 
 test("Open WebUI stream starts with a standard stable assistant identity chunk", () => {

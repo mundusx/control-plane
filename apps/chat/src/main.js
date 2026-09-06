@@ -6034,7 +6034,7 @@ export async function submitOpenAiChatCompletion(body, config = configFromEnv(),
 export async function submitHermesToolCompletion(body, config = configFromEnv(), fetchImpl = fetch) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   if (!messages.length) throw httpError(400, "messages must be a non-empty array");
-  const tools = body.tools
+  const tools = (Array.isArray(body?.tools) ? body.tools : [])
     .filter((entry) => entry?.type === "function" && entry?.function?.name)
     .map((entry) => ({
       name: String(entry.function.name),
@@ -6057,36 +6057,43 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
       tool_call_id: entry?.tool_call_id || undefined,
       name: entry?.name || undefined,
     }));
-  const { systemContext, transcript, serializedTools } = boundedHermesRouterContext(
-    fullSystemContext,
-    fullTranscript,
-    tools,
-  );
-  const routerPrompt = [
-    "Continue the agent conversation below. Select exactly one next action.",
-    "Return only one JSON object in one of these forms:",
-    '{"kind":"tool","name":"an_available_tool_name","arguments":{}}',
-    '{"kind":"final","content":"the final response"}',
-    "Use kind=tool whenever filesystem or command work is still required. Never claim work succeeded before tool results prove it.",
-    "Available tools:",
-    serializedTools,
-    "Conversation:",
-    JSON.stringify(transcript),
-  ].join("\n");
-  const turn = {
-    message: routerPrompt,
-    systemPrompt: systemContext || "You are the model inside a bounded coding agent.",
-    internalAgentTurn: true,
-    executionMode: "single",
-    toolMode: false,
-    structuredOutput: false,
-    skipQualityValidation: true,
-    maxTokens: Math.min(Number(body?.max_tokens || 2048), 4096),
-    temperature: 0,
-  };
   let result;
   let lastError;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const recoveryProfiles = [
+    { systemLimit: 8_000, transcriptLimit: 12_000, toolLimit: 12_000 },
+    { systemLimit: 4_000, transcriptLimit: 6_000, toolLimit: 8_000 },
+    { systemLimit: 2_000, transcriptLimit: 3_000, toolLimit: 5_000 },
+  ];
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const profile = recoveryProfiles[Math.min(attempt, recoveryProfiles.length - 1)];
+    const { systemContext, transcript, serializedTools } = boundedHermesRouterContext(
+      fullSystemContext,
+      fullTranscript,
+      tools,
+      profile,
+    );
+    const routerPrompt = [
+      "Continue the agent conversation below. Select exactly one next action.",
+      "Return only one JSON object in one of these forms:",
+      '{"kind":"tool","name":"an_available_tool_name","arguments":{}}',
+      '{"kind":"final","content":"the final response"}',
+      "Use kind=tool whenever filesystem or command work is still required. Never claim work succeeded before tool results prove it.",
+      "Available tools:",
+      serializedTools,
+      "Conversation:",
+      JSON.stringify(transcript),
+    ].join("\n");
+    const turn = {
+      message: routerPrompt,
+      systemPrompt: systemContext || "You are the model inside a bounded coding agent.",
+      internalAgentTurn: true,
+      executionMode: "single",
+      toolMode: false,
+      structuredOutput: false,
+      skipQualityValidation: true,
+      maxTokens: Math.min(Number(body?.max_tokens || 2048), 4096),
+      temperature: 0,
+    };
     try {
       result = await submitChatTurn({ ...turn, requestId: attempt ? undefined : body?.request_id }, config, fetchImpl);
       if (String(result?.status || "").toLowerCase() === "completed" || !isRetryableHermesModelFailure(result?.error)) break;
@@ -6095,7 +6102,7 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
       lastError = error;
       if (!isRetryableHermesModelFailure(error?.message)) throw error;
     }
-    if (attempt < 2) await delay(750 * (attempt + 1));
+    if (attempt < 4) await delay(Math.min(4_000, 750 * (attempt + 1)));
   }
   if (!result && lastError) throw lastError;
   if (String(result?.status || "").toLowerCase() !== "completed") {
@@ -6141,13 +6148,16 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
   };
 }
 
-export function boundedHermesRouterContext(systemContext, transcript, tools) {
+export function boundedHermesRouterContext(systemContext, transcript, tools, limits = {}) {
+  const systemLimit = positiveInteger(limits.systemLimit, 8_000);
+  const transcriptLimit = positiveInteger(limits.transcriptLimit, 12_000);
+  const toolLimit = positiveInteger(limits.toolLimit, 12_000);
   const boundText = (value, limit) => {
     const text = String(value || "");
     return text.length <= limit ? text : text.slice(0, limit) + "\n[older context omitted]";
   };
   const boundedTranscript = [];
-  let transcriptBudget = 12_000;
+  let transcriptBudget = transcriptLimit;
   for (const entry of [...transcript].reverse()) {
     if (transcriptBudget <= 0) break;
     const content = boundText(entry?.content, Math.min(4_000, transcriptBudget));
@@ -6162,7 +6172,7 @@ export function boundedHermesRouterContext(systemContext, transcript, tools) {
     description: boundText(tool?.description, 300),
   }));
   let serializedTools = JSON.stringify(compactTools);
-  if (serializedTools.length > 12_000) {
+  if (serializedTools.length > toolLimit) {
     const minimalTools = compactTools.map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -6178,13 +6188,13 @@ export function boundedHermesRouterContext(systemContext, transcript, tools) {
     const fittedTools = [];
     for (const tool of minimalTools) {
       const candidate = JSON.stringify([...fittedTools, tool]);
-      if (candidate.length > 12_000) break;
+      if (candidate.length > toolLimit) break;
       fittedTools.push(tool);
     }
     serializedTools = JSON.stringify(fittedTools);
   }
   return {
-    systemContext: boundText(systemContext, 8_000),
+    systemContext: boundText(systemContext, systemLimit),
     transcript: boundedTranscript,
     serializedTools,
   };
