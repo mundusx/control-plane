@@ -117,6 +117,62 @@ test("Google callback accepts the verified_email compatibility claim", async () 
   assert.equal(identity.email, "user@example.com");
 });
 
+test("Google callback accepts a matching verified-email ID token when userinfo omits the claim", async () => {
+  const client = { async query() { return { rows: [] }; }, release() {} };
+  const pool = {
+    async query() { return { rowCount: 1, rows: [{ code_verifier: "verifier", redirect_path: "/projects" }] }; },
+    async connect() { return client; },
+  };
+  const claims = Buffer.from(JSON.stringify({
+    iss: "https://accounts.google.com",
+    aud: "google-client",
+    exp: Math.floor(Date.now() / 1000) + 300,
+    sub: "google-subject",
+    email: "User@Example.com",
+    email_verified: true,
+  })).toString("base64url");
+  const store = new PostgresAuthStore({
+    googleClientId: "google-client", googleClientSecret: "google-secret", publicOrigin: "https://chat.mundusx.ai",
+  }, {
+    pool,
+    fetchImpl: async (url) => String(url).includes("/token")
+      ? { ok: true, async json() { return { access_token: "access", id_token: `header.${claims}.signature` }; } }
+      : { ok: true, async json() { return { sub: "google-subject", email: "user@example.com", name: "Example User" }; } },
+  });
+  let identity;
+  store.upsertIdentity = async (_client, value) => { identity = value; return "user-id"; };
+  store.createSession = async () => {};
+  assert.equal(await store.finishGoogle(new URLSearchParams({ state: "state", code: "code" }), {}), "/projects");
+  assert.equal(identity.email, "user@example.com");
+});
+
+test("Google callback rejects a verified ID-token claim that does not match userinfo", async () => {
+  const pool = {
+    async query() { return { rowCount: 1, rows: [{ code_verifier: "verifier", redirect_path: "/" }] }; },
+    async connect() { throw new Error("must not create a session"); },
+  };
+  const claims = Buffer.from(JSON.stringify({
+    iss: "https://accounts.google.com",
+    aud: "different-client",
+    exp: Math.floor(Date.now() / 1000) + 300,
+    sub: "google-subject",
+    email: "user@example.com",
+    email_verified: true,
+  })).toString("base64url");
+  const store = new PostgresAuthStore({
+    googleClientId: "google-client", googleClientSecret: "google-secret", publicOrigin: "https://chat.mundusx.ai",
+  }, {
+    pool,
+    fetchImpl: async (url) => String(url).includes("/token")
+      ? { ok: true, async json() { return { access_token: "access", id_token: `header.${claims}.signature` }; } }
+      : { ok: true, async json() { return { sub: "google-subject", email: "user@example.com" }; } },
+  });
+  await assert.rejects(
+    store.finishGoogle(new URLSearchParams({ state: "state", code: "code" }), {}),
+    (error) => error.statusCode === 403 && /verified email/.test(error.message),
+  );
+});
+
 test("GitHub provider requires a valid 32-byte encryption key", () => {
   const config = authConfigFromEnv({
     MUNDUSX_GITHUB_CLIENT_ID: "client",
