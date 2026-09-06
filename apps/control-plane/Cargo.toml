@@ -2,7 +2,7 @@
 name = "opengpu-control-plane"
 version = "0.1.0"
 edition = "2021"
-description = "NovusX control plane"
+description = "MundusX control plane"
 license = "UNLICENSED"
 
 [dependencies]
@@ -13,8 +13,12 @@ native-tls = "0.2"
 postgres = "0.19"
 postgres-native-tls = "0.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 subtle = "2.6"
+regex = "1.11"
+ureq = { version = "2.12", features = ["json"] }

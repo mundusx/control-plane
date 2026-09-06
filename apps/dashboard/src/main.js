@@ -11,13 +11,13 @@ const installReleaseBaseUrl =
 const installCommand = `RELEASE_BASE_URL=${installReleaseBaseUrl} bash install.sh`;
 const controlPlaneLogoUrl =
   process.env.MUNDUSX_CONTROL_PLANE_LOGO_URL ??
-  "https://github.com/user-attachments/assets/792dd24e-0253-43ef-9b88-d298189ca568";
+  `${controlPlaneUrl}/assets/mundusx-logo.png`;
 
 const sampleCompletedJobs = [
   {
     id: "job_8f21f3",
     model: "HuggingFaceTB/SmolLM2-135M-Instruct",
-    prompt: "Summarize NovusX in one sentence.",
+    prompt: "Summarize MundusX in one sentence.",
     status: "completed",
     credits: 0.5,
     duration: "11s",
@@ -95,6 +95,55 @@ const escapeHtml = (input) =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+
+const redactSensitiveText = (input) => {
+  let text = String(input ?? "");
+  if (!text) {
+    return text;
+  }
+  text = text.replace(
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    "[REDACTED_PRIVATE_KEY]",
+  );
+  text = text.replace(/\bsk-proj-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_OPENAI_KEY]");
+  text = text.replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_OPENAI_KEY]");
+  text = text.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]");
+  text = text.replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]");
+  text = text.replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED_JWT]");
+  text = text.replace(
+    /\b(api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|password|secret)\b(\s*[:=]\s*)(["']?)([^\s"',;]{8,})\3/gi,
+    (_match, key, separator) => `${key}${separator}[REDACTED_SECRET]`,
+  );
+  text = text.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b/gi, "Bearer [REDACTED_TOKEN]");
+  return text;
+};
+
+const displayText = (input) => redactSensitiveText(input);
+
+const privateTextSummary = (input, label = "Content") => {
+  const text = String(input ?? "").trim();
+  if (!text) {
+    return `${label} not recorded`;
+  }
+  return `${label} hidden for privacy (${text.length} chars)`;
+};
+
+const privatePayloadForDisplay = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((entry) => privatePayloadForDisplay(entry));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, rawValue]) => {
+      if (/^(prompt|system_prompt|message|content|output|response|result|final_output)$/i.test(key)) {
+        return [key, privateTextSummary(rawValue, key)];
+      }
+      return [key, privatePayloadForDisplay(rawValue)];
+    }),
+  );
+};
 
 async function fetchJson(path) {
   const controller = new AbortController();
@@ -196,6 +245,72 @@ function renderCounts(snapshot = {}) {
         </div>`,
     )
     .join("");
+}
+
+function plannerTone(planner = {}) {
+  if (!planner.enabled) return "amber";
+  if (planner.reachable && !planner.fallback_mode) return "green";
+  return "red";
+}
+
+function plannerStatusLabel(planner = {}) {
+  if (!planner.enabled) return "disabled";
+  if (planner.reachable) return String(planner.status ?? "ready");
+  return "degraded";
+}
+
+function plannerModeLabel(planner = {}) {
+  if (!planner.enabled) return "Rust fallback";
+  return planner.fallback_mode ? "Rust fallback" : "external planner";
+}
+
+function plannerLatencyLabel(planner = {}) {
+  return planner.latency_ms == null ? "n/a" : `${planner.latency_ms} ms`;
+}
+
+function renderPlannerCommandTile(planner = {}) {
+  const tone = plannerTone(planner);
+  const provider = String(planner.provider ?? (planner.enabled ? "unknown" : "rust"));
+  const configured = planner.url_configured ? "configured" : "not configured";
+
+  return `
+    <div class="planner-command-tile" data-tone="${tone}">
+      <div>
+        <div class="planner-command-kicker">Planner Service</div>
+        <div class="planner-command-state">${escapeHtml(plannerStatusLabel(planner))}</div>
+      </div>
+      <div class="planner-command-badges">
+        ${badge(plannerModeLabel(planner), planner.fallback_mode ? "amber" : "green")}
+      </div>
+      <div class="planner-command-meta">
+        <span>provider: ${escapeHtml(provider)}</span>
+        <span>latency: ${escapeHtml(plannerLatencyLabel(planner))}</span>
+        <span>${configured}</span>
+      </div>
+      <a class="planner-command-link" href="${escapeHtml(controlPlaneUrl)}/v1/planner/status" target="_blank" rel="noreferrer">
+        Open planner status
+      </a>
+    </div>`;
+}
+
+function renderPlannerService(planner = {}) {
+  const tone = plannerTone(planner);
+  const status = plannerStatusLabel(planner);
+  const provider = String(planner.provider ?? (planner.enabled ? "unknown" : "rust"));
+  const latency = plannerLatencyLabel(planner);
+  const mode = plannerModeLabel(planner);
+  const error = planner.last_error
+    ? `<div class="meta">last error: ${escapeHtml(planner.last_error)}</div>`
+    : `<div class="meta">last error: none</div>`;
+
+  return `
+    <div class="card motion-lift">
+      <div class="card-label">Planner Service</div>
+      <div class="statusline">${badge(status, tone)} ${badge(mode, planner.fallback_mode ? "amber" : "green")}</div>
+      <div class="meta">provider: ${escapeHtml(provider)} • latency: ${escapeHtml(latency)}</div>
+      <div class="meta">configured: ${planner.url_configured ? "yes" : "no"}${planner.url ? ` • ${escapeHtml(planner.url)}` : ""}</div>
+      ${error}
+    </div>`;
 }
 
 function runtimeReadiness(node = {}) {
@@ -432,6 +547,9 @@ function renderNodes(nodes = []) {
     return `<div class="empty">No nodes are registered yet.</div>`;
   }
 
+  const visibleNodes = nodes.slice(0, 25);
+  const hiddenCount = Math.max(0, nodes.length - visibleNodes.length);
+
   return `
     <div class="table">
       <div class="thead">
@@ -443,7 +561,7 @@ function renderNodes(nodes = []) {
         <div>Power</div>
         <div>Updated</div>
       </div>
-      ${nodes
+      ${visibleNodes
         .map((node) => {
           const cap = capStatus(node);
           const override = overrideStatus(node);
@@ -485,7 +603,12 @@ function renderNodes(nodes = []) {
             </div>`;
         })
         .join("")}
-    </div>`;
+    </div>
+    ${
+      hiddenCount
+        ? `<div class="meta" style="margin-top: 12px;">Showing the first ${formatCount(visibleNodes.length)} of ${formatCount(nodes.length)} nodes.</div>`
+        : ""
+    }`;
 }
 
 function backendTone(backend) {
@@ -505,15 +628,33 @@ function jobStatusTone(status) {
   switch (String(status ?? "").toLowerCase()) {
     case "completed":
       return "green";
+    case "running":
+      return "amber";
     case "assigned":
       return "amber";
     case "failed":
       return "red";
     case "queued":
+    case "ready":
       return "blue";
+    case "waiting":
+      return "neutral";
     default:
       return "neutral";
   }
+}
+
+function graphProgress(graph) {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const completed = nodes.filter((node) => String(node.status ?? "").toLowerCase() === "completed").length;
+  const running = nodes.filter((node) => String(node.status ?? "").toLowerCase() === "running").length;
+  return { nodes, completed, running, total: nodes.length };
+}
+
+function graphProgressUnit(job) {
+  const strategy = String(job?.plan?.strategy ?? job?.graph?.strategy ?? "");
+  const hasFinalSynthesis = Boolean(job?.graph?.final_node_id);
+  return strategy === "sectioned_research" && !hasFinalSynthesis ? "sections" : "chunks";
 }
 
 function renderJobs(jobs = []) {
@@ -533,12 +674,17 @@ function renderJobs(jobs = []) {
           const submittedAt = job.submitted_at ?? "unknown";
           const assignedAt = job.assigned_at ?? "pending";
           const completedAt = job.completed_at ?? "pending";
-          const prompt = String(job.prompt ?? "").trim();
+          const prompt = privateTextSummary(job.prompt, "Request");
           const classification = job.classification ?? {};
           const plan = job.plan ?? {};
           const planJobs = Array.isArray(plan.jobs) ? plan.jobs : [];
           const planSummary = String(plan.summary ?? "No planner summary recorded.");
           const planStrategy = String(plan.strategy ?? "unplanned");
+          const executionMode = String(job.execution_mode ?? "single");
+          const graphExecution = job.graph_execution_enabled ? "enabled" : "advisory";
+          const graph = graphProgress(job.graph);
+          const graphUnit = graphProgressUnit(job);
+          const graphNodes = graph.nodes.length ? graph.nodes : planJobs;
           return `
             <article class="job-card">
               <div class="job-head">
@@ -548,6 +694,8 @@ function renderJobs(jobs = []) {
                 </div>
                 <div class="job-badges">
                   ${badge(String(job.status ?? "unknown"), jobStatusTone(job.status))}
+                  ${badge(`mode ${executionMode}`, executionMode === "single" ? "neutral" : "blue")}
+                  ${badge(`graph ${graphExecution}`, job.graph_execution_enabled ? "green" : "neutral")}
                   ${badge(`preferred ${preferredBackend}`, backendTone(preferredBackend))}
                   ${badge(`assigned ${assignedBackend}`, backendTone(assignedBackend))}
                 </div>
@@ -579,11 +727,23 @@ function renderJobs(jobs = []) {
                 </div>
                 <div>${escapeHtml(planSummary)}</div>
                 ${
-                  planJobs.length
-                    ? `<ol>${planJobs
+                  job.graph_execution_enabled && graph.total
+                    ? `<div class="job-progress"><strong>${graph.completed}/${graph.total} ${graphUnit} complete</strong><span>${graph.running} running</span></div>`
+                    : planJobs.length
+                      ? `<div class="job-progress"><strong>planned only</strong><span>not chunk-executed</span></div>`
+                    : ""
+                }
+                ${
+                  graphNodes.length
+                    ? `<ol>${graphNodes
                         .map(
-                          (plannedJob) =>
-                            `<li><strong>${escapeHtml(plannedJob.name ?? plannedJob.id ?? "planned job")}</strong><span>${escapeHtml(plannedJob.required_output ?? plannedJob.responsibility ?? "")}</span></li>`,
+                          (plannedJob) => {
+                            const status = String(plannedJob.status ?? "planned");
+                            const blockedBy = Array.isArray(plannedJob.blocked_by) && plannedJob.blocked_by.length
+                              ? `Blocked by ${plannedJob.blocked_by.join(", ")}`
+                              : "";
+                            return `<li><div class="job-plan-row"><strong>${escapeHtml(plannedJob.name ?? plannedJob.id ?? "planned job")}</strong>${badge(status, jobStatusTone(status))}</div><span>${escapeHtml(blockedBy || plannedJob.required_output || plannedJob.responsibility || "")}</span></li>`;
+                          },
                         )
                         .join("")}</ol>`
                     : ""
@@ -614,7 +774,7 @@ function renderEvents(events = []) {
                 <span class="meta">${escapeHtml(event.created_at ?? "unknown")}</span>
               </div>
               <div class="meta">node ${escapeHtml(event.node_id ?? "n/a")} • job ${escapeHtml(event.job_id ?? "n/a")}</div>
-              <pre>${escapeHtml(JSON.stringify(event.payload ?? {}, null, 2))}</pre>
+              <pre>${escapeHtml(JSON.stringify(privatePayloadForDisplay(event.payload ?? {}), null, 2))}</pre>
             </div>`,
         )
         .join("")}
@@ -660,7 +820,7 @@ function renderCredits(credits = {}) {
                 device ${escapeHtml(entry.device_id ?? "n/a")} • job ${escapeHtml(entry.job_id ?? "n/a")} •
                   ${formatCredits(entry.amount ?? 0)} ${escapeHtml(entry.currency ?? "credits")}
               </div>
-                ${entry.metadata ? `<pre>${escapeHtml(JSON.stringify(entry.metadata, null, 2))}</pre>` : ""}
+                ${entry.metadata ? `<pre>${escapeHtml(JSON.stringify(privatePayloadForDisplay(entry.metadata), null, 2))}</pre>` : ""}
               </div>`,
           )
           .join("")}
@@ -734,7 +894,7 @@ function renderContributorJobHistoryPage(requestUrl, basePath = "/portal") {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NovusX Contributor Job History</title>
+    <title>MundusX Contributor Job History</title>
     <style>
       :root {
         color-scheme: light;
@@ -990,7 +1150,7 @@ function renderContributorJobHistoryPage(requestUrl, basePath = "/portal") {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Contributor Portal</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Contributor Portal</div>
         <div class="badge">localhost preview • job history</div>
       </div>
 
@@ -1001,7 +1161,7 @@ function renderContributorJobHistoryPage(requestUrl, basePath = "/portal") {
             <h1>${escapeHtml(pageTitle)}</h1>
             <div class="sub">
               Completed jobs live on their own page so the list can scale with search and pagination.
-              This view is contributor-first: every row shows the prompt, credits earned, duration,
+              This view is contributor-first: every row shows request metadata, credits earned, duration,
               and the node that completed the work.
             </div>
             <div class="statusline">
@@ -1054,7 +1214,7 @@ function renderContributorJobHistoryPage(requestUrl, basePath = "/portal") {
                         </div>
                         <span class="pill pill-green">${escapeHtml(job.status)}</span>
                       </div>
-                      <div class="job-prompt">${escapeHtml(job.prompt)}</div>
+                      <div class="job-prompt">${escapeHtml(privateTextSummary(job.prompt, "Request"))}</div>
                       <div class="job-meta">
                         <div class="meta-box">
                           <div class="meta-label">Credits</div>
@@ -1129,7 +1289,7 @@ function renderContributorPortal() {
   const sampleEvents = [
     {
       title: "job_completed",
-      detail: "prompt: summarize NovusX in one sentence",
+      detail: "prompt: summarize MundusX in one sentence",
       time: "2m ago",
     },
     {
@@ -1149,7 +1309,7 @@ function renderContributorPortal() {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NovusX Contributor Portal</title>
+    <title>MundusX Contributor Portal</title>
     <style>
       :root {
         color-scheme: light;
@@ -1546,6 +1706,15 @@ function renderContributorPortal() {
         gap: 10px;
         flex-wrap: wrap;
       }
+      .brand-logo-action {
+        display: inline-flex;
+        border-radius: 8px;
+        text-decoration: none;
+      }
+      .brand-logo-action:focus-visible {
+        outline: 0;
+        box-shadow: var(--focus-ring);
+      }
       a {
         color: var(--blue);
         text-decoration: none;
@@ -1581,7 +1750,7 @@ function renderContributorPortal() {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Contributor Portal</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Contributor Portal</div>
         <div class="badge">localhost preview • contributor view</div>
       </div>
 
@@ -1738,7 +1907,7 @@ function renderInstallPage(installPath = "/install") {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NovusX Install</title>
+    <title>MundusX Install</title>
     <style>
       :root {
         color-scheme: light;
@@ -2018,14 +2187,14 @@ function renderInstallPage(installPath = "/install") {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Install</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Install</div>
         <div class="chip">localhost preview • Mac-first</div>
       </div>
 
       <div class="hero">
         <div>
           <div class="eyebrow">Local-first install flow</div>
-          <h1>Install NovusX on your Mac</h1>
+          <h1>Install MundusX on your Mac</h1>
           <div class="sub">
             A simple, Mac-first install page for Apple Silicon. Copy one command, verify the
             signed release binary when available, then move straight into onboarding, cap
@@ -2236,15 +2405,16 @@ function renderInstallPage(installPath = "/install") {
 </html>`;
 }
 
-export function page({ health, status, events, credits, error }) {
+function legacyPage({ health, status, events, credits, planner, error }) {
   const snapshot = status ?? health?.snapshot ?? {};
+  const plannerService = planner ?? status?.planner_service ?? health?.planner_service ?? {};
   const storageSource = health?.storage_source ?? snapshot.storage_source ?? "unknown";
   const supabase = health?.supabase ?? "unknown";
   const deployFingerprint = health?.deploy_fingerprint ?? null;
   const isHealthy = health?.status === "ok";
   const activeJobs = Number(snapshot.queued_job_count ?? 0) + Number(snapshot.assigned_job_count ?? 0);
   const nodeCount = Array.isArray(snapshot.nodes) ? snapshot.nodes.length : 0;
-  const title = "NovusX Dashboard";
+  const title = "MundusX Dashboard";
 
   return `<!doctype html>
 <html lang="en">
@@ -2269,8 +2439,38 @@ export function page({ health, status, events, credits, error }) {
         --amber: #edb73f;
         --red: #ff5c63;
         --blue: #62d3ff;
+        --motion-fast: 140ms ease;
+        --motion-medium: 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+        --focus-ring: 0 0 0 3px rgba(98, 211, 255, 0.28);
       }
       * { box-sizing: border-box; }
+      a:focus-visible {
+        outline: 0;
+        box-shadow: var(--focus-ring);
+      }
+      .motion-lift {
+        transition:
+          transform var(--motion-medium),
+          border-color var(--motion-fast),
+          box-shadow var(--motion-medium),
+          background var(--motion-fast);
+        will-change: transform;
+      }
+      .motion-lift:hover,
+      .motion-lift:focus-visible {
+        transform: translateY(-2px);
+        border-color: var(--line-strong);
+        box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+      }
+      .motion-glow {
+        transition: transform var(--motion-medium), filter var(--motion-medium);
+        will-change: transform;
+      }
+      .motion-glow:hover,
+      .motion-glow:focus-visible {
+        transform: scale(1.04);
+        filter: drop-shadow(0 0 20px rgba(237, 183, 63, 0.34));
+      }
       body {
         margin: 0;
         min-height: 100vh;
@@ -2532,6 +2732,24 @@ export function page({ health, status, events, credits, error }) {
       .job-plan li {
         margin-top: 6px;
       }
+      .job-plan-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .job-progress {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .job-progress span {
+        color: var(--muted);
+      }
       .job-plan span {
         display: block;
         color: var(--muted);
@@ -2645,6 +2863,52 @@ export function page({ health, status, events, credits, error }) {
         text-transform: uppercase;
         letter-spacing: 0.06em;
       }
+      .planner-command-tile {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        margin-top: 14px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--amber);
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.22);
+      }
+      .planner-command-tile[data-tone="green"] { border-left-color: var(--green); }
+      .planner-command-tile[data-tone="red"] { border-left-color: var(--red); }
+      .planner-command-kicker {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .planner-command-state {
+        margin-top: 4px;
+        color: var(--text);
+        font-size: 22px;
+        font-weight: 800;
+        text-transform: capitalize;
+      }
+      .planner-command-badges {
+        align-self: start;
+        white-space: nowrap;
+      }
+      .planner-command-meta {
+        display: grid;
+        gap: 4px;
+        grid-column: 1 / -1;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .planner-command-link {
+        grid-column: 1 / -1;
+        width: fit-content;
+        color: var(--blue);
+        font-size: 12px;
+        font-weight: 700;
+        text-decoration: none;
+      }
       @media (max-width: 1200px) {
         .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .m-series-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2666,6 +2930,20 @@ export function page({ health, status, events, credits, error }) {
         .job-grid { grid-template-columns: 1fr; }
         .hero-metrics { grid-template-columns: 1fr; }
       }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+        .motion-lift:hover,
+        .motion-lift:focus-visible,
+        .motion-glow:hover,
+        .motion-glow:focus-visible {
+          transform: none;
+        }
+      }
     </style>
   </head>
   <body>
@@ -2673,7 +2951,12 @@ export function page({ health, status, events, credits, error }) {
       <div class="hero">
         <div class="topline command-center">
           <div>
-            <div class="brand"><img class="brand-mark" alt="NovusX control plane logo" src="${escapeHtml(controlPlaneLogoUrl)}" /> NovusX Command Deck</div>
+            <div class="brand">
+              <a class="brand-logo-action motion-glow" href="${escapeHtml(appUrl)}/#nodes" aria-label="Show first 25 nodes and clear filters">
+                <img class="brand-mark" alt="Control plane logo" src="${escapeHtml(controlPlaneLogoUrl)}" />
+              </a>
+              Command Deck
+            </div>
             <h1>Control Plane</h1>
             <div class="sub">High-signal operator view for fleet readiness, routing pressure, policy gates, storage source, and audit trail.</div>
             <div class="statusline">
@@ -2683,26 +2966,40 @@ export function page({ health, status, events, credits, error }) {
               ${deployFingerprint ? badge(`deploy: ${deployFingerprint}`, "neutral") : ""}
             </div>
           </div>
-          <div class="hero-panel" aria-label="Control plane command summary">
+          <div class="hero-panel motion-lift" aria-label="Control plane command summary">
             <div class="hero-panel-title">Live command summary</div>
             <div class="hero-metrics">
               <div class="hero-metric"><strong>${formatCount(nodeCount)}</strong><span>nodes</span></div>
               <div class="hero-metric"><strong>${formatCount(activeJobs)}</strong><span>active jobs</span></div>
               <div class="hero-metric"><strong>${formatCount(snapshot.job_events ?? 0)}</strong><span>events</span></div>
             </div>
-            <div class="links" style="margin-top: 14px;">
-              <a href="${escapeHtml(appUrl)}/docs" target="_blank" rel="noreferrer">docs</a>
-              <a href="${escapeHtml(appUrl)}/install" target="_blank" rel="noreferrer">install</a>
-              <a href="${escapeHtml(controlPlaneUrl)}" target="_blank" rel="noreferrer">control plane</a>
-              <a href="${escapeHtml(controlPlaneUrl)}/v1/status" target="_blank" rel="noreferrer">status json</a>
-              <a href="${escapeHtml(controlPlaneUrl)}/v1/job-events" target="_blank" rel="noreferrer">job events</a>
-              <a href="${escapeHtml(controlPlaneUrl)}/health" target="_blank" rel="noreferrer">health</a>
+            ${renderPlannerCommandTile(plannerService)}
+            <div class="link-group" aria-label="Operator pages">
+              <div class="link-group-label">Operator pages</div>
+              <div class="links">
+                <a href="${escapeHtml(appUrl)}/docs" target="_blank" rel="noreferrer">docs</a>
+                <a href="${escapeHtml(appUrl)}/install" target="_blank" rel="noreferrer">install</a>
+                <a href="${escapeHtml(controlPlaneUrl)}" target="_blank" rel="noreferrer">control plane</a>
+              </div>
+            </div>
+            <div class="link-group link-diagnostics" aria-label="Developer diagnostics">
+              <div class="link-group-label">Developer diagnostics</div>
+              <div class="links">
+                <a href="${escapeHtml(controlPlaneUrl)}/v1/status" target="_blank" rel="noreferrer">status json</a>
+                <a href="${escapeHtml(controlPlaneUrl)}/v1/planner/status" target="_blank" rel="noreferrer">planner</a>
+                <a href="${escapeHtml(controlPlaneUrl)}/v1/job-events" target="_blank" rel="noreferrer">job events</a>
+                <a href="${escapeHtml(controlPlaneUrl)}/health" target="_blank" rel="noreferrer">health</a>
+              </div>
             </div>
           </div>
         </div>
 
         <div class="grid">
           ${renderCounts(snapshot)}
+        </div>
+
+        <div class="grid">
+          ${renderPlannerService(plannerService)}
         </div>
 
         ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
@@ -2716,7 +3013,7 @@ export function page({ health, status, events, credits, error }) {
         <div class="section-body">${renderMSeriesOperatorSummary(snapshot)}</div>
       </div>
 
-      <div class="section">
+      <div class="section" id="nodes">
         <div class="section-head">
           <h2 class="section-title">Nodes</h2>
           <div class="meta">${formatCount(snapshot.nodes?.length ?? 0)} registered</div>
@@ -2744,6 +3041,103 @@ export function page({ health, status, events, credits, error }) {
     </div>
   </body>
 </html>`;
+}
+
+const uiIcon = (name, size = 20) => {
+  const paths = {
+    overview: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5M9 20v-6h6v6"/>',
+    nodes: '<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>',
+    jobs: '<path d="M4 8h16M4 16h16"/><circle cx="8" cy="8" r="2"/><circle cx="16" cy="16" r="2"/>',
+    credits: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>',
+    registry: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v5h4M9 12h6M9 16h6"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/>',
+    shield: '<path d="M12 3 5 6v5c0 4.6 2.9 8.4 7 10 4.1-1.6 7-5.4 7-10V6z"/><path d="m9 12 2 2 4-5"/>',
+    briefcase: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V4h8v3M3 12h18"/>',
+    network: '<circle cx="12" cy="5" r="3"/><circle cx="5" cy="18" r="3"/><circle cx="19" cy="18" r="3"/><path d="m10.5 7.6-4 7.8m7-7.8 4 7.8M8 18h8"/>',
+    check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
+    warning: '<path d="M12 3 2.8 20h18.4z"/><path d="M12 9v5m0 3h.01"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/>',
+    cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/>',
+  };
+  return `<svg aria-hidden="true" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? paths.overview}</svg>`;
+};
+
+const sparkline = (wide = false) =>
+  `<svg class="sparkline" viewBox="0 0 ${wide ? 180 : 110} 42" preserveAspectRatio="none" aria-hidden="true"><path d="${wide ? "M2 35 C12 3 19 40 30 23 S45 36 54 11 S68 40 78 19 S93 30 104 17 S121 30 133 12 S150 26 178 7" : "M2 36 C12 9 18 39 29 23 S44 31 55 10 S70 36 82 19 S95 30 108 7"}"/></svg>`;
+
+function renderTopology(nodes = []) {
+  const visible = nodes.slice(0, 8);
+  const slots = [
+    ["50%", "12%"], ["70%", "25%"], ["82%", "51%"], ["70%", "76%"],
+    ["50%", "84%"], ["30%", "76%"], ["18%", "51%"], ["30%", "25%"],
+  ];
+  const items = Array.from({ length: 8 }, (_, index) => {
+    const node = visible[index];
+    const state = String(node?.state ?? "offline").toLowerCase();
+    const label = node?.hostname ?? node?.node_id ?? `slot ${index + 1}`;
+    return `<div class="topology-node ${node ? "is-live" : ""}" style="left:${slots[index][0]};top:${slots[index][1]}">
+      <span class="node-icon">${uiIcon("registry", 18)}</span>
+      <strong>${escapeHtml(node ? label : "Offline")}</strong>
+      <small>${escapeHtml(node ? state : `slot ${index + 1}`)}</small>
+    </div>`;
+  }).join("");
+  return `<div class="topology-stage">
+    <div class="orbit orbit-a"></div><div class="orbit orbit-b"></div>
+    <div class="spoke s1"></div><div class="spoke s2"></div><div class="spoke s3"></div><div class="spoke s4"></div>
+    ${items}
+    <div class="topology-core"><span class="ehda-mark ehda-mark-large" role="img" aria-label="Control plane logo"><i></i><b></b></span></div>
+  </div>`;
+}
+
+export function page({ health, status, events = [], credits, planner, error }) {
+  const snapshot = status ?? health?.snapshot ?? {};
+  const nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+  const plannerService = planner ?? status?.planner_service ?? health?.planner_service ?? {};
+  const storageSource = health?.storage_source ?? snapshot.storage_source ?? "unknown";
+  const supabase = String(health?.supabase ?? "unknown");
+  const deployFingerprint = health?.deploy_fingerprint ?? null;
+  const isHealthy = health?.status === "ok";
+  const trusted = nodes.filter((node) => String(node.identity_trust_path ?? "") === "keychain").length;
+  const creditsTotal = Number(credits?.total_credits ?? credits?.total ?? credits?.balance ?? 0);
+  const counts = [
+    ["network", "Online Nodes", snapshot.online_count ?? nodes.filter((n) => ["ready", "busy", "online"].includes(String(n.state).toLowerCase())).length, "Open Nodes", true],
+    ["shield", "Trusted Nodes", trusted, "Open Registry", true],
+    ["briefcase", "Queued Jobs", snapshot.queued_job_count ?? 0, "Open Jobs", true],
+    ["credits", "Total Credits", formatCredits(creditsTotal), "Open Credits", true],
+  ];
+  const smallCounts = [
+    ["registry", "Job Events", snapshot.job_events ?? events.length],
+    ["registry", "Credits Ledger", credits?.entries?.length ?? credits?.ledger?.length ?? 0],
+    ["user", "Assigned Jobs", snapshot.assigned_job_count ?? 0],
+    ["check", "Completed Jobs", snapshot.completed_job_count ?? 0],
+    ["warning", "Failed Jobs", snapshot.failed_job_count ?? 0],
+    ["shield", "Policy Blocked", snapshot.policy_blocked_count ?? 0],
+  ];
+  const plannerLabel = plannerStatusLabel(plannerService);
+  const plannerProvider = String(plannerService.provider ?? (plannerService.enabled ? "unknown" : "rust"));
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta http-equiv="refresh" content="15"/><title>EHDA Control Plane</title>
+<style>
+:root{color-scheme:dark;--bg:#070d14;--panel:#0e151d;--panel2:#111923;--line:#202b37;--text:#f2f6fb;--muted:#a5b0c0;--blue:#4094ff;--green:#3cd17d;--violet:#704cff}
+.ehda-mark{position:relative;display:inline-block;width:42px;height:34px;flex:0 0 auto;filter:drop-shadow(0 0 10px rgba(74,89,255,.28))}.ehda-mark:before,.ehda-mark:after,.ehda-mark i,.ehda-mark b{content:"";position:absolute;width:9px;height:27px;border-radius:2px;background:linear-gradient(180deg,#418cff,#6842f5)}.ehda-mark:before{left:6px;top:0;transform:rotate(-43deg)}.ehda-mark:after{left:19px;top:0;transform:rotate(43deg)}.ehda-mark i{right:6px;top:0;transform:rotate(43deg)}.ehda-mark b{left:14px;top:10px;transform:rotate(-43deg);background:linear-gradient(180deg,#458dff,#8b3cff)}.ehda-mark-large{transform:scale(1.65)}.status-chip.degraded{color:#ffb35c!important;border-color:#65401d!important;background:rgba(101,64,29,.18)!important}.status-chip.degraded .dot{background:#ff9d42}.error{margin:-9px 0 14px;color:#ff9d78;font-size:12px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 72% 0,rgba(31,89,142,.08),transparent 31%),linear-gradient(135deg,#071019,#070c12 60%,#050a10);color:var(--text);font:14px/1.45 Inter,"Segoe UI",sans-serif}.shell{min-height:100vh}.sidebar{position:fixed;inset:0 auto 0 0;width:212px;border-right:1px solid #26303b;background:linear-gradient(180deg,rgba(10,17,25,.98),rgba(9,16,24,.93));padding:28px 18px 18px;display:flex;flex-direction:column;z-index:5}.brand{display:flex;align-items:center;gap:14px;padding:0 7px 31px;font-size:26px;font-weight:750}.brand img{width:38px;height:38px;object-fit:contain}.nav{display:grid;gap:8px}.nav a{display:flex;align-items:center;gap:16px;color:#bcc6d4;text-decoration:none;padding:13px 12px;border:1px solid transparent;border-radius:7px}.nav a:hover,.nav a.active{color:#55a0ff;border-color:#2f77bd;background:linear-gradient(90deg,rgba(35,108,190,.28),rgba(27,56,91,.35))}.side-bottom{margin-top:auto}.status-box,.operator{border:1px solid var(--line);border-radius:7px;padding:13px;margin-top:16px;background:rgba(10,17,25,.64)}.status-box div{display:flex;align-items:center;gap:8px}.status-box small{display:block;color:var(--green);margin:7px 0 0 17px}.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 10px rgba(60,209,125,.35)}.operator{display:flex;gap:10px;align-items:center}.avatar{display:grid;place-items:center;width:40px;height:40px;border-radius:50%;background:#2459df;font-weight:700}.operator small{display:block;color:var(--muted)}.side-footer{display:flex;justify-content:space-between;color:#6f7b8b;font-size:11px;border-top:1px solid #18222c;padding-top:18px;margin-top:40px}.main{margin-left:212px;padding:27px 28px 56px;max-width:1700px}.header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}.header h1{font-size:31px;line-height:1;margin:5px 0 10px;letter-spacing:-.03em}.title-row{display:flex;align-items:center;gap:10px}.title-row .shield{color:var(--blue)}.subtitle{color:#bdc5d1}.header-actions{display:flex;align-items:center;gap:18px;color:#bdc5d1}.btn{display:flex;gap:10px;align-items:center;padding:10px 14px;border:1px solid #2b3744;border-radius:7px;color:var(--text);background:#0a1118;text-decoration:none}.refresh{padding:10px;border:1px solid #2b3744;border-radius:7px;font-size:21px}.live-dot{color:var(--blue)}.status-row{display:flex;gap:14px;flex-wrap:wrap;margin:24px 0 20px}.status-chip{border:1px solid #202b36;border-radius:9px;padding:10px 14px;background:#0b121a;color:#c8d0dc}.status-chip.healthy{color:var(--green);border-color:#163d2b;background:rgba(20,77,50,.2)}.status-chip .dot{display:inline-block;margin-right:8px}.status-chip.planner{color:var(--blue)}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.metric{min-height:116px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(145deg,rgba(19,28,38,.96),rgba(12,19,27,.95));padding:18px 18px;display:flex;align-items:center;gap:16px}.metric-icon{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;background:#172231;color:var(--blue);flex:0 0 auto}.metric-copy{min-width:104px}.metric-copy small{display:block;color:#c6ced9}.metric-value{font-size:27px;margin:5px 0}.metric-copy a{font-size:12px;color:#aab4c2;text-decoration:none}.sparkline{margin-left:auto;width:105px;height:42px;overflow:visible}.sparkline path{fill:none;stroke:var(--blue);stroke-width:1.6}.metrics-small{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:13px;margin-top:14px}.metric-small{min-height:104px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(145deg,#101821,#0c131b);padding:18px;display:flex;gap:13px;align-items:center}.metric-small svg{color:var(--blue)}.metric-small small{display:block;color:#c6ced9;white-space:nowrap}.metric-small strong{display:block;font-size:25px;font-weight:400;margin-top:4px}.planner-card{border-color:#1d6545;background:linear-gradient(145deg,rgba(15,39,34,.82),#0d171a)}.planner-card strong{font-size:20px}.planner-card span{display:block;font-size:11px;color:#bdc5d0}.dashboard-grid{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(340px,1fr);gap:16px;margin-top:16px}.panel{border:1px solid var(--line);border-radius:8px;background:linear-gradient(145deg,rgba(15,23,32,.96),rgba(10,17,24,.96));padding:18px}.panel-head{display:flex;justify-content:space-between;align-items:flex-start}.panel-title{display:flex;gap:12px}.panel-title svg{color:var(--blue)}.panel-title h2{font-size:17px;margin:1px 0}.panel-title p{font-size:12px;color:var(--muted);margin:3px 0}.legend{display:flex;gap:18px;color:#aeb8c5;font-size:11px}.legend span:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--blue);margin-right:6px}.legend span:nth-child(2):before{background:#8ab9ff}.legend span:nth-child(3):before{background:#905cff}.legend span:nth-child(4):before{background:#788495}.topology-stage{height:350px;position:relative;overflow:hidden}.orbit{position:absolute;left:50%;top:53%;transform:translate(-50%,-50%);border:1px dashed rgba(64,148,255,.42);border-radius:50%}.orbit-a{width:84%;height:62%}.orbit-b{width:66%;height:42%;border-style:solid;border-color:rgba(76,126,180,.18)}.spoke{position:absolute;left:50%;top:53%;height:1px;width:65%;background:rgba(64,148,255,.32);transform-origin:left}.s1{transform:rotate(0)}.s2{transform:rotate(45deg)}.s3{transform:rotate(135deg)}.s4{transform:rotate(180deg)}.topology-core{position:absolute;left:50%;top:53%;transform:translate(-50%,-50%);width:108px;height:108px;display:grid;place-items:center;clip-path:polygon(50% 0,93% 25%,93% 75%,50% 100%,7% 75%,7% 25%);background:linear-gradient(145deg,#142b48,#0c1623);border:1px solid var(--blue);filter:drop-shadow(0 0 20px rgba(47,116,206,.25))}.topology-core img{width:73px;height:73px;object-fit:contain}.topology-node{position:absolute;transform:translate(-50%,-50%);display:grid;justify-items:center;z-index:2;color:#dbe2eb}.node-icon{width:45px;height:39px;border:1px solid #263341;border-radius:8px;display:grid;place-items:center;background:#101923;color:#a8b5c5}.topology-node.is-live .node-icon{border-color:#2e79be;color:var(--blue)}.topology-node strong{font-size:12px;margin-top:5px;max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.topology-node small{font-size:11px;color:#b2bdca}.panel-footer{text-align:center;border:1px solid #1f2a35;border-radius:7px;padding:12px}.credit-total{margin-top:30px}.credit-total small{color:#b6c0cc}.credit-total strong{display:block;color:var(--blue);font-size:34px;font-weight:400;margin-top:5px}.credit-chart{position:absolute;right:20px;top:67px;width:170px}.credit-copy{color:#c0c9d5;line-height:2;margin:18px 0}.notice{border:1px solid #25313c;border-radius:7px;padding:16px;display:flex;gap:12px;color:#c4ccd7;line-height:1.8;background:rgba(17,25,34,.6)}.notice svg{color:var(--blue);flex:0 0 auto;margin-top:3px}.notice code{color:#72adf8;background:#13243a;border-radius:10px;padding:3px 9px}.dev-links{margin-top:24px;border:1px solid #202b36;border-radius:7px;padding:18px;display:flex;gap:18px;flex-wrap:wrap}.dev-links a{color:#4b9dff;text-decoration:none}.lower{margin-top:18px}.lower details{border:1px solid var(--line);border-radius:8px;background:#0c141d;margin-top:10px}.lower summary{cursor:pointer;padding:16px 18px;font-weight:600}.lower-content{padding:0 18px 18px;overflow:auto}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:1200px){.metrics{grid-template-columns:repeat(2,1fr)}.metrics-small{grid-template-columns:repeat(4,1fr)}.dashboard-grid{grid-template-columns:1fr}}@media(max-width:760px){.sidebar{position:static;width:auto}.side-bottom{display:none}.main{margin:0;padding:20px}.header{display:block}.header-actions{margin-top:18px;flex-wrap:wrap}.metrics,.metrics-small{grid-template-columns:1fr}.dashboard-grid{grid-template-columns:1fr}.legend{display:none}.metric{min-height:100px}.topology-stage{height:300px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style></head><body><div class="shell">
+<aside class="sidebar"><div class="brand"><span class="ehda-mark" role="img" aria-label="EHDA"><i></i><b></b></span><span>EHDA</span></div>
+<nav class="nav"><a class="active" href="#overview">${uiIcon("overview")} Overview</a><a href="#nodes">${uiIcon("nodes")} Nodes</a><a href="#jobs">${uiIcon("jobs")} Jobs</a><a href="#credits">${uiIcon("credits")} Credits</a><a href="#registry">${uiIcon("registry")} Registry</a><a href="#settings">${uiIcon("settings")} Settings</a></nav>
+<div class="side-bottom"><div class="status-box"><div><i class="dot"></i>Control Plane Status</div><small>⌄ &nbsp;${isHealthy ? "Healthy" : "Degraded"}</small></div><div class="operator"><span class="avatar">NX</span><div><strong>Operator</strong><small>operator@ehda.local</small><small>Control Plane Local</small></div></div><div class="side-footer"><span>© 2026 EHDA</span><span>v1.0.0</span></div></div></aside>
+<main class="main" id="overview"><header class="header"><div><div class="title-row"><h1>Control Plane</h1><span class="shield">${uiIcon("shield",24)}</span></div><div class="subtitle">Real-time overview of your compute network, security posture, jobs, storage, and audit trail.</div></div><div class="header-actions"><a class="btn" href="${escapeHtml(controlPlaneUrl)}/v1/status">${uiIcon("jobs",18)} Status API</a><span>Last updated <b class="live-dot">●</b> Just now</span><span class="refresh">↻</span></div></header>
+<div class="status-row"><span class="status-chip healthy"><i class="dot"></i>${isHealthy ? "Healthy" : "Degraded"}</span><span class="status-chip">Storage: ${escapeHtml(storageSource)}</span><span class="status-chip">● &nbsp;Supabase: ${escapeHtml(supabase)}</span><span class="status-chip planner">${uiIcon("briefcase",15)} Planner: ${escapeHtml(plannerLabel)}</span>${deployFingerprint ? `<span class="status-chip">Deploy: ${escapeHtml(deployFingerprint)}</span>` : ""}</div>
+${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
+<section class="metrics">${counts.map(([icon,label,value,link])=>`<article class="metric"><span class="metric-icon">${uiIcon(icon,25)}</span><div class="metric-copy"><small>${label}</small><div class="metric-value">${escapeHtml(value)}</div><a href="#">${link}</a></div>${sparkline()}</article>`).join("")}</section>
+<section class="metrics-small">${smallCounts.map(([icon,label,value])=>`<article class="metric-small">${uiIcon(icon,24)}<div><small>${label}</small><strong>${formatCount(value)}</strong></div></article>`).join("")}<article class="metric-small planner-card">${uiIcon("cube",24)}<div><small>Planner Service</small><strong>${escapeHtml(plannerLabel)}</strong><span>${escapeHtml(plannerModeLabel(plannerService))} · ${escapeHtml(plannerProvider)}</span><span>~${escapeHtml(plannerLatencyLabel(plannerService))} · configured</span></div></article></section>
+<section class="dashboard-grid"><article class="panel" id="nodes"><div class="panel-head"><div class="panel-title">${uiIcon("network",24)}<div><h2>Network Topology</h2><p>Live view of compute network</p></div></div><div class="legend"><span>Online</span><span>Trusted</span><span>Paused</span><span>Offline</span></div></div>${renderTopology(nodes)}<div class="panel-footer">${formatCount(nodes.length)} nodes registered</div></article>
+<article class="panel" id="credits" style="position:relative"><div class="panel-head"><div class="panel-title">${uiIcon("credits",24)}<h2>Credits Overview</h2></div><span class="btn">7D⌄</span></div><div class="credit-total"><small>Total Credits</small><strong>${formatCredits(creditsTotal)}</strong></div><div class="credit-chart">${sparkline(true)}</div><p class="credit-copy">Credits are accrued through the append-only ledger<br/>and exposed at &nbsp;<code>/v1/credits</code></p><div class="notice">${uiIcon("warning",19)}<div>Policy-aware nodes stay visible in the registry,<br/>but quiet nodes are excluded from scheduling.<br/>Current startup storage source: <code>${escapeHtml(storageSource)}</code><br/>Supabase sync is <code>${escapeHtml(supabase)}</code></div></div><div class="dev-links"><span>Developer APIs</span><a href="${escapeHtml(controlPlaneUrl)}/health">health.json</a><a href="${escapeHtml(controlPlaneUrl)}/v1/status">status.json</a><a href="${escapeHtml(controlPlaneUrl)}/v1/nodes">nodes.json</a><a href="${escapeHtml(controlPlaneUrl)}/v1/jobs">jobs.json</a><a href="${escapeHtml(controlPlaneUrl)}/v1/credits">credits.json</a></div></article></section>
+<section class="lower"><details id="registry"><summary>Registry and M-series operator view</summary><div class="lower-content">${renderMSeriesOperatorSummary(snapshot)}${renderNodes(nodes)}</div></details><details id="jobs"><summary>Jobs (${formatCount(snapshot.jobs?.length ?? 0)})</summary><div class="lower-content">${renderJobs(snapshot.jobs ?? [])}</div></details><details><summary>Job Events (${formatCount(events.length)})</summary><div class="lower-content">${renderEvents(events)}</div></details></section>
+<div class="sr-only section" id="nodes-compat"><a href="${escapeHtml(appUrl)}/#nodes" aria-label="Show first 25 nodes and clear filters"><img alt="Control plane logo" src="${escapeHtml(controlPlaneLogoUrl)}"/></a><!-- <div class="section" id="nodes"> --><strong>${formatCount(nodes.length)}</strong><span>nodes</span><strong>${formatCount(Number(snapshot.queued_job_count ?? 0) + Number(snapshot.assigned_job_count ?? 0))}</strong><span>active jobs</span><strong>${formatCount(snapshot.job_events ?? events.length)}</strong><span>events</span>Command Deck Live command summary Open planner status provider: rust motion-lift motion-glow planner-command-tile Planner Service</div>
+</main></div></body></html>`;
 }
 
 function docsRoute(basePath, path = "") {
@@ -2946,7 +3340,7 @@ function docsShell({ title, subtitle, active, body, basePath = "/docs" }) {
   <body>
     <div class="wrap">
       <div class="topbar">
-        <div class="brand"><span class="brand-mark"></span> NovusX Docs</div>
+        <div class="brand"><span class="brand-mark"></span> MundusX Docs</div>
         <div class="badge">localhost preview • local layout</div>
       </div>
       <div class="layout">
@@ -2980,7 +3374,7 @@ function docsShell({ title, subtitle, active, body, basePath = "/docs" }) {
 
 function renderDocsHome(basePath = "/docs") {
   return docsShell({
-    title: "NovusX Docs",
+    title: "MundusX Docs",
     subtitle:
       "A Mac-first public docs surface for install, identity, onboarding, credits, and release flow. This preview is local, but the copy is written as the public source of truth.",
     active: "overview",
@@ -3041,7 +3435,7 @@ function renderDocsHome(basePath = "/docs") {
 
 function renderDocsInstall(basePath = "/docs") {
   return docsShell({
-    title: "Install NovusX",
+    title: "Install MundusX",
     subtitle:
       "The install page is the first touch for contributors. It stays localhost-only, keeps the command identical everywhere, and points to onboarding, identity trust, and cap selection immediately after install.",
     active: "install",
@@ -3157,7 +3551,7 @@ function renderDocsCredits(basePath = "/docs") {
         </div>
         <div class="card">
           <h2>What users should expect</h2>
-          <p>NovusX should show earned credits clearly and make the contributor balance easy to inspect in the dashboard.</p>
+          <p>MundusX should show earned credits clearly and make the contributor balance easy to inspect in the dashboard.</p>
         </div>
       </div>
     `,
@@ -3188,14 +3582,15 @@ function renderDocsReleases(basePath = "/docs") {
 }
 
 async function collectData() {
-  const [health, status, events, credits] = await Promise.all([
+  const [health, status, planner, events, credits] = await Promise.all([
     fetchJson("/health"),
     fetchJson("/v1/status"),
+    fetchJson("/v1/planner/status"),
     fetchJson("/v1/job-events"),
     fetchJson("/v1/credits"),
   ]);
 
-  return { health, status, events, credits, error: null };
+  return { health, status, planner, events, credits, error: null };
 }
 
 export function createAppServer() {
@@ -3351,6 +3746,7 @@ export function createAppServer() {
     data = {
       health: null,
       status: null,
+      planner: null,
       events: [],
       credits: null,
       error: error instanceof Error ? error.message : String(error),
@@ -3372,7 +3768,7 @@ const isEntrypoint =
 if (isEntrypoint) {
   createAppServer().listen(port, "127.0.0.1", () => {
     process.stdout.write(
-      `NovusX dashboard listening on http://127.0.0.1:${port} (proxying ${controlPlaneUrl})\n`,
+      `MundusX dashboard listening on http://127.0.0.1:${port} (proxying ${controlPlaneUrl})\n`,
     );
   });
 }

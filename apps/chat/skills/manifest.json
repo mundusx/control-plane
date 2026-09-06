@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": [
+    { "id": "router", "file": "router.md", "title": "Router", "description": "Chooses tools, direct responses, single jobs, or decomposition.", "enabled": true },
+    { "id": "formatter", "file": "formatter.md", "title": "Formatter", "description": "Keeps responses direct, readable, and free of internal instruction leakage.", "enabled": true },
+    { "id": "persona-atlas", "file": "persona-atlas.md", "title": "Atlas persona", "description": "Defines Atlas identity responses when users ask about the assistant.", "enabled": true },
+    { "id": "translation", "file": "translation.md", "title": "Translation", "description": "Produces clean translation-only answers.", "enabled": true },
+    { "id": "code", "file": "code.md", "title": "Code generation", "description": "Defines complete-code and application-project delivery behavior.", "enabled": true },
+    { "id": "math", "file": "math.md", "title": "Math", "description": "Controls concise deterministic and model-assisted math responses.", "enabled": true },
+    { "id": "weather", "file": "weather.md", "title": "Weather", "description": "Routes live conditions through the weather tool.", "enabled": true },
+    { "id": "facts", "file": "facts.md", "title": "Facts", "description": "Requires grounded sources for factual and current-information answers.", "enabled": true },
+    { "id": "chunk-planner", "file": "chunk-planner.md", "title": "Chunk planner", "description": "Splits complex work into bounded, dependency-aware sections.", "enabled": true },
+    { "id": "verifier", "file": "verifier.md", "title": "Verifier", "description": "Describes output-quality checks; runtime activation remains separately gated.", "enabled": false }
+  ]
+}

@@ -8,7 +8,7 @@
 | Repository | `mundusx/control-plane` |
 | Status | Draft |
 | Owner | MundusX operators |
-| Last updated | 2026-06-26 |
+| Last updated | 2026-07-03 |
 
 ## Purpose
 
@@ -71,7 +71,7 @@ The MundusX control plane provides the company-owned operator surface for coordi
 | BR-005 | The system must route jobs only to workers that satisfy backend and runtime compatibility requirements. | Must |
 | BR-006 | The system must record job lifecycle events from queued through assigned, completed, or failed. | Must |
 | BR-007 | The system must expose operator views for nodes, jobs, job events, credits, and health. | Must |
-| BR-008 | The system must maintain a credits ledger tied to completed work. | Must |
+| BR-008 | The system must maintain a credits ledger tied to completed work, including contributor inference jobs and fixed-rate deterministic tool work. | Must |
 | BR-009 | The system must persist state to Supabase when configured and continue operating with local fallback when Supabase is unavailable. | Must |
 | BR-010 | The system must require operator authentication in production using `MUNDUSX_OPERATOR_TOKEN`. | Must |
 | BR-011 | The system should provide an OpenAI-compatible non-streaming chat completion entry point that queues work and returns a job identifier. | Should |
@@ -149,6 +149,46 @@ The MundusX control plane provides the company-owned operator surface for coordi
 - Surface Supabase sync degradation and health status.
 - Keep authentication requirements explicit in deployment configuration.
 
+### Contributor Startup Readiness Output
+
+The contributor CLI must explain node startup readiness in operator-readable terms so a contributor can understand whether the node is identified, trusted, connected, allowed by policy, and ready to accept jobs.
+
+| Field | Meaning |
+|---|---|
+| `deviceId` | Stable MundusX node identifier derived from the device identity fingerprint, for example `node-7c540437d8aa3fc6`. |
+| `publicKey` | Full public verification key for the node. The control plane uses this to verify signed node requests. |
+| `publicKeyFingerprint` | Short public-key fingerprint used in UI, logs, and the node ID. |
+| `platform` | Detected host platform, such as `windows-x86_64`. |
+| `cpuCores` | Number of CPU cores detected on the contributor machine. |
+| `backendPreference` | Contributor-configured runtime preference, such as `auto`, `cuda`, or `m`. |
+| `detectedBackend` | Runtime actually detected on the machine, such as `cuda` for NVIDIA GPU support. |
+| `identityReady` | Whether the node identity exists and can sign control-plane requests. |
+| `identityTrustPath` | Secure storage path for private-key material, such as `dpapi://mundusx/device-identity` on Windows. |
+| `modelDir` | Local directory where downloaded models are stored. |
+| `activeModel` | Model currently advertised for local execution. |
+| `contributionPercent` | Contributor routing budget cap used by scheduling policy. |
+| `connected` | Whether the node is configured to connect to the control plane. |
+| `paused` | Whether the node is intentionally paused from accepting work. |
+| `configPath` | Local path to the contributor configuration file. |
+| `powerSource`, `onBattery`, `batteryPercent` | Power-policy signals used to avoid routing work to unsuitable battery states when detectable. |
+| `policyAllowed` | Whether local policy allows the node to contribute. |
+| `onboardingCompleted` | Whether the contributor has acknowledged the onboarding checklist. |
+| `contributionMeaning` | Human-readable explanation that the contribution cap is an automatic routing budget, not a literal constant GPU usage percentage. |
+| `agentMode` | Whether the node agent is running in the current terminal foreground or as a background daemon. |
+| `agentCommand` | Exact node-agent command launched by the CLI. |
+| `agentHint` | How the contributor can disconnect, such as `Esc` or `Ctrl-C` for foreground mode. |
+| `agentLog` and `agentErrorLog` | Local files used for normal agent logs and error diagnostics. |
+| `agentVersion` | Installed node-agent version. |
+| `state` | Agent runtime readiness state, such as `ready`. |
+| `intervalSeconds` | Heartbeat and polling interval used by the node agent. |
+| `agentStatePath` | Local file where agent runtime state is persisted. |
+| `heartbeatLogPath` | Local JSONL heartbeat trace for diagnostics. |
+| `registration` | Whether registration with the control plane is ready. |
+| `heartbeat` | Whether heartbeat reporting to the control plane is ready. |
+| `persistentRuntime` | Local persistent model runtime URL when available, for example `http://127.0.0.1:8789`, used to keep the model warm and reduce per-job startup latency. |
+
+The onboarding panel should summarize identity, hostname, backend, active model, contribution cap, policy state, credits endpoint, dashboard URL, config path, and whether contributor review is still needed. If `onboardingCompleted` is `no`, the CLI should show `opengpu onboarding --complete` as the next action.
+
 ### Persistence
 
 - Use Supabase as the primary shared state store when configured.
@@ -225,6 +265,263 @@ The MundusX control plane provides the company-owned operator surface for coordi
 - Target architecture requirements identify the classifier, planner, chunker, job graph builder, scheduler, router, result collector, verifier, merger, policy engine, billing or credit engine, observability dashboard, and admin console responsibilities.
 - Admin console requirements identify read-only dashboard boundaries, MVP administrative actions, role-scoped permissions, and audit metadata requirements.
 - MVP scope remains focused on the working distributed AI execution loop before marketplace, blockchain, or complex billing features.
+
+## Small Production Architecture Reference
+
+For small production, the control plane should stay a coordination service, not a model host. It should classify work, store state, own the queue, enforce policy, account credits, and route jobs to contributed or dedicated inference nodes.
+
+```mermaid
+flowchart LR
+    subgraph userMachine["REAL MACHINE: user laptop, browser, or developer workstation"]
+        chat["Program: Chat UI, CLI, or API client"]:::program
+    end
+
+    subgraph controlPlaneMachine["REAL MACHINE: cloud app host, for example Railway"]
+        cp["Program: control plane API"]:::program
+        router["Program: planner and request router"]:::program
+        obs["Program: observability, policy, and credit ledger"]:::program
+    end
+
+    subgraph queueMachine["MANAGED SERVICE: queue host"]
+        queue["Queue: Valkey or Redis"]:::queue
+    end
+
+    subgraph storeMachine["MANAGED SERVICE: transactional data host"]
+        tempStore["Temporary result store: active job outputs with TTL"]:::store
+        ledger["Permanent metadata ledger: status, timing, credits, no raw text by default"]:::ledger
+    end
+
+    subgraph memoryMachine["MANAGED SERVICE: optional vector memory host"]
+        vectorMemory["Vector DB: semantic memory and RAG, only when retention allows"]:::vector
+    end
+
+    subgraph toolMachine["PROGRAM SERVICE: tool runtime"]
+        tools["Tools: weather, wiki, math, search"]:::tool
+    end
+
+    subgraph lightMachine["REAL MACHINE: contributor light worker"]
+        light["Program: node agent plus small model runtime"]:::worker
+    end
+
+    subgraph mediumMachine["REAL MACHINE: contributor medium worker"]
+        medium["Program: node agent plus normal model runtime"]:::worker
+    end
+
+    subgraph strongMachine["REAL MACHINE: strong GPU or high-memory worker"]
+        strong["Program: node agent plus large model runtime"]:::worker
+    end
+
+    subgraph reducerMachine["REAL MACHINE: trusted reducer worker"]
+        reducer["Program: dense reducer runtime"]:::reducer
+    end
+
+    subgraph moeMachine["REAL MACHINE: optional specialist worker"]
+        moe["Program: MoE gateway and expert runtimes"]:::moe
+    end
+
+    chat --> cp --> router
+    router --> queue
+    router --> tools
+    queue --> light
+    queue --> medium
+    queue --> strong
+    queue --> moe
+    light --> tempStore
+    medium --> tempStore
+    strong --> tempStore
+    moe --> tempStore
+    tools --> tempStore
+    tempStore --> reducer
+    reducer --> tempStore
+    tempStore --> cp
+    cp --> chat
+    tempStore --> ledger
+    cp --> ledger
+    tempStore -. "optional embedding after retention check" .-> vectorMemory
+    cp --> obs
+    ledger --> obs
+
+    classDef machine fill:#e8f1ff,stroke:#3b82f6,color:#0f172a
+    classDef program fill:#ecfeff,stroke:#06b6d4,color:#0f172a
+    classDef worker fill:#e8f1ff,stroke:#2563eb,color:#0f172a
+    classDef queue fill:#fff7ed,stroke:#f97316,color:#0f172a
+    classDef store fill:#f0fdf4,stroke:#22c55e,color:#0f172a
+    classDef ledger fill:#dcfce7,stroke:#16a34a,color:#0f172a
+    classDef vector fill:#eef2ff,stroke:#6366f1,color:#0f172a
+    classDef reducer fill:#f5f3ff,stroke:#8b5cf6,color:#0f172a
+    classDef tool fill:#fefce8,stroke:#eab308,color:#0f172a
+    classDef moe fill:#fdf2f8,stroke:#ec4899,color:#0f172a
+```
+
+### Legend
+
+| Type | Meaning |
+|---|---|
+| REAL MACHINE subgraph | Physical or virtual hardware. Anything inside that box is software running on that machine. |
+| MANAGED SERVICE subgraph | Hosted infrastructure such as Redis, Valkey, Postgres, or Supabase. |
+| PROGRAM SERVICE subgraph | A separately deployed service that may run on the control plane host or its own small host. |
+| Program component | Software process such as API, planner, scheduler, node agent, model runtime, ledger, or tool adapter. |
+| Queue | Durable work buffer used to separate request intake from worker execution. |
+| Temporary result store | Shared active-job storage for chunk outputs and reducer outputs, with TTL cleanup for raw text. |
+| Permanent metadata ledger | Long-lived status, timing, node, queue, credit, and audit metadata; raw prompts and outputs are not stored by default. |
+| Vector memory | Optional semantic memory/RAG layer. It is not the execution ledger and should only receive data allowed by retention policy. |
+| Tool service | Deterministic or externally-backed service for weather, wiki, math, search, or other non-LLM work. |
+| Reducer | Trusted worker machine and runtime that merges sections, cleans formatting, and produces final responses. |
+| MoE node | Optional specialist worker machine that hosts a MoE gateway or expert runtimes. |
+
+### Baseline Capacity
+
+| Layer | Recommended small-production baseline |
+|---|---|
+| Control plane | 2 replicas, 4 vCPU, 8 GB RAM each, no GPU required. |
+| Database | Managed Postgres or Supabase with separate active-result retention and permanent metadata tables. |
+| Queue | Valkey or Redis with separate queues for light, medium, strong, reducer, tool, and dead-letter jobs. |
+| Vector DB | Optional semantic memory/RAG store; not required for job coordination. |
+| Light worker | 16 GB shared memory or small GPU; short chat, translation, simple formatting, small code snippets. |
+| Medium worker | 32 GB to 64 GB shared memory or 12 GB to 24 GB VRAM; normal coding, summaries, medium answers. |
+| Strong worker | 96 GB plus shared memory or 24 GB plus VRAM; large code, long context, reducer, higher-quality answers. |
+| Reducer worker | Trusted medium or strong node; should prioritize context size, reliability, and output quality over raw speed. |
+| Tool worker | Can run inside the control plane or as small services; no GPU required. |
+
+### Scheduling Requirements
+
+- The control plane should score nodes by readiness, backend, model capability, context budget, queue depth, latency, reliability, failure rate, and trust level.
+- One-node systems should avoid unnecessary decomposition unless the request needs progressive UI sections or exceeds safe output limits.
+- Multi-node systems should run independent chunks in parallel when dependencies allow it.
+- Dependent chunks must not start until required parent chunks complete.
+- Reducer work should be routed to the best available context and quality node, not simply the first available node.
+- Tool-routable requests should use tools before LLM work when the tool can answer accurately and cheaply.
+- Active results must be persisted per chunk so the UI can show completed sections even before the final answer is ready.
+- Raw prompts, chunk outputs, and final outputs should use retention controls and TTL cleanup by default.
+- Permanent ledgers should keep metadata required for billing, credits, audit, and reliability scoring without storing raw text by default.
+
+## MoE-Aware Rearchitecture Reference
+
+Mixture-of-Experts support should be treated as an advanced worker capability, not as the control plane itself. The control plane remains the orchestrator. MoE nodes become specialist inference providers that can handle routing inside a model or between expert models.
+
+```mermaid
+flowchart TD
+    subgraph clientMachine["REAL MACHINE: user device"]
+        client["Program: chat, CLI, or API client"]:::program
+    end
+
+    subgraph controlPlaneHost["REAL MACHINE: control plane cloud host"]
+        api["Program: control plane API"]:::program
+        planner["Program: planner, classifier, and chunk graph builder"]:::program
+        scheduler["Program: scheduler and node scorer"]:::program
+        toolRouter["Program: tool router"]:::tool
+    end
+
+    subgraph queueHost["MANAGED SERVICE: queue host"]
+        queues["Queues: light, medium, strong, reducer, tool, dead-letter"]:::queue
+    end
+
+    subgraph resultHost["MANAGED SERVICE: transactional data host"]
+        results["Temporary result store: active job and chunk outputs with TTL"]:::store
+        ledger2["Permanent metadata ledger: statuses, timings, credits, audit"]:::ledger
+    end
+
+    subgraph vectorHost["MANAGED SERVICE: optional vector memory host"]
+        vector2["Vector DB: semantic memory and RAG, opt-in only"]:::vector
+    end
+
+    subgraph toolHost["PROGRAM SERVICE: deterministic tool host"]
+        weather["Tool: weather API"]:::tool
+        wiki["Tool: knowledge lookup"]:::tool
+        math["Tool: math solver"]:::tool
+    end
+
+    subgraph simpleNode["REAL MACHINE: ordinary contributor worker"]
+        simple["Program: node agent plus simple LLM runtime"]:::worker
+    end
+
+    subgraph codeNode["REAL MACHINE: code-specialist worker"]
+        code["Program: node agent plus code model runtime"]:::worker
+    end
+
+    subgraph reasoningNode["REAL MACHINE: reasoning worker"]
+        reasoning["Program: node agent plus reasoning model runtime"]:::worker
+    end
+
+    subgraph reducerNode["REAL MACHINE: trusted high-context reducer"]
+        reducer["Program: dense reducer and formatter runtime"]:::reducer
+    end
+
+    subgraph moeNode["REAL MACHINE: optional MoE specialist worker"]
+        moeGateway["Program: MoE gateway"]:::moe
+        expertA["Program: expert runtime for code"]:::moe
+        expertB["Program: expert runtime for math"]:::moe
+        expertC["Program: expert runtime for writing"]:::moe
+    end
+
+    client --> api --> planner
+    planner --> toolRouter
+    planner --> scheduler
+    toolRouter --> weather --> results
+    toolRouter --> wiki --> results
+    toolRouter --> math --> results
+    scheduler --> queues
+    queues --> simple --> results
+    queues --> code --> results
+    queues --> reasoning --> results
+    queues --> moeGateway
+    moeGateway --> expertA --> results
+    moeGateway --> expertB --> results
+    moeGateway --> expertC --> results
+    results --> reducer --> results
+    results --> ledger2
+    api --> ledger2
+    results -. "optional embedding after retention check" .-> vector2
+    results --> api --> client
+
+    classDef machine fill:#e8f1ff,stroke:#3b82f6,color:#0f172a
+    classDef program fill:#ecfeff,stroke:#06b6d4,color:#0f172a
+    classDef worker fill:#e8f1ff,stroke:#2563eb,color:#0f172a
+    classDef queue fill:#fff7ed,stroke:#f97316,color:#0f172a
+    classDef store fill:#f0fdf4,stroke:#22c55e,color:#0f172a
+    classDef ledger fill:#dcfce7,stroke:#16a34a,color:#0f172a
+    classDef vector fill:#eef2ff,stroke:#6366f1,color:#0f172a
+    classDef reducer fill:#f5f3ff,stroke:#8b5cf6,color:#0f172a
+    classDef tool fill:#fefce8,stroke:#eab308,color:#0f172a
+    classDef moe fill:#fdf2f8,stroke:#ec4899,color:#0f172a
+```
+
+### MoE Role Boundaries
+
+| Component | Responsibility |
+|---|---|
+| Control plane | Owns API, auth, queueing, policy, scheduling, job graph state, credits, and result persistence. |
+| Planner | Decides whether the request is direct, tool-routed, decomposed, or reducer-backed. |
+| Scheduler | Chooses the best node or queue for each chunk based on capability and health. |
+| MoE gateway node | Presents one worker endpoint to the control plane while routing internally to experts. |
+| Expert models | Handle domain-specific work such as code, math, factual writing, summarization, or translation. |
+| Reducer | Combines chunk outputs, removes leaked instructions, deduplicates, formats, and returns the final answer. |
+
+### Recommended Adoption Order
+
+1. Keep the existing control plane as the source of truth for jobs, chunks, nodes, credits, and results.
+2. Add stronger deterministic routing first: tools for weather, wiki, math, and direct identity/persona responses.
+3. Add capability queues so small, medium, strong, reducer, and tool jobs are separated.
+4. Add reducer node selection using context budget, reliability, and model quality.
+5. Add optional MoE workers as specialist nodes after the ordinary node scheduler is stable.
+6. Add MoE-specific telemetry: expert selected, expert latency, expert failure rate, token budget, and output quality flags.
+
+### MoE Node Requirements
+
+| MoE size | Practical host target | Expected use |
+|---|---|---|
+| Small MoE | 32 GB to 64 GB RAM or 16 GB plus VRAM | Lightweight routing between small experts, short answers, classification, formatting. |
+| Medium MoE | 96 GB to 128 GB RAM or 24 GB to 48 GB VRAM | Coding, math, long summaries, multi-section responses. |
+| Large MoE | 192 GB plus RAM or 80 GB plus VRAM | Heavy coding, long context, high-quality reducers, expensive specialist workloads. |
+
+### Business Requirements
+
+- MoE must be optional. Normal nodes must continue working when no MoE node exists.
+- MoE nodes must advertise capability, model family, context size, estimated throughput, and expert domains.
+- The scheduler must not assume every MoE node is better than a smaller direct node; it must compare latency, cost, context, and quality.
+- Credits must be attributed to the actual node that completed work, including MoE gateway work and reducer work.
+- MoE routing decisions should be logged for auditability and future quality tuning.
+- A failed MoE node must degrade to ordinary node scheduling or tool routing when possible.
 
 ## Open Questions
 

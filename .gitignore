@@ -1,0 +1,11 @@
+node_modules/
+coverage/
+.nyc_output/
+.env
+.env.*
+!.env.example
+dist/
+build/
+target/
+*.log
+*.tmp

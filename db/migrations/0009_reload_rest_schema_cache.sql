@@ -1,0 +1,5 @@
+-- MundusX migration 0009: legacy Supabase PostgREST schema-cache reload.
+--
+-- Managed PostgreSQL does not run PostgREST as part of the database service, so
+-- the portable migration path intentionally keeps this step as a no-op. The
+-- legacy Supabase copy under supabase/migrations retains the original NOTIFY.

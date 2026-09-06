@@ -17,14 +17,19 @@ pub struct MigrationFile {
 
 pub fn migration_files() -> Result<Vec<MigrationFile>, String> {
     let root = repo_root()?;
+    migration_files_in_root(&root)
+}
+
+fn migration_files_in_root(root: &Path) -> Result<Vec<MigrationFile>, String> {
+    let source = migration_source(root);
     let mut files = Vec::new();
 
-    let schema_path = root.join("supabase/schema.sql");
+    let schema_path = source.schema_path;
     if schema_path.exists() {
         files.push(read_migration_file(&schema_path, "0000", "schema")?);
     }
 
-    let migrations_dir = root.join("supabase/migrations");
+    let migrations_dir = source.migrations_dir;
     if migrations_dir.exists() {
         let mut entries = fs::read_dir(&migrations_dir)
             .map_err(|error| format!("failed to read migrations dir: {error}"))?
@@ -54,6 +59,28 @@ pub fn migration_files() -> Result<Vec<MigrationFile>, String> {
 
     files.sort_by(|a, b| a.version.cmp(&b.version).then_with(|| a.name.cmp(&b.name)));
     Ok(files)
+}
+
+#[derive(Clone, Debug)]
+struct MigrationSource {
+    schema_path: PathBuf,
+    migrations_dir: PathBuf,
+}
+
+fn migration_source(root: &Path) -> MigrationSource {
+    let postgres_schema_path = root.join("db/schema.sql");
+    let postgres_migrations_dir = root.join("db/migrations");
+    if postgres_schema_path.exists() || postgres_migrations_dir.exists() {
+        return MigrationSource {
+            schema_path: postgres_schema_path,
+            migrations_dir: postgres_migrations_dir,
+        };
+    }
+
+    MigrationSource {
+        schema_path: root.join("supabase/schema.sql"),
+        migrations_dir: root.join("supabase/migrations"),
+    }
 }
 
 pub fn apply_migrations(database_url: &str) -> Result<Vec<MigrationFile>, String> {
@@ -109,11 +136,6 @@ pub fn apply_migrations(database_url: &str) -> Result<Vec<MigrationFile>, String
     Ok(applied_files)
 }
 
-pub fn applied_migrations(database_url: &str) -> Result<Vec<String>, String> {
-    let mut client = connect_client(database_url)?;
-    applied_versions(&mut client)
-}
-
 fn connect_client(database_url: &str) -> Result<Client, String> {
     let mut config = Config::from_str(database_url)
         .map_err(|error| format!("failed to parse database url: {error}"))?;
@@ -138,9 +160,15 @@ fn connect_client(database_url: &str) -> Result<Client, String> {
 
 fn applied_versions(client: &mut Client) -> Result<Vec<String>, String> {
     let rows = client
-        .query("select version from public.schema_migrations order by version asc", &[])
+        .query(
+            "select version from public.schema_migrations order by version asc",
+            &[],
+        )
         .map_err(|error| format!("failed to query schema_migrations: {error}"))?;
-    Ok(rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect())
 }
 
 fn read_migration_file(path: &Path, version: &str, name: &str) -> Result<MigrationFile, String> {
@@ -197,5 +225,87 @@ fn db_error_message(error: &postgres::Error) -> String {
         message
     } else {
         error.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn migration_files_prefer_postgres_directory() {
+        let root = test_root("prefer-postgres");
+        fs::create_dir_all(root.join("db/migrations")).expect("db migrations dir");
+        fs::create_dir_all(root.join("supabase/migrations")).expect("legacy migrations dir");
+        fs::write(root.join("db/schema.sql"), "-- db schema").expect("db schema");
+        fs::write(
+            root.join("db/migrations/0001_managed.sql"),
+            "-- managed migration",
+        )
+        .expect("managed migration");
+        fs::write(root.join("supabase/schema.sql"), "-- legacy schema").expect("legacy schema");
+        fs::write(
+            root.join("supabase/migrations/0001_legacy.sql"),
+            "-- legacy migration",
+        )
+        .expect("legacy migration");
+
+        let files = migration_files_in_root(&root).expect("migration files");
+
+        assert_eq!(files.len(), 2);
+        let db_dir = root.join("db");
+        assert!(files.iter().all(|file| file.path.starts_with(&db_dir)));
+        assert!(files.iter().any(|file| file.name == "managed"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn migration_files_fall_back_to_legacy_supabase_directory() {
+        let root = test_root("legacy-fallback");
+        fs::create_dir_all(root.join("supabase/migrations")).expect("legacy migrations dir");
+        fs::write(root.join("supabase/schema.sql"), "-- legacy schema").expect("legacy schema");
+        fs::write(
+            root.join("supabase/migrations/0001_legacy.sql"),
+            "-- legacy migration",
+        )
+        .expect("legacy migration");
+
+        let files = migration_files_in_root(&root).expect("migration files");
+
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .all(|file| file.path.to_string_lossy().contains("supabase")));
+        assert!(files.iter().any(|file| file.name == "legacy"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn heartbeat_history_purge_is_an_explicit_managed_migration() {
+        let migrations = migration_files().expect("managed migrations");
+        let purge = migrations
+            .iter()
+            .find(|migration| migration.version == "0013")
+            .expect("heartbeat purge migration");
+
+        assert_eq!(purge.name, "purge_heartbeat_history");
+        assert!(purge
+            .sql
+            .contains("truncate table public.heartbeats restart identity"));
+        assert!(!purge.sql.to_ascii_lowercase().contains("drop table"));
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mundusx-migration-{name}-{unique}"));
+        fs::create_dir_all(&root).expect("test root");
+        root
     }
 }

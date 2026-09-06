@@ -4,7 +4,7 @@ Private Rust HTTP control plane for node registration, heartbeat ingestion, and 
 
 This subtree is company-owned and governed by the repo-level [LICENSE](../../LICENSE).
 
-The control-plane API and state model live in the source itself and the operator README at the repo root.
+The control-plane API and state model live in the source itself, the operator README at the repo root, and the cross-repo operator how-to in `docs/operator-howto.md`.
 
 ## Runtime Negotiation Contract
 
@@ -13,7 +13,19 @@ Apple Silicon job routing now uses an explicit runtime contract between submitte
 - Jobs declare `runtime_mode` and `stream` alongside the existing backend preference.
 - Heartbeats report `runtime_ready`, `supported_runtime_modes`, `streaming_supported`, `model_dir`, and `model_path`.
 - The control plane only assigns a queued job when the node backend matches and the latest worker capability report explicitly supports that job's runtime requirements.
-- Chat completions are queued as `interactive` jobs and streaming chat requests still fail fast until node streaming support exists.
+- Chat completions are queued as `interactive` jobs. Eligible `stream:true` requests automatically use the signed live-delta relay when a streaming-capable node is available; otherwise they retain validated-buffered SSE.
+- Request classification now emits weighted `capability_requirements` on a 0-100 scale. The planner can override them globally or per step, while the scheduler retains exact model selection using live free slots and health.
+- Model inventory entries may advertise evidence-backed `capability_scores` (`capability`, `score`, `confidence`, and `sample_count`). Legacy `task_capabilities` remain supported with conservative compatibility scoring.
+
+## Planner Service Status
+
+The control plane can report whether an optional stateless planner service is configured and reachable. The Rust control plane remains the source of truth for job state, retries, scheduling, audit, and database persistence. Managed Postgres is selected when `MUNDUSX_DATABASE_POOL_URL` or `MUNDUSX_DATABASE_URL` is configured; the Supabase mirror remains a legacy fallback during migration.
+
+- Configure with `MUNDUSX_PLANNER_URL=http://127.0.0.1:8091/v1/plan`.
+- Tune the call timeout with `MUNDUSX_PLANNER_TIMEOUT_MS`; the default is `1500`.
+- Operators can inspect live planner integration at `GET /v1/planner/status`; the dashboard shows whether the planner is disabled, reachable, degraded, or using Rust fallback mode.
+- Reducer and synthesizer stages require the corresponding first-class capability advertised by the node agent. `MUNDUSX_CRITICAL_ROLE_WAIT_SECONDS` controls the bounded wait before the job fails in a retryable degraded state; the default is 60 seconds.
+- `GET /v1/jobs/{job_id}` includes a structured `degradation` object while a critical role is unavailable and after its bounded wait expires. Completed graph outputs remain attached to the job.
 
 ## Fallback Policy Contract
 

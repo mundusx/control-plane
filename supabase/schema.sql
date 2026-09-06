@@ -32,6 +32,8 @@ create table if not exists public.devices (
   backend text not null,
   contribution_percent integer not null,
   agent_version text not null,
+  capability_fabric_version text,
+  capability_manifest_json jsonb,
   state text not null,
   reported_state text,
   available_memory_mb integer not null default 0,
@@ -80,6 +82,9 @@ create table if not exists public.heartbeats (
   created_at timestamptz not null default now()
 );
 
+alter table if exists public.heartbeats
+  add column if not exists source_heartbeat_key text;
+
 create table if not exists public.jobs (
   job_id text primary key,
   request_id text not null unique,
@@ -118,6 +123,9 @@ create table if not exists public.job_events (
   created_at timestamptz not null default now()
 );
 
+alter table if exists public.job_events
+  add column if not exists source_event_id bigint;
+
 create table if not exists public.policy_rules (
   id uuid primary key default gen_random_uuid(),
   name text not null unique,
@@ -134,6 +142,8 @@ create table if not exists public.credits_ledger (
   user_id uuid references public.users(id),
   device_id text references public.devices(node_id),
   job_id text references public.jobs(job_id),
+  parent_job_id text references public.jobs(job_id),
+  graph_node_id text,
   entry_type text not null,
   amount numeric not null default 0,
   currency text not null default 'credits',

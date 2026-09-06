@@ -203,10 +203,10 @@ fn recover_signing_key(stored: &StoredIdentity, secret: &[u8; 32]) -> io::Result
     let encrypted_private =
         hex::decode(&stored.encrypted_private_key_hex).map_err(invalid_identity)?;
     let mut private_key_bytes = xor_crypt(&encrypted_private, secret, nonce.as_slice());
-    let private_bytes: [u8; 32] =
-        private_key_bytes.clone().try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "private key must be 32 bytes")
-        })?;
+    let private_bytes: [u8; 32] = private_key_bytes
+        .clone()
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "private key must be 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&private_bytes);
     private_key_bytes.fill(0);
 
@@ -429,9 +429,9 @@ mod tests {
         let err = validate_identity_recovery_state(None, true).expect_err("recovery should block");
 
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err
-            .to_string()
-            .contains("restore identity.json from backup or intentionally reset the device identity"));
+        assert!(err.to_string().contains(
+            "restore identity.json from backup or intentionally reset the device identity"
+        ));
     }
 
     #[test]
