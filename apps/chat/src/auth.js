@@ -368,7 +368,19 @@ export class PostgresAuthStore {
       throw Object.assign(new Error("workspace_relative must be a project slug"), { statusCode: 400 });
     }
     const taskId = randomUUID();
-    const result = await this.pool.query(`insert into public.local_agent_tasks
+    const result = await this.pool.query(`with superseded as (
+      update public.local_agent_tasks set
+        state = 'cancelled',
+        error = 'Superseded by a newer request for this project.',
+        completed_at = now(),
+        lease_expires_at = null
+      where user_id = $2::uuid
+        and state = 'queued'
+        and $8::text is not null
+        and workspace_relative = $8
+      returning task_id
+    )
+    insert into public.local_agent_tasks
       (task_id, user_id, conversation_id, session_id, prompt, allow_mutations, runtime_requested, workspace_relative)
       values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8)
       returning task_id, conversation_id, session_id, runtime_requested, workspace_relative, state, created_at`,
@@ -395,7 +407,7 @@ export class PostgresAuthStore {
           where runtime_connection.connection_id = $2::uuid
             and runtime_connection.capabilities->'agent_runtimes' ? 'hermes'
         ))
-      order by created_at for update skip locked limit 1
+      order by created_at desc for update skip locked limit 1
     )
     update public.local_agent_tasks task set
       state = 'running', connection_id = $2::uuid,
