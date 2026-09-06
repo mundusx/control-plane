@@ -6038,17 +6038,17 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
     .filter((entry) => entry?.type === "function" && entry?.function?.name)
     .map((entry) => ({
       name: String(entry.function.name),
-      description: String(entry.function.description || ""),
+      description: String(entry.function.description || "").slice(0, 300),
       parameters: entry.function.parameters || { type: "object", properties: {} },
     }));
   if (!tools.length) return submitOpenAiChatCompletion({ ...body, tools: undefined }, config, fetchImpl);
 
-  const systemContext = messages
+  const fullSystemContext = messages
     .filter((entry) => entry?.role === "system")
     .map((entry) => openAiMessageText(entry?.content))
     .filter(Boolean)
     .join("\n\n");
-  const transcript = messages
+  const fullTranscript = messages
     .filter((entry) => entry?.role !== "system")
     .map((entry) => ({
       role: String(entry?.role || "user"),
@@ -6057,6 +6057,11 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
       tool_call_id: entry?.tool_call_id || undefined,
       name: entry?.name || undefined,
     }));
+  const { systemContext, transcript, serializedTools } = boundedHermesRouterContext(
+    fullSystemContext,
+    fullTranscript,
+    tools,
+  );
   const routerPrompt = [
     "Continue the agent conversation below. Select exactly one next action.",
     "Return only one JSON object in one of these forms:",
@@ -6064,7 +6069,7 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
     '{"kind":"final","content":"the final response"}',
     "Use kind=tool whenever filesystem or command work is still required. Never claim work succeeded before tool results prove it.",
     "Available tools:",
-    JSON.stringify(tools),
+    serializedTools,
     "Conversation:",
     JSON.stringify(transcript),
   ].join("\n");
@@ -6133,6 +6138,55 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
     created,
     model: PUBLIC_MODEL_ID,
     choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+  };
+}
+
+export function boundedHermesRouterContext(systemContext, transcript, tools) {
+  const boundText = (value, limit) => {
+    const text = String(value || "");
+    return text.length <= limit ? text : text.slice(0, limit) + "\n[older context omitted]";
+  };
+  const boundedTranscript = [];
+  let transcriptBudget = 12_000;
+  for (const entry of [...transcript].reverse()) {
+    if (transcriptBudget <= 0) break;
+    const content = boundText(entry?.content, Math.min(4_000, transcriptBudget));
+    const bounded = { ...entry, content };
+    const size = JSON.stringify(bounded).length;
+    if (size > transcriptBudget && boundedTranscript.length) break;
+    boundedTranscript.unshift(bounded);
+    transcriptBudget -= Math.min(size, transcriptBudget);
+  }
+  const compactTools = tools.map((tool) => ({
+    ...tool,
+    description: boundText(tool?.description, 300),
+  }));
+  let serializedTools = JSON.stringify(compactTools);
+  if (serializedTools.length > 12_000) {
+    const minimalTools = compactTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: {
+        type: "object",
+        required: tool.parameters?.required || [],
+        properties: Object.fromEntries(Object.entries(tool.parameters?.properties || {}).map(([name, schema]) => [
+          name,
+          { type: schema?.type || "string", enum: schema?.enum },
+        ])),
+      },
+    }));
+    const fittedTools = [];
+    for (const tool of minimalTools) {
+      const candidate = JSON.stringify([...fittedTools, tool]);
+      if (candidate.length > 12_000) break;
+      fittedTools.push(tool);
+    }
+    serializedTools = JSON.stringify(fittedTools);
+  }
+  return {
+    systemContext: boundText(systemContext, 8_000),
+    transcript: boundedTranscript,
+    serializedTools,
   };
 }
 
