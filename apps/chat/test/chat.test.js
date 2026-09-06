@@ -32,6 +32,7 @@ import {
   fetchNetworkSummary,
   needsGrounding,
   normalizeAssistantDisplayText,
+  protectMathSegments,
   normalizePublicOpenAiStreamEvent,
   openAiModelsResponse,
   openAiSseBody,
@@ -197,6 +198,10 @@ test("renders a usable chat page", () => {
   assert.match(html, /gfm: true/);
   assert.match(html, /<script src="\/assets\/vendor\/marked\.umd\.js\?v=18\.0\.11"><\/script>/);
   assert.match(html, /<script src="\/assets\/vendor\/purify\.min\.js\?v=3\.4\.14"><\/script>/);
+  assert.match(html, /<link rel="stylesheet" href="\/assets\/vendor\/katex\.min\.css\?v=0\.16\.22">/);
+  assert.match(html, /<script src="\/assets\/vendor\/katex\.min\.js\?v=0\.16\.22"><\/script>/);
+  assert.match(html, /window\.katex\.renderToString/);
+  assert.match(html, /className = next\.displayMode \? "math-display" : "math-inline"/);
   assert.match(html, /aria-label", "Scrollable comparison table"/);
   assert.match(html, /document\.createElement\("h" \+ heading\[1\]\.length\)/);
   assert.match(html, /parentItem\.appendChild\(nested\)/);
@@ -318,6 +323,24 @@ test("renders a usable chat page", () => {
   assert.doesNotMatch(html, /Qwen\/Test/);
   assert.doesNotMatch(html, /Honda history draft|Dave Batalla|57 nodes/);
   assert.match(html, /MundusX may produce inaccurate information/);
+});
+
+test("new chat leaves project mode and isolates background runner status", () => {
+  const html = page(configFromEnv({ MUNDUSX_HARNESS_UI_ENABLED: "true" }));
+  assert.match(html, /newChatEl\?\.addEventListener\("click", \(\) => \{[\s\S]*?setActiveProject\(null\)/);
+  assert.match(html, /pendingRunnerAction = null/);
+  assert.match(html, /activeHistoryId === options\.conversationId/);
+  assert.match(html, /activeHistoryId === conversationId\) setStatus\("working", runtimeLabel\)/);
+});
+
+test("protects inline and display math from Markdown list parsing", () => {
+  const segments = [];
+  const output = protectMathSegments("Solve $$x^2 - 2x - 3 = 0$$ and $x=-1$.", segments);
+  assert.equal(output, "Solve \n\nMUNDUSXMATH0TOKEN\n\n and MUNDUSXMATH1TOKEN.");
+  assert.deepEqual(segments, [
+    { token: "MUNDUSXMATH0TOKEN", expression: "x^2 - 2x - 3 = 0", displayMode: true },
+    { token: "MUNDUSXMATH1TOKEN", expression: "x=-1", displayMode: false },
+  ]);
 });
 
 test("anchors the account profile below the flexible conversation rail", () => {

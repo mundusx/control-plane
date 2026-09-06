@@ -49,11 +49,15 @@ const PUBLIC_MODEL_ID = "mundusx-agnostic";
 const CHAT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MARKED_BROWSER_PATH = resolve(CHAT_ROOT, "node_modules/marked/lib/marked.umd.js");
 const DOMPURIFY_BROWSER_PATH = resolve(CHAT_ROOT, "node_modules/dompurify/dist/purify.min.js");
+const KATEX_BROWSER_PATH = resolve(CHAT_ROOT, "node_modules/katex/dist/katex.min.js");
+const KATEX_CSS_PATH = resolve(CHAT_ROOT, "node_modules/katex/dist/katex.min.css");
+const KATEX_FONTS_PATH = resolve(CHAT_ROOT, "node_modules/katex/dist/fonts");
 // Vendor responses are immutable, so the HTML URL must change whenever the
 // bundled version changes. Reusing an unversioned URL can leave browsers with
 // a stale pre-bundle response and silently force the legacy renderer.
 const MARKED_BROWSER_VERSION = "18.0.11";
 const DOMPURIFY_BROWSER_VERSION = "3.4.14";
+const KATEX_BROWSER_VERSION = "0.16.22";
 const POLL_INTERVAL_MS = 1500;
 const MAX_BODY_BYTES = 64 * 1024;
 // Temporarily disabled by product decision. Keep the implementation available so it can
@@ -217,6 +221,17 @@ export function normalizeAssistantDisplayText(text) {
     .replace(/(?<=[^\s*])[^\S\n]+([-*+])[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1 ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+export function protectMathSegments(text, segments = []) {
+  return String(text || "").replace(/\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\$([^$\n]+?)\$|\\\(([^\n]+?)\\\)/g,
+    (match, blockDollar, blockBracket, inlineDollar, inlineBracket) => {
+      const displayMode = blockDollar != null || blockBracket != null;
+      const expression = blockDollar ?? blockBracket ?? inlineDollar ?? inlineBracket ?? "";
+      const token = "MUNDUSXMATH" + segments.length + "TOKEN";
+      segments.push({ token, expression: expression.trim(), displayMode });
+      return displayMode ? "\n\n" + token + "\n\n" : token;
+    });
 }
 
 export function page(config = configFromEnv()) {
@@ -1978,8 +1993,10 @@ export function page(config = configFromEnv()) {
       </form>
     </main>
   </div>
+  <link rel="stylesheet" href="/assets/vendor/katex.min.css?v=${KATEX_BROWSER_VERSION}">
   <script src="/assets/vendor/marked.umd.js?v=${MARKED_BROWSER_VERSION}"></script>
   <script src="/assets/vendor/purify.min.js?v=${DOMPURIFY_BROWSER_VERSION}"></script>
+  <script src="/assets/vendor/katex.min.js?v=${KATEX_BROWSER_VERSION}"></script>
   <script>
     const form = document.getElementById("chat-form");
     const mainEl = document.getElementById("chat-main");
@@ -3426,6 +3443,10 @@ export function page(config = configFromEnv()) {
 
     newChatEl?.addEventListener("click", () => {
       setWorkspaceDestination("chats");
+      setActiveProject(null);
+      pendingRunnerAction = null;
+      mutationAllowed = false;
+      renderRuntimeControls();
       activeHistoryLoadToken += 1;
       loadingHistoryConversationId = null;
       followLatestMessage = true;
@@ -3437,6 +3458,7 @@ export function page(config = configFromEnv()) {
       }
       setEmptyChatMode(true);
       promptEl.value = "";
+      syncNetworkRuntimeStatus(true);
       promptEl.focus();
     });
 
@@ -3638,7 +3660,7 @@ export function page(config = configFromEnv()) {
       const body = pending.querySelector(".message-body");
       const runtimeLabel = options.runtime === "hermes" ? "Hermes" : options.runtime === "native" ? "MundusX Local" : "local agent";
       if (body) body.textContent = "Connected to " + runtimeLabel + " on your device…";
-      setStatus("working", runtimeLabel);
+      if (activeHistoryId === conversationId) setStatus("working", runtimeLabel);
       let payload = submitted;
       const deadline = Date.now() + 10 * 60 * 1000;
       let pollRecoveryDeadline = 0;
@@ -3651,7 +3673,7 @@ export function page(config = configFromEnv()) {
       const cancelTask = async () => {
         if (cancellationRequested) return;
         cancellationRequested = true;
-        renderLocalAgentProgress(pending, payload, runtimeLabel, { cancelling: true, progressState });
+        renderLocalAgentProgress(pending, payload, runtimeLabel, { cancelling: true, progressState, conversationId });
         const cancelled = await fetch("/api/agent/tasks/" + encodeURIComponent(submitted.task_id) + "/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3664,7 +3686,7 @@ export function page(config = configFromEnv()) {
         }
         payload = cancelPayload;
       };
-      renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, progressState });
+      renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, progressState, conversationId });
       while (!["completed", "failed", "cancelled"].includes(payload.state)) {
         if (Date.now() >= deadline) throw new Error("Local agent task timed out");
         await sleep(1000);
@@ -3682,10 +3704,10 @@ export function page(config = configFromEnv()) {
           const retryable = !Number.isFinite(status) || [408, 425, 429, 500, 502, 503, 504].includes(status);
           pollRecoveryDeadline ||= Date.now() + 120000;
           if (!retryable || Date.now() >= pollRecoveryDeadline) throw pollError;
-          renderLocalAgentProgress(pending, payload, runtimeLabel, { reconnecting: true, onCancel: cancelTask, progressState });
+          renderLocalAgentProgress(pending, payload, runtimeLabel, { reconnecting: true, onCancel: cancelTask, progressState, conversationId });
           continue;
         }
-        renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, cancelling: cancellationRequested, progressState });
+        renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, cancelling: cancellationRequested, progressState, conversationId });
       }
       if (payload.state !== "completed") {
         const changedFiles = Array.isArray(payload.result?.changed_files)
@@ -3708,7 +3730,9 @@ export function page(config = configFromEnv()) {
         routing: "local-agent",
         model: payload.runtime_selected === "hermes" ? "hermes" : "mundusx-agent",
       }, conversationId);
-      setStatus("ready", payload.runtime_selected === "hermes" ? "Hermes · Local" : "MundusX · Local");
+      if (activeHistoryId === conversationId) {
+        setStatus("ready", payload.runtime_selected === "hermes" ? "Hermes · Local" : "MundusX · Local");
+      }
       return true;
     }
 
@@ -3788,7 +3812,7 @@ export function page(config = configFromEnv()) {
         actions.appendChild(cancel);
         body.appendChild(actions);
       }
-      setStatus("working", summary);
+      if (!options.conversationId || activeHistoryId === options.conversationId) setStatus("working", summary);
     }
 
     async function tryLiveChatTurn(pending, message, conversationId) {
@@ -4535,10 +4559,13 @@ export function page(config = configFromEnv()) {
     }
 
     ${normalizeAssistantDisplayText.toString()}
+    ${protectMathSegments.toString()}
 
     function appendStandardMarkdown(container, text) {
       if (typeof window.marked?.parse !== "function" || !window.DOMPurify?.isSupported) return false;
-      const rendered = window.marked.parse(normalizeAssistantDisplayText(text), {
+      const mathSegments = [];
+      const protectedText = protectMathSegments(normalizeAssistantDisplayText(text), mathSegments);
+      const rendered = window.marked.parse(protectedText, {
         gfm: true,
         breaks: false,
         async: false,
@@ -4550,6 +4577,32 @@ export function page(config = configFromEnv()) {
       });
       const template = document.createElement("template");
       template.innerHTML = clean;
+      if (typeof window.katex?.renderToString === "function" && mathSegments.length) {
+        const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+        for (const textNode of textNodes) {
+          let value = textNode.nodeValue || "";
+          const matching = mathSegments.filter(({ token }) => value.includes(token));
+          if (!matching.length) continue;
+          const fragment = document.createDocumentFragment();
+          while (matching.length) {
+            const next = matching.reduce((best, item) => {
+              const index = value.indexOf(item.token);
+              return index >= 0 && (!best || index < best.index) ? { ...item, index } : best;
+            }, null);
+            if (!next) break;
+            if (next.index) fragment.appendChild(document.createTextNode(value.slice(0, next.index)));
+            const math = document.createElement(next.displayMode ? "div" : "span");
+            math.className = next.displayMode ? "math-display" : "math-inline";
+            math.innerHTML = window.katex.renderToString(next.expression, { displayMode: next.displayMode, throwOnError: false, strict: "ignore", trust: false });
+            fragment.appendChild(math);
+            value = value.slice(next.index + next.token.length);
+          }
+          if (value) fragment.appendChild(document.createTextNode(value));
+          textNode.replaceWith(fragment);
+        }
+      }
       for (const link of template.content.querySelectorAll("a[href]")) {
         link.target = "_blank";
         link.rel = "noopener noreferrer";
@@ -5709,6 +5762,17 @@ export function createServerApp(config = configFromEnv()) {
       }
       if (request.method === "GET" && url.pathname === "/assets/vendor/purify.min.js") {
         return sendJavaScript(response, await readFile(DOMPURIFY_BROWSER_PATH));
+      }
+      if (request.method === "GET" && url.pathname === "/assets/vendor/katex.min.js") {
+        return sendJavaScript(response, await readFile(KATEX_BROWSER_PATH));
+      }
+      if (request.method === "GET" && url.pathname === "/assets/vendor/katex.min.css") {
+        return sendAsset(response, await readFile(KATEX_CSS_PATH), "text/css; charset=utf-8");
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/assets/vendor/fonts/")) {
+        const fontName = url.pathname.slice("/assets/vendor/fonts/".length);
+        if (!/^[A-Za-z0-9_-]+\.(?:woff2?|ttf)$/.test(fontName)) return sendJson(response, 404, { error: "Not found" });
+        return sendAsset(response, await readFile(resolve(KATEX_FONTS_PATH, fontName)), fontName.endsWith(".woff2") ? "font/woff2" : fontName.endsWith(".woff") ? "font/woff" : "font/ttf");
       }
       if (request.method === "GET" && url.pathname === "/health") {
         return sendJson(response, 200, {
@@ -12295,6 +12359,15 @@ function sendPng(response, bytes) {
 function sendJavaScript(response, bytes) {
   response.writeHead(200, {
     "Content-Type": "text/javascript; charset=utf-8",
+    "Cache-Control": "public, max-age=86400, immutable",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(bytes);
+}
+
+function sendAsset(response, bytes, contentType) {
+  response.writeHead(200, {
+    "Content-Type": contentType,
     "Cache-Control": "public, max-age=86400, immutable",
     "X-Content-Type-Options": "nosniff",
   });
