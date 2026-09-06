@@ -6,6 +6,7 @@ import {
   buildHistoryContext,
   buildCompressedHistoryContext,
   buildRelevantHistoryContext,
+  boundedHermesRouterContext,
   buildChatSystemPrompt,
   canLiveStreamChatTurn,
   cleanChatOutput,
@@ -3663,6 +3664,34 @@ test("Hermes model turns retry only transient gateway failures", () => {
   assert.equal(isRetryableHermesModelFailure("HTTP 502: Application failed to respond"), true);
   assert.equal(isRetryableHermesModelFailure("connection reset by peer"), true);
   assert.equal(isRetryableHermesModelFailure("invalid project-agent request"), false);
+});
+
+test("Hermes router context stays within the model gateway budget and preserves recent work", () => {
+  const tools = Array.from({ length: 40 }, (_, index) => ({
+    name: `tool_${index}`,
+    description: "d".repeat(1_000),
+    parameters: {
+      type: "object",
+      required: ["path", "content"],
+      properties: {
+        path: { type: "string", description: "p".repeat(1_000) },
+        content: { type: "string", description: "c".repeat(1_000) },
+      },
+    },
+  }));
+  const transcript = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 ? "assistant" : "user",
+    content: `${index}:` + "x".repeat(2_000),
+  }));
+
+  const bounded = boundedHermesRouterContext("s".repeat(30_000), transcript, tools);
+
+  assert.ok(bounded.systemContext.length < 8_100);
+  assert.ok(JSON.stringify(bounded.transcript).length < 12_100);
+  assert.match(bounded.transcript.at(-1).content, /^19:/);
+  assert.ok(bounded.serializedTools.length <= 12_000);
+  assert.doesNotThrow(() => JSON.parse(bounded.serializedTools));
+  assert.ok(JSON.parse(bounded.serializedTools).length > 0);
 });
 
 test("Open WebUI stream starts with a standard stable assistant identity chunk", () => {
