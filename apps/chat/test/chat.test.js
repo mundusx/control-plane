@@ -492,7 +492,11 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /activeProjectNameEl\.textContent = activeProject\?\.slug \|\| "Project"/);
   assert.match(html, /activeProjectOpenEl\.setAttribute\("aria-pressed"/);
   assert.match(html, /Ask Atlas to work on/);
-  assert.doesNotMatch(html, /Initialize the local.*project workspace|Queuing local project creation/);
+  assert.match(html, /async function initializeLocalProject\(projectSlug\)/);
+  assert.match(html, /prompt: "__mundusx_initialize_project__"/);
+  assert.match(html, /allow_mutations: true/);
+  assert.match(html, /Waiting for the local runner to create the project folder/);
+  assert.match(html, /Project folder could not be created|project folder could not be created/i);
   assert.match(html, /id="app-toast"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(html, /function showToast\(message\)/);
   assert.match(html, /closeProjects\(\);[\s\S]*showToast\('Project "/);
@@ -533,8 +537,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
   assert.match(projects, /MundusX-Setup\.exe/);
-  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.58\/MundusX-Setup\.exe/);
-  assert.match(html, /const latestLocalAgentVersion = "0\.1\.58"/);
+  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.59\/MundusX-Setup\.exe/);
+  assert.match(html, /const latestLocalAgentVersion = "0\.1\.59"/);
   assert.match(html, /projectReadinessEl\.dataset\.state = updateAvailable \? "update"/);
   assert.match(html, /projectReadinessTitleEl\.textContent = updateAvailable \? "Update required"/);
   assert.match(html, /projectAgentUpdateEl\.textContent = updateAvailable[\s\S]*?"Update now"/);
