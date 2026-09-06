@@ -3604,10 +3604,15 @@ export function page(config = configFromEnv()) {
       const deadline = Date.now() + 10 * 60 * 1000;
       let pollRecoveryDeadline = 0;
       let cancellationRequested = false;
+      const progressState = {
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+        eventSignature: "",
+      };
       const cancelTask = async () => {
         if (cancellationRequested) return;
         cancellationRequested = true;
-        renderLocalAgentProgress(pending, payload, runtimeLabel, { cancelling: true });
+        renderLocalAgentProgress(pending, payload, runtimeLabel, { cancelling: true, progressState });
         const cancelled = await fetch("/api/agent/tasks/" + encodeURIComponent(submitted.task_id) + "/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3620,7 +3625,7 @@ export function page(config = configFromEnv()) {
         }
         payload = cancelPayload;
       };
-      renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask });
+      renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, progressState });
       while (!["completed", "failed", "cancelled"].includes(payload.state)) {
         if (Date.now() >= deadline) throw new Error("Local agent task timed out");
         await sleep(1000);
@@ -3638,10 +3643,10 @@ export function page(config = configFromEnv()) {
           const retryable = !Number.isFinite(status) || [408, 425, 429, 500, 502, 503, 504].includes(status);
           pollRecoveryDeadline ||= Date.now() + 120000;
           if (!retryable || Date.now() >= pollRecoveryDeadline) throw pollError;
-          renderLocalAgentProgress(pending, payload, runtimeLabel, { reconnecting: true, onCancel: cancelTask });
+          renderLocalAgentProgress(pending, payload, runtimeLabel, { reconnecting: true, onCancel: cancelTask, progressState });
           continue;
         }
-        renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, cancelling: cancellationRequested });
+        renderLocalAgentProgress(pending, payload, runtimeLabel, { onCancel: cancelTask, cancelling: cancellationRequested, progressState });
       }
       if (payload.state !== "completed") {
         const changedFiles = Array.isArray(payload.result?.changed_files)
@@ -3673,6 +3678,12 @@ export function page(config = configFromEnv()) {
       if (!body) return;
       const events = Array.isArray(payload?.events) ? payload.events : [];
       const latest = events.at(-1)?.event || null;
+      const progressState = options.progressState || { startedAt: Date.now(), lastActivityAt: Date.now(), eventSignature: "" };
+      const eventSignature = events.map((item) => [item?.sequence, item?.event?.type, item?.event?.summary].join(":")) .join("|");
+      if (eventSignature && eventSignature !== progressState.eventSignature) {
+        progressState.eventSignature = eventSignature;
+        progressState.lastActivityAt = Date.now();
+      }
       const labels = {
         harness_started: "Starting agent harness",
         model_turn_queued: "Planning the next step",
@@ -3689,7 +3700,9 @@ export function page(config = configFromEnv()) {
         ? "Stopping project work"
         : options.reconnecting
           ? "Connection interrupted; reconnecting"
-          : String(latest?.summary || labels[latest?.type] || "Working in the project");
+          : String(latest?.summary || labels[latest?.type] || (payload?.state === "queued"
+            ? "Waiting for the local runner to accept the task"
+            : "Waiting for Hermes to report its first step"));
       const steps = events
         .map((item) => String(item?.event?.summary || labels[item?.event?.type] || "").trim())
         .filter(Boolean)
@@ -3709,6 +3722,19 @@ export function page(config = configFromEnv()) {
       }
       if (!steps.length) timeline.textContent = "● " + summary;
       body.appendChild(timeline);
+      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - progressState.startedAt) / 1000));
+      const quietSeconds = Math.max(0, Math.floor((Date.now() - progressState.lastActivityAt) / 1000));
+      const duration = (seconds) => seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
+      const activity = document.createElement("small");
+      activity.className = "agent-progress-activity";
+      activity.textContent = "Elapsed " + duration(elapsedSeconds) + " · Last activity " + duration(quietSeconds) + " ago";
+      body.appendChild(activity);
+      if (quietSeconds >= 45 && !options.reconnecting && !options.cancelling) {
+        const stalled = document.createElement("p");
+        stalled.className = "agent-progress-stalled";
+        stalled.textContent = "No new progress has arrived for " + duration(quietSeconds) + ". Hermes may be waiting for the model service; you can keep waiting or stop this run.";
+        body.appendChild(stalled);
+      }
       if (typeof options.onCancel === "function" && !["completed", "failed", "cancelled"].includes(payload?.state)) {
         const actions = document.createElement("div");
         actions.className = "message-error-actions";
