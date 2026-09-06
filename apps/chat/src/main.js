@@ -143,8 +143,8 @@ export function configFromEnv(env = process.env) {
     harnessAllowedPathPrefixes: (env.MUNDUSX_HARNESS_ALLOWED_PATH_PREFIXES ?? "").trim(),
     harnessValidationProfiles: (env.MUNDUSX_HARNESS_VALIDATION_PROFILES ?? "").trim(),
     harnessRunnerDownloadUrl: (env.MUNDUSX_HARNESS_RUNNER_DOWNLOAD_URL ?? "").trim()
-      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.58/MundusX-Setup.exe",
-    latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.58",
+      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.59/MundusX-Setup.exe",
+    latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.59",
     modelOverride: (env.MUNDUSX_CHAT_MODEL ?? env.MUNDUSX_CHAT_DEFAULT_MODEL ?? "").trim(),
     weatherCacheUrl: (
       env.MUNDUSX_WEATHER_CACHE_URL ??
@@ -2999,13 +2999,40 @@ export function page(config = configFromEnv()) {
     renderActiveProject();
 
     const projectSlugEl = harnessFormEl?.elements.namedItem("project_slug");
+    let projectCreationInProgress = false;
     projectSlugEl?.addEventListener("input", () => {
       const slug = normalizeProjectSlug(projectSlugEl.value);
       if (projectSlugEl.value !== slug) projectSlugEl.value = slug;
       updateProjectCreateAvailability();
     });
     function updateProjectCreateAvailability() {
-      if (harnessSubmitEl) harnessSubmitEl.disabled = !projectSlugEl?.value.trim() || !localRunnerReady;
+      if (harnessSubmitEl) harnessSubmitEl.disabled = projectCreationInProgress || !projectSlugEl?.value.trim() || !localRunnerReady;
+    }
+
+    async function initializeLocalProject(projectSlug) {
+      const created = await fetch("/api/agent/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: "__mundusx_initialize_project__",
+          session_id: crypto.randomUUID(),
+          allow_mutations: true,
+          runtime: "native",
+          workspace_relative: projectSlug,
+        }),
+      });
+      let task = await readApiPayload(created, "project initialization failed");
+      if (!created.ok) throw new Error(task.error || "project initialization failed");
+      const deadline = Date.now() + 60000;
+      while (!['completed', 'failed', 'cancelled'].includes(task.state)) {
+        if (Date.now() >= deadline) throw new Error("The local runner did not confirm the project folder within 60 seconds");
+        await sleep(750);
+        const response = await fetch("/api/agent/tasks/" + encodeURIComponent(task.task_id));
+        task = await readApiPayload(response, "project initialization check failed");
+        if (!response.ok) throw new Error(task.error || "project initialization check failed");
+      }
+      if (task.state !== "completed") throw new Error(task.error || "The local runner could not create the project folder");
+      return task.result || {};
     }
     function projectExecutionMode(template) {
       const preferred = template === "java-maven" ? ["hybrid", "sandbox"] : ["sandbox", "hybrid"];
@@ -3078,13 +3105,25 @@ export function page(config = configFromEnv()) {
         if (!currentUser) openAuthentication();
         return;
       }
-      setActiveProject({ slug: projectSlug });
-      harnessResultEl.textContent = "";
-      harnessFormEl.reset();
+      projectCreationInProgress = true;
+      if (harnessSubmitEl) harnessSubmitEl.textContent = "Creating folder…";
+      harnessResultEl.textContent = "Waiting for the local runner to create the project folder…";
       updateProjectCreateAvailability();
-      closeProjects();
-      showToast('Project "' + projectSlug + '" created');
-      promptEl?.focus();
+      try {
+        const initialized = await initializeLocalProject(projectSlug);
+        setActiveProject({ slug: projectSlug, workspace: initialized.workspace || null });
+        harnessResultEl.textContent = "";
+        harnessFormEl.reset();
+        closeProjects();
+        showToast('Project "' + projectSlug + '" created on this computer');
+        promptEl?.focus();
+      } catch (error) {
+        harnessResultEl.textContent = error?.message || "The project folder could not be created";
+      } finally {
+        projectCreationInProgress = false;
+        if (harnessSubmitEl) harnessSubmitEl.textContent = "Create project";
+        updateProjectCreateAvailability();
+      }
     });
 
     enterToSendToggleEl?.addEventListener("click", () => {
