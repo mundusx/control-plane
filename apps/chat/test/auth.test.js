@@ -450,6 +450,9 @@ test("local agent tasks persist only supported runtime selections", async () => 
   assert.equal(insert.values[6], "hermes");
   assert.equal(created.workspace_relative, "my-project");
   assert.equal(insert.values[7], "my-project");
+  assert.match(insert.sql, /with superseded as/i);
+  assert.match(insert.sql, /state = 'queued'/);
+  assert.match(insert.sql, /workspace_relative = \$8/);
   await assert.rejects(
     store.createLocalAgentTask("22222222-2222-4222-8222-222222222222", {
       prompt: "inspect", session_id: sessionId, runtime: "deepagents",
@@ -481,6 +484,7 @@ test("local agent auto claims select Hermes only when advertised and preferred",
   assert.equal(task.runtime_selected, "hermes");
   assert.match(queries[0].sql, /capabilities->'agent_runtimes' \? 'hermes'/);
   assert.match(queries[0].sql, /capabilities->>'preferred_agent' = 'hermes'/);
+  assert.match(queries[0].sql, /order by created_at desc/);
 });
 
 test("project model jobs safely requeue retryable failures with the same idempotency key", async () => {
