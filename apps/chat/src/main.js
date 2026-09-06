@@ -6091,7 +6091,11 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
       toolMode: false,
       structuredOutput: false,
       skipQualityValidation: true,
-      maxTokens: Math.min(Number(body?.max_tokens || 2048), 4096),
+      // A router turn emits only one compact JSON tool decision. Large output
+      // budgets let reasoning models run until the upstream worker deadline,
+      // surfacing as "Application failed to respond" even though the desired
+      // payload is only a few dozen tokens.
+      maxTokens: Math.min(Number(body?.max_tokens || 512), 512),
       temperature: 0,
     };
     try {
