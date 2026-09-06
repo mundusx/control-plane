@@ -341,6 +341,15 @@ test("protects inline and display math from Markdown list parsing", () => {
     { token: "MUNDUSXMATH0TOKEN", expression: "x^2 - 2x - 3 = 0", displayMode: true },
     { token: "MUNDUSXMATH1TOKEN", expression: "x=-1", displayMode: false },
   ]);
+  const normalized = normalizeAssistantDisplayText(protectMathSegments("$$x^2\n- 2x\n- 3 = 0$$", []));
+  assert.doesNotMatch(normalized, /^[-*+]\s/m);
+});
+
+test("completed answers hide internal job metadata like a normal chat surface", () => {
+  const html = page(configFromEnv({}));
+  const completedRenderer = html.match(/function renderCompletedJob[\s\S]*?\n    \}/)?.[0] || "";
+  assert.doesNotMatch(completedRenderer, /formatJobMeta\(payload\)/);
+  assert.match(completedRenderer, /className = "meta response-tools"/);
 });
 
 test("anchors the account profile below the flexible conversation rail", () => {
