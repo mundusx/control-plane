@@ -4192,14 +4192,13 @@ export function page(config = configFromEnv()) {
       if (Array.isArray(payload.sources) && payload.sources.length) {
         body.appendChild(createCitationSources(payload.sources));
       }
-      const meta = document.createElement("div");
-      meta.className = "meta";
-      meta.textContent = formatJobMeta(payload);
       const badge = createToolBadge(payload);
       if (badge) {
+        const meta = document.createElement("div");
+        meta.className = "meta response-tools";
         meta.appendChild(badge);
+        body.appendChild(meta);
       }
-      body.appendChild(meta);
       scrollChatToLatest();
       if (conversationId && options.cache !== false) {
         appendCachedConversationTurn(conversationId, {
@@ -4564,7 +4563,7 @@ export function page(config = configFromEnv()) {
     function appendStandardMarkdown(container, text) {
       if (typeof window.marked?.parse !== "function" || !window.DOMPurify?.isSupported) return false;
       const mathSegments = [];
-      const protectedText = protectMathSegments(normalizeAssistantDisplayText(text), mathSegments);
+      const protectedText = normalizeAssistantDisplayText(protectMathSegments(text, mathSegments));
       const rendered = window.marked.parse(protectedText, {
         gfm: true,
         breaks: false,
