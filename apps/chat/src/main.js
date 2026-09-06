@@ -6246,8 +6246,14 @@ export function parseHermesToolDecision(value, tools = []) {
   if (parsedName && allowed.has(parsedName)) {
     let args = parsed.arguments;
     if (typeof args === "string") args = parseFirstJsonObject(args);
+    if (!args && parsed && typeof parsed === "object") {
+      const topLevelArguments = Object.fromEntries(
+        Object.entries(parsed).filter(([key]) => !["kind", "name", "content"].includes(key)),
+      );
+      if (Object.keys(topLevelArguments).length) args = topLevelArguments;
+    }
     if (args && typeof args === "object" && !Array.isArray(args)) {
-      return { ...parsed, kind: "tool", name: parsedName, arguments: args };
+      return { kind: "tool", name: parsedName, arguments: args };
     }
   }
 

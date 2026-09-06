@@ -3660,6 +3660,23 @@ test("Hermes routing accepts an allowed tool name used as the decision kind", ()
   );
 });
 
+test("Hermes routing accepts native top-level tool arguments from small models", () => {
+  assert.deepEqual(
+    parseHermesToolDecision(
+      '{"kind":"read_file","path":"index.js"}',
+      [{ name: "read_file" }],
+    ),
+    { kind: "tool", name: "read_file", arguments: { path: "index.js" } },
+  );
+  assert.deepEqual(
+    parseHermesToolDecision(
+      '{"kind":"tool","name":"terminal","command":"npm test"}',
+      [{ name: "terminal" }],
+    ),
+    { kind: "tool", name: "terminal", arguments: { command: "npm test" } },
+  );
+});
+
 test("Hermes model turns retry only transient gateway failures", () => {
   assert.equal(isRetryableHermesModelFailure("HTTP 502: Application failed to respond"), true);
   assert.equal(isRetryableHermesModelFailure("connection reset by peer"), true);
