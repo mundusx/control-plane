@@ -41,6 +41,26 @@ function token(bytes = 32) {
   return randomBytes(bytes).toString("base64url");
 }
 
+function googleIdTokenClaims(idToken, clientId, profile) {
+  try {
+    const parts = String(idToken || "").split(".");
+    if (parts.length !== 3) return null;
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    const issuer = String(claims?.iss || "");
+    const audience = Array.isArray(claims?.aud) ? claims.aud : [claims?.aud];
+    const expiresAt = Number(claims?.exp || 0);
+    if (!["accounts.google.com", "https://accounts.google.com"].includes(issuer) ||
+        !audience.includes(clientId) || expiresAt <= Math.floor(Date.now() / 1000) ||
+        String(claims?.sub || "") !== String(profile?.sub || "") ||
+        normalizeEmail(claims?.email) !== normalizeEmail(profile?.email)) {
+      return null;
+    }
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
 function parseCookies(header = "") {
   return Object.fromEntries(header.split(";").map((part) => part.trim()).filter(Boolean).map((part) => {
     const at = part.indexOf("=");
@@ -1071,10 +1091,13 @@ export class PostgresAuthStore {
     });
     const profile = await profileResponse.json().catch(() => ({}));
     const email = normalizeEmail(profile.email);
+    const idTokenClaims = googleIdTokenClaims(exchanged.id_token, this.config.googleClientId, profile);
     const emailVerified = profile.email_verified === true
       || profile.email_verified === "true"
       || profile.verified_email === true
-      || profile.verified_email === "true";
+      || profile.verified_email === "true"
+      || idTokenClaims?.email_verified === true
+      || idTokenClaims?.email_verified === "true";
     if (!profileResponse.ok || !profile.sub || !emailVerified || !email) {
       throw Object.assign(new Error("Google account needs a verified email"), { statusCode: 403 });
     }
