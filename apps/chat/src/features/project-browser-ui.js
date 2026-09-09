@@ -39,14 +39,17 @@ function projectBrowserDialog(title) {
 }
 
 async function projectOperation(slug, request, write = false) {
-  const statusResponse = await fetch("/api/agent/status");
-  if (!statusResponse.ok) throw new Error("Please sign in to browse this project.");
+  const statusResponse = await fetch("/api/agent/status", {cache:"no-store"});
+  if (!statusResponse.ok) throw new Error(statusResponse.status === 401 ? "Please sign in to browse this project." : "Could not check the local connection. Try again shortly.");
   const status = await statusResponse.json();
   const capable = status.connections?.filter((connection) => connection.online && connection.capabilities?.project_browser === true) || [];
   const previousDevice = projectBrowserDevices.get(slug);
   const device = previousDevice ? capable.find((connection) => connection.connection_id === previousDevice) : capable[0];
   if (!device) {
-    throw new Error("File browsing needs an online connector with project-browser support. Restart your updated MundusX app.");
+    if (previousDevice && capable.length) throw new Error("This project's connected computer is offline or unavailable. Reconnect that computer, then retry. Files will not be opened on a different computer automatically.");
+    const online = status.connections?.filter((connection) => connection.online) || [];
+    if (online.length) throw new Error("Your connected app does not advertise project-file support. Update the MundusX desktop app, then restart it and retry.");
+    throw new Error("No local computer is connected to this signed-in account. Open MundusX on the project's computer and check its connection, then retry.");
   }
   projectBrowserDevices.set(slug, device.connection_id);
   const response = await fetch("/api/agent/tasks", {
@@ -105,7 +108,12 @@ function appendProjectDirectory(parent, slug, path, depth) {
     const note = document.createElement("div"); note.className = "project-tree-note";
     note.style.paddingLeft = depth * 12 + "px";
     note.textContent = projectDirectoryPending.has(key) ? "Loading local files…" : data?.error || "Empty folder";
-    parent.append(note); return;
+    parent.append(note);
+    if (data?.error && !projectDirectoryPending.has(key)) {
+      const retry = projectTreeButton("Retry loading files", "refresh", slug, path);
+      parent.append(retry);
+    }
+    return;
   }
   for (const entry of data.entries) appendProjectTreeRow(parent, slug, path ? path + "/" + entry.name : entry.name, entry.name, entry.directory, false, depth);
   if (data.truncated) { const note = document.createElement("p"); note.className = "project-tree-note"; note.textContent = "Showing the first 500 entries."; parent.append(note); }
@@ -122,6 +130,7 @@ async function handleProjectTreeClick(event) {
   const button = event.target.closest("button[data-tree-action]"); if (!button) return;
   const { treeAction:action, projectSlug:slug, path } = button.dataset;
   const row = button.closest(".project-tree-row");
+  if (action === "refresh") { await loadProjectDirectory(slug, path); return; }
   if (action === "menu") { showProjectActions(slug, path, row.dataset.directory === "true", row.dataset.root === "true", button); return; }
   if (action === "preview") {
     const dialog = projectBrowserDialog(path); const content = document.createElement("pre"); content.textContent = "Loading preview…"; dialog.append(content);
@@ -198,7 +207,12 @@ function showProjectActions(slug, path, directory, root, anchor, position) {
       buttons[next]?.focus();
     }
   });
-  actions.addEventListener("focusout", () => queueMicrotask(() => { if (projectActionsMenu === actions && !actions.contains(document.activeElement) && document.activeElement !== anchor) closeProjectActions(); }));
+  actions.addEventListener("focusout", (event) => {
+    // Focus changes can run microtasks before the next button receives focus.
+    // Keep the menu mounted through pointer activation of another menu item.
+    if (actions.contains(event.relatedTarget) || event.relatedTarget === anchor) return;
+    setTimeout(() => { if (projectActionsMenu === actions && !actions.contains(document.activeElement) && document.activeElement !== anchor) closeProjectActions(); }, 0);
+  });
   document.body.append(actions);
   const rect = anchor?.getBoundingClientRect() || {left:8,right:8,top:8};
   const beside = rect.right + 6 + actions.offsetWidth <= window.innerWidth - 8 ? rect.right + 6 : rect.left - actions.offsetWidth - 6;
@@ -209,21 +223,39 @@ function showProjectActions(slug, path, directory, root, anchor, position) {
 
 async function editProjectDocument(slug, section) {
   const dialog = projectBrowserDialog(slug + " · " + section);
-  const note = document.createElement("p"); note.textContent = section === "prompts" ? "Saved locally in this project. Use ## headings to separate templates. Prompts run only when you send them." : "Saved locally in .mundusx/" + section + ".md and included in subsequent project tasks. Keep under 8 KB. Current user requests take priority.";
+  const note = document.createElement("p");
+  const descriptions = {
+    instructions: "Project-wide rules and context, such as architecture, coding conventions, and build commands.",
+    skills: "Reusable project workflows, such as how to add an endpoint or verify a change. These are text instructions, not installed Hermes tools.",
+    prompts: "Reusable request templates. Use ## headings to separate them. Choose a prompt to put it in the composer; it runs only when you send it.",
+  };
+  note.textContent = descriptions[section] + " Saved locally in .mundusx/" + section + ".md." + (section === "prompts" ? "" : " Included in subsequent project tasks. Keep under 8 KB. Current user requests take priority.");
   const editor = document.createElement("textarea"); editor.setAttribute("aria-label", "Project " + section); editor.disabled = true;
   const status = document.createElement("p"); status.setAttribute("role", "status"); status.textContent = "Loading…";
   const actions = document.createElement("div"); actions.className = "project-browser-actions";
   const save = document.createElement("button"); save.textContent = "Save " + section; save.disabled = true; actions.append(save);
   dialog.append(note, editor, status, actions);
-  try { editor.value = (await projectOperation(slug, {operation:"config_read", section})).content || ""; editor.disabled = false; save.disabled = false; status.textContent = ""; }
-  catch (error) { status.textContent = error.message; return; }
+  const retry = document.createElement("button"); retry.textContent = "Retry loading"; retry.hidden = true; actions.append(retry);
+  const use = section === "prompts" ? document.createElement("button") : null;
+  if (use) { use.textContent = "Choose a prompt"; use.disabled = true; actions.append(use); }
+  async function loadDocument() {
+    retry.hidden = true; editor.disabled = true; save.disabled = true;
+    if (use) use.disabled = true;
+    status.textContent = "Loading�";
+    try {
+      editor.value = (await projectOperation(slug, {operation:"config_read", section})).content || "";
+      editor.disabled = false; save.disabled = false; status.textContent = "";
+      if (use) use.disabled = false;
+    } catch (error) { status.textContent = error.message; retry.hidden = false; }
+  }
+  retry.addEventListener("click", loadDocument);
+  await loadDocument();
   save.addEventListener("click", async () => {
     save.disabled = true; status.textContent = "Saving…";
     try { await projectOperation(slug, {operation:"config_write", section, content:editor.value}, true); status.textContent = "Saved to this project."; }
     catch (error) { status.textContent = error.message; } finally { save.disabled = false; }
   });
-  if (section === "prompts") {
-    const use = document.createElement("button"); use.textContent = "Choose a prompt"; actions.append(use);
+  if (use) {
     use.addEventListener("click", () => {
       const picker = projectBrowserDialog("Saved prompts");
       for (const text of editor.value.split(/^## /m).filter((part) => part.trim())) {
