@@ -6906,11 +6906,9 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
 }
 
 export async function streamOpenAiChatCompletion(response, body, config, fetchImpl = fetch) {
-  const lastUserMessage = Array.isArray(body?.messages)
-    ? [...body.messages].reverse().find((entry) => normalizeOpenAiRole(entry?.role) === "user")
-    : null;
-  const message = openAiMessageText(lastUserMessage?.content);
-  const buffered = requiresValidatedStreaming(message, body);
+  // Direct API clients own their coding workflow. Do not buffer based on
+  // prompt wording; retain validation only for explicit structured output.
+  const buffered = Boolean(body?.response_format);
   if (!buffered) {
     const upstreamBody = { ...body };
     if (config.modelOverride) upstreamBody.model = config.modelOverride;
@@ -6955,7 +6953,16 @@ export async function relayControlPlaneOpenAiStream(
     "Content-Type": "application/json",
     ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
   };
-  const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
+  const controller = new AbortController();
+  let reader;
+  const disconnect = () => {
+    controller.abort();
+    reader?.cancel().catch(() => {});
+  };
+  response.once?.("close", disconnect);
+  try {
+    const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
+    signal: controller.signal,
     method: "POST",
     headers,
     body: JSON.stringify({ ...body, stream: true }),
@@ -6971,7 +6978,12 @@ export async function relayControlPlaneOpenAiStream(
   const upstreamMode = upstream.headers?.get?.("x-mundusx-stream-mode") || "live-delta";
   const upstreamCompletionId = upstream.headers?.get?.("x-mundusx-completion-id") || null;
   startOpenAiStream(response, upstreamMode, upstreamCompletionId);
-  const reader = upstream.body.getReader();
+  reader = upstream.body.getReader();
+  } catch (error) {
+    response.off?.("close", disconnect);
+    controller.abort();
+    throw error;
+  }
   const decoder = new TextDecoder();
   let parseBuffer = "";
   let content = "";
@@ -7014,6 +7026,7 @@ export async function relayControlPlaneOpenAiStream(
   try {
     while (true) {
       const { value, done } = await reader.read();
+      if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
       if (done) break;
       const text = decoder.decode(value, { stream: true });
       if (!text) continue;
@@ -7048,6 +7061,8 @@ export async function relayControlPlaneOpenAiStream(
     }
     return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
   } finally {
+    response.off?.("close", disconnect);
+    await reader.cancel().catch(() => {});
     reader.releaseLock?.();
   }
 }
@@ -7068,7 +7083,8 @@ export function normalizePublicOpenAiStreamEvent(eventText) {
     const content = choice?.delta?.content;
     const hasContent = typeof content === "string" && content.length > 0;
     const terminal = choice?.finish_reason != null || payload?.usage != null || payload?.error != null;
-    if (!hasContent && !terminal) return null;
+    const hasToolCall = choice?.delta?.tool_calls?.length > 0 || choice?.delta?.function_call != null;
+    if (!hasContent && !hasToolCall && !terminal) return null;
     if (payload && typeof payload === "object" && !payload.error) payload.model = PUBLIC_MODEL_ID;
     return `data: ${JSON.stringify(payload)}`;
   } catch {
