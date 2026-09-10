@@ -8901,75 +8901,9 @@ fn handle_connection_with_streams(
                             return write_chat_error(&mut stream, "400 Bad Request", &error);
                         }
                     };
-                    match if mode.is_none() && !native_tool_turn {
-                        tools::execute(&request_body.messages)
-                    } else {
-                        Ok(None)
-                    } {
-                        Ok(Some(tool)) => {
-                            let completion = chat_gateway::completion_response(
-                                &completion_id,
-                                created,
-                                public_model,
-                                &tool.content,
-                                "stop",
-                                None,
-                                Some(&tool),
-                            );
-                            if wants_stream {
-                                if stream
-                                    .write_all(
-                                        chat_gateway::sse_start(
-                                            &completion_id,
-                                            created,
-                                            public_model,
-                                            false,
-                                        )
-                                        .as_bytes(),
-                                    )
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                                let _ = stream
-                                    .write_all(chat_gateway::sse_finish(&completion).as_bytes());
-                                return;
-                            }
-                            return write_json_and_finish(&mut stream, "200 OK", completion);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            if wants_stream {
-                                if stream
-                                    .write_all(
-                                        chat_gateway::sse_start(
-                                            &completion_id,
-                                            created,
-                                            public_model,
-                                            false,
-                                        )
-                                        .as_bytes(),
-                                    )
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                                let completion = chat_gateway::completion_response(
-                                    &completion_id,
-                                    created,
-                                    public_model,
-                                    &format!("MundusX tool request failed: {error}"),
-                                    "stop",
-                                    None,
-                                    None,
-                                );
-                                let _ = stream
-                                    .write_all(chat_gateway::sse_finish(&completion).as_bytes());
-                                return;
-                            }
-                            return write_chat_error(&mut stream, "502 Bad Gateway", &error);
-                        }
-                    }
+                    // OpenAI-compatible clients own search and other tool execution.
+                    // Preserve their tool turns and route ordinary requests to inference;
+                    // never substitute gateway search/weather answers here.
                     let job_request = JobRequest {
                         request_id: completion_id.clone(),
                         prompt,
@@ -10179,13 +10113,28 @@ mod tests {
     }
 
     #[test]
-    fn streaming_chat_completions_return_openai_sse_for_direct_tools() {
+    fn streaming_search_requests_reach_inference_without_gateway_tools() {
         let state = Arc::new(Mutex::new(ControlPlaneState::default()));
         let sync_status = Arc::new(Mutex::new(SupabaseSyncStatus::disabled(
             StorageSource::LocalJsonOnly,
         )));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let address = listener.local_addr().expect("listener address");
+        let completion_state = Arc::clone(&state);
+        let completer = thread::spawn(move || {
+            for _ in 0..500 {
+                let mut guard = completion_state.lock().expect("state lock");
+                if let Some(job) = guard.jobs.values_mut().next() {
+                    assert!(job.prompt.contains("Search the web for latest Rust releases"));
+                    job.status = JobStatus::Completed;
+                    job.output = Some("Use the client's search tool for live information.".to_string());
+                    return;
+                }
+                drop(guard);
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("Search request was intercepted instead of queued");
+        });
         let handler = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept request");
             handle_connection(
@@ -10198,7 +10147,7 @@ mod tests {
         });
         let body = serde_json::json!({
             "model": "mundusx-agnostic",
-            "messages": [{"role": "user", "content": "How is the weather today?"}],
+            "messages": [{"role": "user", "content": "Search the web for latest Rust releases"}],
             "stream": true
         })
         .to_string();
@@ -10211,11 +10160,13 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read response");
         handler.join().expect("handler completes");
+        completer.join().expect("request reached inference");
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("Content-Type: text/event-stream"));
         assert!(response.contains(r#""role":"assistant""#));
-        assert!(response.contains("Which city or location would you like the weather for?"));
+        assert!(response.contains("Use the client"));
+        assert!(!response.contains("MUNDUSX_WEB_SEARCH_URL"));
         assert!(response.contains("data: [DONE]"));
     }
 
