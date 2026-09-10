@@ -434,6 +434,17 @@ test("normalization restores compact streamed comparison tables", () => {
   assert.equal((html.match(/<tr>/g) || []).length, 3);
 });
 
+test("normalization cleans headings preceding a compact table", () => {
+  const compact = "✅ About 914 users. --- ### 5. Cost context - 1TB = **$20** --- ### Sensitivity check | Token size | Bytes | Users ||---|---|---|| ASCII | 1 | 1,828 |";
+  const normalized = normalizeAssistantDisplayText(compact);
+  assert.match(normalized, /✅ About 914 users\.\n\n---\n\n### 5\. Cost context/);
+  assert.match(normalized, /\n\n---\n\n### Sensitivity check\n\n\| Token size \| Bytes \| Users \|/);
+  const html = marked.parse(normalized, { gfm: true });
+  assert.equal((html.match(/<h3>/g) || []).length, 2);
+  assert.equal((html.match(/<tr>/g) || []).length, 2);
+  assert.match(html, /\$20/);
+});
+
 test("chat page ships the compact-table helper used by its formatter", () => {
   const html = page(configFromEnv({}));
   assert.match(html, /function expandCompactMarkdownTable\(line\)/);

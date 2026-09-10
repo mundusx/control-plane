@@ -249,8 +249,14 @@ export function normalizeAssistantDisplayText(text) {
       return protect(line);
     }
     if (marker) { fence = marker[1]; return protect(line); }
-    // Preserve possible table rows, including partial rows during streaming.
-    if (line.includes("|") || /^(?: {4}|\t)/.test(line)) return protect(expandCompactMarkdownTable(line));
+    // Preserve table rows, but allow prose and headings preceding a compact
+    // streamed table to continue through the display cleanup below.
+    if (line.includes("|")) {
+      return expandCompactMarkdownTable(line).split("\n").map((part) =>
+        part.trimStart().startsWith("|") ? protect(part) : part,
+      ).join("\n");
+    }
+    if (/^(?: {4}|\t)/.test(line)) return protect(line);
     return line.replace(/(`+)([^`]*?)\1/g, protect);
   }).join("\n");
   return source
@@ -258,8 +264,8 @@ export function normalizeAssistantDisplayText(text) {
     .replace(/\u00a0/g, " ")
     .replace(/(?:^|[^\S\n]+)---[^\S\n]+(?=#{1,6}(?:[^\S\n]+|(?=[^#\s])))/g, "\n\n---\n\n")
     .replace(/(^|[^\S\n]+)(#{1,6})(?:[^\S\n]+|(?=[^#\s]))(?=\S)/gm, "$1\n\n$2 ")
-    .replace(/(?<=[^\s*])[^\S\n]+(\d+)\.[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1. ")
-    .replace(/(?<=[^\s*])[^\S\n]+([-*+])[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1 ")
+    .replace(/(?<=[^\s*#])[^\S\n]+(\d+)\.[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1. ")
+    .replace(/(?<=[^\s*#])[^\S\n]+([-*+])[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1 ")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
     .replace(/\u0000MUNDUSXMARKDOWN(\d+)\u0000/g, (_, index) => protectedSegments[Number(index)]);
