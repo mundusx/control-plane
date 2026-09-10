@@ -4002,7 +4002,8 @@ test("generative MundusX Chat requests stream while deterministic and tool route
   assert.equal(canLiveStreamChatTurn({ message: "Return a JSON schema for a customer record", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), false);
   assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), false);
-  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "can we ask you, for free account in chatgpt, how many messages can i keep?", toolMode: true }), true);
 });
 
 test("native MundusX Chat streams complete projects as upstream deltas arrive", async () => {

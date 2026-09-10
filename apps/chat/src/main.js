@@ -6915,7 +6915,7 @@ export function canLiveStreamChatTurn(body = {}) {
   ) {
     return false;
   }
-  return !(isToolModeEnabled(body) && needsGrounding(toolMessage));
+  return true;
 }
 
 export async function streamChatTurn(response, body, config = configFromEnv(), fetchImpl = fetch) {
