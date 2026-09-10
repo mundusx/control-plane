@@ -23,3 +23,16 @@ test('upstream failure preserves HTTP error and cleans close listener',async()=>
 test('truncated upstream emits a stream error instead of silent success',async()=>{
  const r=output();await streamOpenAiChatCompletion(r,{messages:[]},config,async()=>new Response(frame({content:'partial'})));assert.match(r.chunks.join(''),/mundusx_stream_error/);
 });
+
+test('Continue file protocol streams arguments before completion through public relay',async()=>{
+ let source;const r=output();
+ const messages=[{role:'system',content:'<tool_use_instructions> TOOL_NAME: create_new_file BEGIN_ARG: contents'}];
+ const task=streamOpenAiChatCompletion(r,{messages,stream:true},config,async()=>new Response(new ReadableStream({start(c){source=c;}})));
+ await tick();source.enqueue(new TextEncoder().encode(frame({content:'```tool\nTOOL_NAME: create_new_file\nBEGIN_ARG: filepath\nhello.js\nEND_ARG\nBEGIN_ARG: contents\n// live code\n'})));await tick();
+ assert.match(r.chunks.join(''),/tool_calls/);assert.match(r.chunks.join(''),/live code/);assert.equal(r.writableEnded,false);
+ source.enqueue(new TextEncoder().encode(frame({content:'END_ARG\n```\n'})+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n'));source.close();await task;
+ const events=r.chunks.join('').split('\n\n').filter(s=>s.startsWith('data: {')).map(s=>JSON.parse(s.slice(6)));
+ const calls=events.flatMap(e=>e.choices?.[0]?.delta?.tool_calls || []);
+ assert.deepEqual(JSON.parse(calls.map(c=>c.function.arguments).join('')),{filepath:'hello.js',contents:'// live code'});
+ assert.equal(events.at(-1).choices[0].finish_reason,'tool_calls');
+});

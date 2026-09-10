@@ -1,3 +1,4 @@
+import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { createServer } from "node:http";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -7040,11 +7041,24 @@ export async function relayControlPlaneOpenAiStream(
       // Preserve and relay unknown upstream events without treating them as content.
     }
   };
+  const fileStream = hooks.publicOpenAi && usesContinueFileProtocol(body) ? new ContinueFileStream() : null;
   const relayEvent = (eventText) => {
     inspectEvent(eventText);
     if (hooks.publicOpenAi === true) {
       const normalized = normalizePublicOpenAiStreamEvent(eventText);
-      if (normalized) response.write(`${normalized}\n\n`);
+      if (fileStream && normalized === "data: [DONE]" && !finishReason) throw new Error("File stream missing terminal event");
+      if (normalized && fileStream && normalized.startsWith("data: {") ) {
+        const payload = JSON.parse(normalized.slice(6));
+        const choice = payload.choices?.[0];
+        if (choice?.delta?.content != null || choice?.finish_reason != null) {
+          const deltas = fileStream.push(choice.delta?.content || "");
+          if (choice.finish_reason != null) deltas.push(...fileStream.finish());
+          for (const delta of deltas) response.write(`data: ${JSON.stringify({ ...payload,
+            choices: [{ ...choice, delta, finish_reason: null }] })}\n\n`);
+          if (choice.finish_reason != null) response.write(`data: ${JSON.stringify({ ...payload,
+            choices: [{ ...choice, delta: {}, finish_reason: fileStream.converted && choice.finish_reason === "stop" ? "tool_calls" : choice.finish_reason }] })}\n\n`);
+        } else response.write(`${normalized}\n\n`);
+      } else if (normalized) response.write(`${normalized}\n\n`);
     }
   };
 
