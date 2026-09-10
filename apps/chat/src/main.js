@@ -7043,6 +7043,7 @@ export async function relayControlPlaneOpenAiStream(
   };
   const fileStream = hooks.publicOpenAi && usesContinueFileProtocol(body) ? new ContinueFileStream() : null;
   const relayEvent = (eventText) => {
+    if (sawDone) return;
     inspectEvent(eventText);
     if (hooks.publicOpenAi === true) {
       const normalized = normalizePublicOpenAiStreamEvent(eventText);
@@ -7077,13 +7078,16 @@ export async function relayControlPlaneOpenAiStream(
         response.write(text);
         events.forEach(inspectEvent);
       }
+      // SSE completion is authoritative; do not wait for the upstream socket
+      // to close (or let a later transport reset invalidate a completed reply).
+      if (sawDone) break;
     }
     const tail = decoder.decode();
     if (tail) {
       parseBuffer += tail;
       if (hooks.publicOpenAi !== true) response.write(tail);
     }
-    if (parseBuffer.trim()) {
+    if (!sawDone && parseBuffer.trim()) {
       if (hooks.publicOpenAi === true) relayEvent(parseBuffer);
       else inspectEvent(parseBuffer);
     }
@@ -7094,8 +7098,12 @@ export async function relayControlPlaneOpenAiStream(
     await hooks.onComplete?.({ content, completionId, finishReason });
     return { content, completionId, finishReason };
   } catch (error) {
+    if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+    const message = `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
+    console.error("[openai-stream]", JSON.stringify({ completionId, message,
+      cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
-      const payload = { error: { message: error.message ?? "stream failed", type: "mundusx_stream_error" } };
+      const payload = { error: { message, type: "mundusx_stream_error" } };
       response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
     }
     return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
