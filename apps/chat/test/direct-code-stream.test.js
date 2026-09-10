@@ -24,6 +24,30 @@ test('truncated upstream emits a stream error instead of silent success',async()
  const r=output();await streamOpenAiChatCompletion(r,{messages:[]},config,async()=>new Response(frame({content:'partial'})));assert.match(r.chunks.join(''),/mundusx_stream_error/);
 });
 
+test('DONE completes the response without waiting for upstream socket closure',async()=>{
+ let cancelled=false;const r=output();
+ const task=streamOpenAiChatCompletion(r,{messages:[]},config,async()=>new Response(new ReadableStream({
+  start(c){c.enqueue(new TextEncoder().encode(frame({content:'complete'})+'data: [DONE]\n\n'));},
+  cancel(){cancelled=true;}
+ })));
+ let timer;
+ try { await Promise.race([task,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('relay waited for socket after DONE')),500);})]); }
+ finally {clearTimeout(timer);}
+ assert.equal(r.writableEnded,true);assert.equal(cancelled,true);
+ assert.equal(r.chunks.join('').split('data: [DONE]').length-1,1);
+ assert.doesNotMatch(r.chunks.join(''),/mundusx_stream_error/);
+});
+
+test('upstream transport reset before DONE returns an explicit incomplete-stream error',async()=>{
+ let source;const r=output();
+ const task=streamOpenAiChatCompletion(r,{messages:[]},config,async()=>new Response(new ReadableStream({start(c){source=c;}})));
+ await tick();source.enqueue(new TextEncoder().encode(frame({content:'partial'})));await tick();
+ source.error(new TypeError('terminated'));await task;
+ assert.equal(r.writableEnded,true);
+ assert.match(r.chunks.join(''),/interrupted before completion: terminated/);
+ assert.equal(r.chunks.join('').split('data: [DONE]').length-1,1);
+});
+
 test('Continue file protocol streams arguments before completion through public relay',async()=>{
  let source;const r=output();
  const messages=[{role:'system',content:'<tool_use_instructions> TOOL_NAME: create_new_file BEGIN_ARG: contents'}];
