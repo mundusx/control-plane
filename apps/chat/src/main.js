@@ -6905,22 +6905,7 @@ export function requiresValidatedStreaming(message, body = {}) {
 
 export function canLiveStreamChatTurn(body = {}) {
   const message = String(body?.message ?? "").trim();
-  if (!message || detectClientMetadataTask(message)) {
-    return false;
-  }
-  const toolMessage = message;
-  if (
-    isMultiIntentPlanningCandidate(toolMessage) ||
-    extractWeatherLocation(toolMessage) ||
-    looksLikeWeatherRequest(toolMessage.toLowerCase()) ||
-    extractAssistantIdentityTopic(toolMessage) ||
-    extractMundusXKnowledgeTopic(toolMessage) ||
-    extractCurrentOfficeQuery(toolMessage) ||
-    extractFactualSummaryTopic(toolMessage)
-  ) {
-    return false;
-  }
-  return true;
+  return Boolean(message) && !detectClientMetadataTask(message);
 }
 
 export async function streamChatTurn(response, body, config = configFromEnv(), fetchImpl = fetch) {
