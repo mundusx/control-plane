@@ -195,7 +195,7 @@ function showProjectActions(slug, path, directory, root, anchor, position) {
     action("Refresh files", () => loadProjectDirectory(slug, path));
     if (!root) action("Use as task scope", () => { setActiveProject({slug}); promptEl.value = "Work within folder " + JSON.stringify(path) + ".\n\n" + promptEl.value; promptEl.dispatchEvent(new Event("input", {bubbles:true})); promptEl.focus(); });
   }
-  action("Copy relative path", () => navigator.clipboard.writeText(path || "."));
+  if (!root) action("Copy relative path", () => navigator.clipboard.writeText(path));
   if (root) { separator(); action("Remove from sidebar", () => { if (expandedProject === slug) expandedProject = null; removeProject(slug); }); }
   actions.addEventListener("keydown", (event) => {
     const buttons = [...actions.querySelectorAll("button")];
