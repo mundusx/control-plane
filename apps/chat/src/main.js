@@ -2196,6 +2196,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     let runnerTargetProject = null;
     let runnerDownloadStarted = false;
     let runnerPairingInProgress = false;
+    let reconnectRequestedAt = 0;
     let runnerPairingExpiresAt = 0;
     let runnerPairingPollTimer = null;
     let pendingRunnerAction = null;
@@ -2920,9 +2921,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const updateAvailable = Boolean(knownConnection)
         && !releaseVersionAtLeast(installedVersion, latestLocalAgentVersion);
       localRunnerReady = localRunnerReady && !updateAvailable;
+      if (localRunnerReady) reconnectRequestedAt = 0;
+      const reconnectTimedOut = reconnectRequestedAt > 0 && Date.now() - reconnectRequestedAt >= 20000;
       updateRunnerSetupState({ paired, ready: localRunnerReady, agentMissing });
       if (projectAgentUpdateEl) {
         projectAgentUpdateEl.hidden = !(updateAvailable || (paired && !localRunnerReady));
+        configureAgentRecoveryAction(updateAvailable, paired && !localRunnerReady);
         projectAgentUpdateEl.textContent = updateAvailable
           ? "Update now"
           : paired && !localRunnerReady
@@ -2931,7 +2935,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
       // A healthy connector is authoritative. Do not leave a stale manual
       // retry action visible after automatic readiness polling succeeds.
-      if (projectReadinessRefreshEl) projectReadinessRefreshEl.hidden = localRunnerReady || (paired && !localRunnerReady);
+      if (projectReadinessRefreshEl) projectReadinessRefreshEl.hidden = localRunnerReady || (paired && !localRunnerReady && !reconnectTimedOut);
       const statusText = updateAvailable
         ? "Update required · Installed " + installedVersion + " · Latest " + latestLocalAgentVersion
         : readyConnection
@@ -2941,7 +2945,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           : agentMissing
             ? "Agent required. Install or enable Hermes on this computer."
             : paired
-              ? "Connected but offline. MundusX should restart automatically."
+              ? "The local app has not confirmed a connection."
               : runnerPairingInProgress
                 ? "Waiting for installer approval and runner startup…"
                 : "No computer is connected to this account yet.";
@@ -2955,7 +2959,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         : agentMissing
           ? "Install Hermes or select the native MundusX Agent, then retry."
           : paired
-            ? "Wait a few seconds and retry. If it stays offline, choose Repair; no terminal is required."
+            ? reconnectTimedOut
+              ? "The app has not connected. If no browser prompt appeared, open MundusX from the Windows Start menu, then choose Check again. If prompted, allow this site to open MundusX."
+              : reconnectRequestedAt
+                ? "Waiting for the installed app to connect. Accept the browser’s Open MundusX prompt if it appears."
+                : "MundusX is offline. Choose Reconnect to open the installed app and restart its connection."
             : "Chat cannot inspect installed apps directly. Install MundusX, complete its browser approval, then retry.";
       if (!runnerTargetProject) {
         if (repositoryDialogTitleEl) repositoryDialogTitleEl.textContent = localRunnerReady ? "Create project" : "Connect this computer";
@@ -3230,6 +3238,23 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         window.getSelection()?.selectAllChildren(target);
       }
     }));
+    function configureAgentRecoveryAction(updateAvailable, offline) {
+      if (!projectAgentUpdateEl) return;
+      const reconnect = offline && !updateAvailable;
+      projectAgentUpdateEl.href = reconnect ? "mundusx://reconnect" : harnessDownloadEl.href;
+      projectAgentUpdateEl.dataset.action = reconnect ? "reconnect" : "update";
+      if (reconnect) projectAgentUpdateEl.removeAttribute("download");
+      else projectAgentUpdateEl.setAttribute("download", "");
+    }
+    projectAgentUpdateEl?.addEventListener("click", () => {
+      if (projectAgentUpdateEl.dataset.action !== "reconnect") return;
+      reconnectRequestedAt = Date.now();
+      runnerPairingInProgress = true;
+      runnerPairingExpiresAt = Date.now() + 10 * 60 * 1000;
+      if (projectReadinessRefreshEl) projectReadinessRefreshEl.textContent = "Check again";
+      if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Opening MundusX to reconnect. Allow the browser prompt. If the app does not open, open MundusX from the Start menu; older installations may need an update to support browser reconnect.";
+      pollRunnerPairing();
+    });
     harnessDownloadEl?.addEventListener("click", () => {
       runnerDownloadStarted = true;
       runnerPairingInProgress = true;
