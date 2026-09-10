@@ -234,7 +234,26 @@ export async function fetchHarnessTask(
 }
 
 export function normalizeAssistantDisplayText(text) {
-  return String(text || "")
+  const protectedSegments = [];
+  const protect = (value) => {
+    const token = "\u0000MUNDUSXMARKDOWN" + protectedSegments.length + "\u0000";
+    protectedSegments.push(value);
+    return token;
+  };
+  let fence = null;
+  const source = String(text || "").replace(/\r\n/g, "\n").split("\n").map((line) => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length &&
+          line.slice(marker[0].length).trim() === "") fence = null;
+      return protect(line);
+    }
+    if (marker) { fence = marker[1]; return protect(line); }
+    // Preserve possible table rows, including partial rows during streaming.
+    if (line.includes("|") || /^(?: {4}|\t)/.test(line)) return protect(line);
+    return line.replace(/(`+)([^`]*?)\1/g, protect);
+  }).join("\n");
+  return source
     .replace(/\r\n/g, "\n")
     .replace(/\u00a0/g, " ")
     .replace(/(?:^|[^\S\n]+)---[^\S\n]+(?=#{1,6}(?:[^\S\n]+|(?=[^#\s])))/g, "\n\n---\n\n")
@@ -242,7 +261,8 @@ export function normalizeAssistantDisplayText(text) {
     .replace(/(?<=[^\s*])[^\S\n]+(\d+)\.[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1. ")
     .replace(/(?<=[^\s*])[^\S\n]+([-*+])[^\S\n]+(?=\*\*|[A-Z0-9])/g, "\n$1 ")
     .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .trim()
+    .replace(/\u0000MUNDUSXMARKDOWN(\d+)\u0000/g, (_, index) => protectedSegments[Number(index)]);
 }
 
 export function protectMathSegments(text, segments = []) {
