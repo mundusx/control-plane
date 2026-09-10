@@ -425,6 +425,21 @@ test("normalization preserves operators inside comparison cells and code", () =>
   }
 });
 
+test("normalization restores compact streamed comparison tables", () => {
+  const compact = "✅ MundusX.ai — Enterprise Security | Requirement | Compliance ||----------------|----------------|| No UDP | Uses HTTP/HTTPS only || Auditability | Full HTTP logs |";
+  const normalized = normalizeAssistantDisplayText(compact);
+  assert.equal(normalized, "✅ MundusX.ai — Enterprise Security\n\n| Requirement | Compliance |\n| ---------------- | ---------------- |\n| No UDP | Uses HTTP/HTTPS only |\n| Auditability | Full HTTP logs |");
+  const html = marked.parse(normalized, { gfm: true });
+  assert.match(html, /<p>✅ MundusX\.ai — Enterprise Security<\/p>/);
+  assert.equal((html.match(/<tr>/g) || []).length, 3);
+});
+
+test("normalization leaves ordinary pipes and boolean operators alone", () => {
+  for (const text of ["Choose A || B", "Use alpha | beta in prose", "`left || right`", "```js\nleft || right\n```"]) {
+    assert.equal(normalizeAssistantDisplayText(text), text);
+  }
+});
+
 test("standard markdown engine renders nested lists and GFM tables", () => {
   const html = marked.parse(
     "- **Ethereum (L1)**\n  - Monolithic L1\n  - Supports rollups\n- **Solana**\n  - High throughput\n\n| Metric | Value |\n|---|---|\n| TPS | 30 |",
