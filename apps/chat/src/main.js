@@ -250,7 +250,7 @@ export function normalizeAssistantDisplayText(text) {
     }
     if (marker) { fence = marker[1]; return protect(line); }
     // Preserve possible table rows, including partial rows during streaming.
-    if (line.includes("|") || /^(?: {4}|\t)/.test(line)) return protect(line);
+    if (line.includes("|") || /^(?: {4}|\t)/.test(line)) return protect(expandCompactMarkdownTable(line));
     return line.replace(/(`+)([^`]*?)\1/g, protect);
   }).join("\n");
   return source
@@ -263,6 +263,24 @@ export function normalizeAssistantDisplayText(text) {
     .replace(/\n{3,}/g, "\n\n")
     .trim()
     .replace(/\u0000MUNDUSXMARKDOWN(\d+)\u0000/g, (_, index) => protectedSegments[Number(index)]);
+}
+
+export function expandCompactMarkdownTable(line) {
+  const value = String(line || "");
+  if (!/\|\|\s*:?-{3,}/.test(value)) return value;
+  const rows = value.split(/\s*\|\|\s*/);
+  if (rows.length < 3) return value;
+  const separatorCells = rows[1].split("|").map((cell) => cell.trim()).filter(Boolean);
+  if (separatorCells.length < 2 || separatorCells.some((cell) => !/^:?-{3,}:?$/.test(cell))) return value;
+
+  const first = rows[0].split("|").map((cell) => cell.trim()).filter(Boolean);
+  if (first.length < separatorCells.length) return value;
+  const titleCells = first.slice(0, -separatorCells.length);
+  const headerCells = first.slice(-separatorCells.length);
+  const tableRows = [headerCells, separatorCells, ...rows.slice(2).map((row) =>
+    row.split("|").map((cell) => cell.trim()).filter(Boolean),
+  ).filter((row) => row.length)].map((row) => `| ${row.join(" | ")} |`);
+  return `${titleCells.join(" | ")}${titleCells.length ? "\n\n" : ""}${tableRows.join("\n")}`;
 }
 
 export function protectMathSegments(text, segments = []) {
