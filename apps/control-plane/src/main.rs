@@ -1,3 +1,4 @@
+mod native_stream;
 mod global_skills;
 mod chat_gateway;
 mod admin_login;
@@ -707,13 +708,12 @@ fn activate_held_chat_job(
 
 fn should_enable_live_stream(
     wants_stream: bool,
-    native_tool_turn: bool,
+    _native_tool_turn: bool,
     mode: Option<&str>,
     record: &JobRecord,
     streaming_node_available: bool,
 ) -> bool {
     wants_stream
-        && !native_tool_turn
         && mode.is_none()
         && !record.graph_execution_enabled
         && streaming_node_available
@@ -8951,10 +8951,7 @@ fn handle_connection_with_streams(
                     });
                     // Plan first with buffered delivery so the graph remains authoritative.
                     // Only direct jobs are upgraded to live worker deltas.
-                    // Native Hermes turns must be buffered until the worker's
-                    // internal result envelope is decoded. Streaming that raw
-                    // envelope would expose it as assistant text instead of an
-                    // OpenAI `delta.tool_calls` event.
+                    // Native jobs carry JSON deltas, never the internal result envelope.
                     let live_stream_job = should_enable_live_stream(
                         wants_stream,
                         native_tool_turn,
@@ -9092,6 +9089,7 @@ fn handle_connection_with_streams(
                     }
 
                     let mut streamed_content = String::new();
+                    let mut native_stream = native_stream::NativeStream::default();
                     let completed_result = if live_stream_job {
                         chat_gateway::wait_for_job_with_stream(
                             &state,
@@ -9100,6 +9098,16 @@ fn handle_connection_with_streams(
                             chat_gateway::timeout_from_env(),
                             |delta| {
                                 let event = match delta {
+                                    Some(delta) if native_tool_turn => {
+                                        let delta: serde_json::Value = serde_json::from_str(delta)
+                                            .map_err(|e| format!("invalid native stream delta: {e}"))?;
+                                        native_stream.push(&delta)?;
+                                        format!("data: {}\n\n", serde_json::json!({
+                                            "id": completion_id, "object":"chat.completion.chunk",
+                                            "created":created, "model":public_model,
+                                            "choices":[{"index":0,"delta":delta,"finish_reason":null}]
+                                        }))
+                                    }
                                     Some(delta) => {
                                         streamed_content.push_str(delta);
                                         chat_gateway::sse_delta(
@@ -9160,6 +9168,11 @@ fn handle_connection_with_streams(
                                 return write_chat_error(&mut stream, "400 Bad Request", &error);
                             }
                             if wants_stream {
+                                if native_tool_turn {
+                                    let event = serde_json::json!({"error":{"message":error,"type":"native_stream_error"}});
+                                    let _ = stream.write_all(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes());
+                                    return;
+                                }
                                 let completion = chat_gateway::completion_response(
                                     &completion_id,
                                     created,
@@ -9199,7 +9212,27 @@ fn handle_connection_with_streams(
                                 .lock()
                                 .expect("live stream registry lock")
                                 .remove(&record.job_id);
-                            if let Ok(remainder) =
+                            if native_tool_turn && completed.status != JobStatus::Completed {
+                                let event = serde_json::json!({"error":{"message":"native tool generation failed before completion","type":"native_stream_error"}});
+                                let _ = stream.write_all(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes());
+                            } else if native_tool_turn {
+                                match native_stream.remainder(&completion["choices"][0]["message"]) {
+                                    Ok(delta) => {
+                                        if delta != serde_json::json!({}) {
+                                            let event = serde_json::json!({"id":completion_id,"object":"chat.completion.chunk",
+                                                "created":created,"model":public_model,
+                                                "choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+                                            let _ = stream.write_all(format!("data: {event}\n\n").as_bytes());
+                                        }
+                                        let reason = completion["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
+                                        let _ = stream.write_all(chat_gateway::sse_end(&completion_id, created, public_model, reason).as_bytes());
+                                    }
+                                    Err(error) => {
+                                        let event = serde_json::json!({"error":{"message":error,"type":"stream_reconciliation_error"}});
+                                        let _ = stream.write_all(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes());
+                                    }
+                                }
+                            } else if let Ok(remainder) =
                                 chat_gateway::validated_stream_remainder(content, &streamed_content)
                             {
                                 if !remainder.is_empty() {
@@ -9698,7 +9731,7 @@ mod tests {
         assert!(!should_enable_live_stream(
             true, false, None, &direct, false
         ));
-        assert!(!should_enable_live_stream(true, true, None, &direct, true));
+        assert!(should_enable_live_stream(true, true, None, &direct, true));
         assert!(!should_enable_live_stream(
             true,
             false,
