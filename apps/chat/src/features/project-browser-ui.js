@@ -170,6 +170,7 @@ document.addEventListener("scroll", (event) => { if (projectActionsMenu && !proj
 function showProjectActions(slug, path, directory, root, anchor, position) {
   const wasOpen = projectActionsMenu && projectActionsAnchor === anchor;
   closeProjectActions(); closeHistoryMenu();
+  if (!directory && !root) return;
   if (wasOpen && !position) return;
   const actions = document.createElement("div"); actions.className = "history-context-menu project-actions-popover is-open";
   actions.setAttribute("role", "menu"); actions.setAttribute("aria-label", "Actions for " + (path || slug));
@@ -195,7 +196,6 @@ function showProjectActions(slug, path, directory, root, anchor, position) {
     action("Refresh files", () => loadProjectDirectory(slug, path));
     if (!root) action("Use as task scope", () => { setActiveProject({slug}); promptEl.value = "Work within folder " + JSON.stringify(path) + ".\n\n" + promptEl.value; promptEl.dispatchEvent(new Event("input", {bubbles:true})); promptEl.focus(); });
   }
-  if (!root) action("Copy relative path", () => navigator.clipboard.writeText(path));
   if (root) { separator(); action("Remove from sidebar", () => { if (expandedProject === slug) expandedProject = null; removeProject(slug); }); }
   actions.addEventListener("keydown", (event) => {
     const buttons = [...actions.querySelectorAll("button")];
