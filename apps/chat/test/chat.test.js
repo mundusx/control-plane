@@ -481,7 +481,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   const workspaceNav = html.match(/<nav class="workspace-nav" aria-label="Workspace">[\s\S]*?<\/nav>/)?.[0] || "";
   const mainHeader = html.match(/<header>[\s\S]*?<\/header>/)?.[0] || "";
   assert.match(html, /id="repository-open"[^>]*>[\s\S]*?<span>Projects<\/span>/);
-  assert.match(workspaceNav, /Chats[\s\S]*id="repository-open"[\s\S]*Projects/);
+  assert.match(workspaceNav, /id="repository-open"[\s\S]*Projects/);
+  assert.doesNotMatch(html, /id="chats-open"|chatsOpenEl/);
   assert.match(html, /class="account-menu-item" href="\/skills"[\s\S]*>My skills<\/span>/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
   assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
