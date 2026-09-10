@@ -413,6 +413,18 @@ test("preserves nested list indentation and inline bold-label separators", () =>
   ]);
 });
 
+test("normalization preserves operators inside comparison cells and code", () => {
+  const table = "| Dimension | A | B |\n| --- | --- | --- |\n| Transport | HTTP | NATS + WebRTC |\n| Scale | CDN + HTTP caching | Mesh - Custom |";
+  assert.equal(normalizeAssistantDisplayText(table), table);
+  const html = marked.parse(normalizeAssistantDisplayText(table), { gfm: true });
+  assert.equal((html.match(/<tr>/g) || []).length, 3);
+  assert.doesNotMatch(html, /<ul>/);
+  assert.match(html, /NATS \+ WebRTC/);
+  for (const code of ["```js\nconst value = A + B;\n\n\n// ### Heading\n```", "~~~js\nA - B\n~~~", "```js\nA + B", "Use `A + B` here."]) {
+    assert.equal(normalizeAssistantDisplayText(code), code);
+  }
+});
+
 test("standard markdown engine renders nested lists and GFM tables", () => {
   const html = marked.parse(
     "- **Ethereum (L1)**\n  - Monolithic L1\n  - Supports rollups\n- **Solana**\n  - High throughput\n\n| Metric | Value |\n|---|---|\n| TPS | 30 |",
