@@ -434,6 +434,12 @@ test("normalization restores compact streamed comparison tables", () => {
   assert.equal((html.match(/<tr>/g) || []).length, 3);
 });
 
+test("chat page ships the compact-table helper used by its formatter", () => {
+  const html = page(configFromEnv({}));
+  assert.match(html, /function expandCompactMarkdownTable\(line\)/);
+  assert.ok(html.indexOf("function expandCompactMarkdownTable(line)") < html.indexOf("function normalizeAssistantDisplayText(text)"));
+});
+
 test("normalization leaves ordinary pipes and boolean operators alone", () => {
   for (const text of ["Choose A || B", "Use alpha | beta in prose", "`left || right`", "```js\nleft || right\n```"]) {
     assert.equal(normalizeAssistantDisplayText(text), text);
