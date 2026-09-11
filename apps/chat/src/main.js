@@ -40,10 +40,6 @@ const DEFAULT_WEATHER_TTL_SECONDS = 7200;
 const DEFAULT_WEATHER_URL = "https://wttr.in";
 const DEFAULT_FACTUAL_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary";
 const DEFAULT_WIKIDATA_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData";
-const DEFAULT_WEB_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
-const DEFAULT_WEB_SEARCH_MAX_RESULTS = 4;
-const DEFAULT_WEB_SEARCH_TTL_SECONDS = 1800;
-const DEFAULT_WEB_SEARCH_DAILY_BUDGET = 0;
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 8192;
 const CONTEXT_SAFETY_TOKENS = 256;
 const MAX_HISTORY_CONTEXT_TOKENS = 2048;
@@ -196,20 +192,6 @@ export function configFromEnv(env = process.env) {
     toolPlannerTimeoutSeconds: positiveInteger(
       env.MUNDUSX_TOOL_PLANNER_TIMEOUT_SECONDS,
       DEFAULT_TOOL_PLANNER_TIMEOUT_SECONDS,
-    ),
-    webSearchBaseUrl: normalizeOrigin(env.MUNDUSX_WEB_SEARCH_URL ?? DEFAULT_WEB_SEARCH_URL),
-    webSearchApiKey: (env.MUNDUSX_WEB_SEARCH_API_KEY ?? "").trim(),
-    webSearchMaxResults: positiveInteger(
-      env.MUNDUSX_WEB_SEARCH_MAX_RESULTS,
-      DEFAULT_WEB_SEARCH_MAX_RESULTS,
-    ),
-    webSearchTtlSeconds: positiveInteger(
-      env.MUNDUSX_WEB_SEARCH_TTL_SECONDS,
-      DEFAULT_WEB_SEARCH_TTL_SECONDS,
-    ),
-    webSearchDailyBudget: positiveInteger(
-      env.MUNDUSX_WEB_SEARCH_DAILY_BUDGET,
-      DEFAULT_WEB_SEARCH_DAILY_BUDGET,
     ),
   };
 }
@@ -3866,11 +3848,30 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           syncNetworkRuntimeStatus(true);
           return;
         }
+        if (!activeProject && requiresHermesWebResearch(message)) {
+          await loadHarnessRunners().catch(() => []);
+          const handledByHermesCrawler = await tryLocalAgentTurn(pending, message, conversationId, {
+            runtime: "hermes",
+            workspaceRelative: null,
+            allowMutations: false,
+            optional: true,
+            executionPrompt: [
+              "Research this request with your available browser and web-search tools.",
+              "Use current sources, include source URLs in the answer, and say clearly if live research fails.",
+              "Do not modify local files or run unrelated commands.",
+              "User request: " + message,
+            ].join("\\n"),
+          });
+          if (handledByHermesCrawler) {
+            syncNetworkRuntimeStatus(true);
+            return;
+          }
+        }
         const chatMessage = activeProject
           ? "Active local project: " + activeProject.slug + ". Respond in planning/chat mode and do not claim files were changed.\\n\\n" + message
           : message;
-        // A normal conversation never invokes a local harness. Local execution
-        // is activated only by an explicitly attached project.
+        // Ordinary model requests stay on the Chat API. Local execution is used
+        // for an attached project or explicit current-web research through Hermes.
         const handledLocally = !activeProject || runtimePreference === "cloud" ? false : await tryLocalAgentTurn(
           pending,
           chatMessage,
@@ -3922,6 +3923,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (/\\b(?:what|which) (?:changes?|files?|steps?|requirements?) (?:would|will|do|are|is)\\b/i.test(value)) return false;
       return /\\b(create|make|add|write|edit|modify|update|delete|remove|rename|move|generate|scaffold|implement|fix|correct|repair|restore|refactor|format|install|run|test|build|compile|lint|commit|checkout|merge|push|pull)\\b/i.test(value);
     }
+
+    ${requiresHermesWebResearch.toString()}
 
     async function runPolledChatTurn(pending, message, conversationId) {
       const created = await fetch("/api/chat/jobs", {
@@ -3975,17 +3978,18 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     async function tryLocalAgentTurn(pending, message, conversationId, options = {}) {
       const statusResponse = await fetch("/api/agent/status");
       if (statusResponse.status === 401) {
-        if (options.runtime && options.runtime !== "auto") throw new Error("Sign in before using a local runtime.");
+        if (!options.optional && options.runtime && options.runtime !== "auto") throw new Error("Sign in before using a local runtime.");
         return false;
       }
       const status = await readApiPayload(statusResponse, "local agent status failed");
       lastLocalAgentStatus = statusResponse.ok ? status : null;
       renderRuntimeControls();
       if (!statusResponse.ok || !status.online) {
-        if (options.runtime && options.runtime !== "auto") throw new Error("The selected local runtime is not connected.");
+        if (!options.optional && options.runtime && options.runtime !== "auto") throw new Error("The selected local runtime is not connected.");
         return false;
       }
       if (options.runtime && options.runtime !== "auto" && !onlineRuntimeAvailable(options.runtime)) {
+        if (options.optional) return false;
         throw new Error(options.runtime === "hermes"
           ? "Hermes is not available on the connected device. Run hermes setup and restart mundusx connect."
           : "The native MundusX agent is not available on the connected device.");
@@ -3995,7 +3999,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: message,
+          prompt: options.executionPrompt || message,
           conversation_id: conversationId,
           session_id: conversationId,
           allow_mutations: options.allowMutations === true,
@@ -7637,21 +7641,15 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   }
 
   if (!internalAgentTurn && toolMode && needsGrounding(toolMessage)) {
-    const groundingQuery = extractGeneralLookupTopic(toolMessage) || toolMessage;
-    const webSearchJob = await fetchWebSearchJob(message, groundingQuery, config, fetchImpl, {
-      model: body?.model,
-      voicePersona: body?.voicePersona,
-    });
-    if (webSearchJob) {
-      return recordAssistantTurn(conversationId, config, fetchImpl, webSearchJob);
-    }
-
     const generalTopic = extractGeneralLookupTopic(toolMessage);
     if (generalTopic) {
       const generalJob = await fetchFactualSummaryJob(toolMessage, generalTopic, config, fetchImpl);
       if (generalJob) {
         return recordAssistantTurn(conversationId, config, fetchImpl, generalJob);
       }
+    }
+    if (requiresHermesWebResearch(toolMessage)) {
+      return recordAssistantTurn(conversationId, config, fetchImpl, fetchWebCrawlerUnavailableJob(message));
     }
   }
 
@@ -10738,6 +10736,19 @@ export function needsGrounding(message) {
   return score >= 2;
 }
 
+export function requiresHermesWebResearch(message) {
+  const text = String(message ?? "").trim().toLowerCase();
+  if (!text || /\b(weather|forecast|temperature|rain|snow|humidity|wind)\b/.test(text)) {
+    return false;
+  }
+  const explicitWebRequest =
+    /\b(search|browse|crawl|look\s*up|research|find)\b[\s\S]{0,50}\b(web|internet|online|website|site|news|sources?)\b/.test(text)
+    || /\b(web|internet|online)\b[\s\S]{0,50}\b(search|browse|crawl|research|sources?)\b/.test(text);
+  const changingSubject = /\b(news|price|stock|crypto|score|result|match|election|release|version|schedule|availability|traffic|status|ranking|rate|exchange rate)\b/.test(text);
+  const currentTime = /\b(today|tonight|now|right now|currently|latest|live|breaking|recent|this week|this month|as of)\b/.test(text);
+  return explicitWebRequest || (changingSubject && currentTime);
+}
+
 async function fetchFactualSummaryJob(message, topic, config, fetchImpl, options = {}) {
   try {
     const result = await fetchFactualSummaryResult(topic, config, fetchImpl, options.titleCandidate);
@@ -10944,154 +10955,33 @@ function levenshteinDistance(left, right) {
   return previous[b.length];
 }
 
-async function fetchWebSearchSnippets(query, config, fetchImpl) {
-  const cacheKey = webSearchCacheKey(query);
-  if (config.weatherCacheUrl) {
-    const cached = await redisGet(config.weatherCacheUrl, cacheKey);
-    if (cached) {
-      try {
-        return JSON.parse(cached);
-      } catch {
-        // Fall through to a live lookup if the cached payload is malformed.
-      }
-    }
-  }
-
-  if (config.weatherCacheUrl && config.webSearchDailyBudget > 0) {
-    const overBudget = await webSearchBudgetExceeded(config);
-    if (overBudget) {
-      return null;
-    }
-  }
-
-  if (!config.webSearchApiKey) {
-    return null;
-  }
-
-  const url = new URL(config.webSearchBaseUrl);
-  url.searchParams.set("q", query);
-  url.searchParams.set("count", String(config.webSearchMaxResults));
-
-  let response;
-  try {
-    response = await fetchImpl(url.toString(), {
-      headers: {
-        Accept: "application/json",
-        "X-Subscription-Token": config.webSearchApiKey,
-        "User-Agent": "MundusX-Chat/0.1 web-search-router",
-      },
-    });
-  } catch {
-    return null;
-  }
-  if (!response.ok) {
-    return null;
-  }
-
-  let payload;
-  try {
-    payload = await response.json();
-  } catch {
-    return null;
-  }
-
-  const results = payload?.web?.results;
-  if (!Array.isArray(results) || results.length === 0) {
-    return null;
-  }
-
-  const sources = results
-    .slice(0, config.webSearchMaxResults)
-    .map((result) => ({
-      title: String(result?.title ?? "").trim(),
-      url: String(result?.url ?? "").trim(),
-      snippet: String(result?.description ?? "").replace(/<\/?strong>/g, "").trim(),
-    }))
-    .filter((source) => source.title && source.url && source.snippet);
-
-  if (sources.length === 0) {
-    return null;
-  }
-
-  if (config.weatherCacheUrl) {
-    await redisSet(config.weatherCacheUrl, cacheKey, JSON.stringify(sources), config.webSearchTtlSeconds);
-    await webSearchRecordCall(config);
-  }
-
-  return sources;
+function fetchWebCrawlerUnavailableJob(message) {
+  const output = "Live web research needs the Hermes crawler on a connected computer. Connect this computer and retry. Wikipedia and Wikidata remain available here for encyclopedic facts.";
+  return {
+    job_id: `web-crawler-miss-${Date.now().toString(36)}-${hashText(message).slice(0, 10)}`,
+    status: "completed",
+    output,
+    output_cleaned: false,
+    error: null,
+    model: "hermes-web-crawler",
+    assigned_node_id: "local-hermes-required",
+    execution_mode: "tool",
+    graph_execution_enabled: false,
+    tool: "web_crawler",
+    response: { type: "web_crawler", text: output, verified: false },
+    progress: {
+      total: 0,
+      completed: 0,
+      running: 0,
+      failed: 0,
+      waiting: 0,
+      processing: null,
+      merging: false,
+      strategy: "local_hermes_web_crawler",
+    },
+  };
 }
 
-function webSearchCacheKey(query) {
-  return `mundusx:websearch:v1:${query.toLowerCase().replace(/\s+/g, " ").trim()}`;
-}
-
-function webSearchBudgetKey() {
-  const day = new Date().toISOString().slice(0, 10);
-  return `mundusx:websearch:budget:v1:${day}`;
-}
-
-async function webSearchBudgetExceeded(config) {
-  const current = await redisGet(config.weatherCacheUrl, webSearchBudgetKey());
-  const count = Number(current);
-  return Number.isFinite(count) && count >= config.webSearchDailyBudget;
-}
-
-async function webSearchRecordCall(config) {
-  try {
-    const key = webSearchBudgetKey();
-    const count = await redisCommand(config.weatherCacheUrl, ["INCR", key]);
-    if (Number(count) === 1) {
-      await redisCommand(config.weatherCacheUrl, ["EXPIRE", key, "172800"]);
-    }
-  } catch {
-    // Budget tracking is best-effort; a missed increment only risks one extra call.
-  }
-}
-
-async function fetchWebSearchJob(message, query, config, fetchImpl, jobOptions = {}) {
-  const sources = await fetchWebSearchSnippets(query, config, fetchImpl);
-  if (!sources || sources.length === 0) {
-    return null;
-  }
-
-  const jobBody = buildGenericJobBody(message, config, {
-    ...jobOptions,
-    systemPrompt: buildGroundedSystemPrompt(message, jobOptions.voicePersona, sources),
-  });
-
-  const jobResponse = await controlPlaneFetch(fetchImpl, config, "/v1/jobs", {
-    method: "POST",
-    body: JSON.stringify(jobBody),
-  });
-
-  const job = jobResponse.job ?? jobResponse;
-  const jobId = jobResponse.job_id ?? job.job_id;
-  if (!jobId) {
-    throw httpError(502, "control plane did not return a job id");
-  }
-
-  rememberPromptForJob(jobId, message);
-  trackGroundingSources(jobId, sources, config);
-
-  const formatted = formatChatJob(jobId, job, jobBody.model || null, { prompt: message });
-  return { ...formatted, tool: "web_search", sources };
-}
-
-function buildGroundedSystemPrompt(message, voicePersona, sources) {
-  const basePrompt = buildChatSystemPrompt(message, voicePersona);
-  const sourceList = sources
-    .map((source, index) => `[${index + 1}] ${source.title} — ${source.snippet} (source: ${source.url})`)
-    .join("\n");
-  return [
-    basePrompt,
-    "Answer using ONLY the sources listed below. Cite the sources you use inline as [1], [2], etc., matching the numbers below.",
-    "If the sources do not contain the answer, say so explicitly rather than guessing.",
-    "Sources:",
-    sourceList,
-  ].join("\n");
-}
-
-const groundingSourcesByJobId = new Map();
 const promptContextByJobId = new Map();
 const contextUsageByJobId = new Map();
 const validationContractByJobId = new Map();
@@ -11157,40 +11047,6 @@ function lookupValidationContractForJob(jobId) {
 
 function forgetValidationContractForJob(jobId) {
   validationContractByJobId.delete(String(jobId ?? "").trim());
-}
-
-function trackGroundingSources(jobId, sources, config) {
-  groundingSourcesByJobId.set(jobId, sources);
-  if (config.weatherCacheUrl) {
-    redisSet(
-      config.weatherCacheUrl,
-      groundingSourcesCacheKey(jobId),
-      JSON.stringify(sources),
-      3600,
-    ).catch(() => {});
-  }
-}
-
-async function lookupGroundingSources(jobId, config) {
-  if (groundingSourcesByJobId.has(jobId)) {
-    return groundingSourcesByJobId.get(jobId);
-  }
-  if (!config.weatherCacheUrl) {
-    return null;
-  }
-  const cached = await redisGet(config.weatherCacheUrl, groundingSourcesCacheKey(jobId));
-  if (!cached) {
-    return null;
-  }
-  try {
-    return JSON.parse(cached);
-  } catch {
-    return null;
-  }
-}
-
-function groundingSourcesCacheKey(jobId) {
-  return `mundusx:websearch:sources:v1:${jobId}`;
 }
 
 function weatherCacheKey(location, dayOffset = 0) {
@@ -11365,30 +11221,7 @@ export async function pollChatJob(jobId, config = configFromEnv(), fetchImpl = f
       console.warn(`[conversation] failed to persist assistant message: ${error.message}`);
     });
   }
-  if (formatted.status !== "completed") {
-    return formatted;
-  }
-
-  const sources = await lookupGroundingSources(jobId, config);
-  if (!sources) {
-    return formatted;
-  }
-
-  logGroundingCitationCheck(jobId, formatted.output, sources);
-  return { ...formatted, tool: "web_search", sources };
-}
-
-function logGroundingCitationCheck(jobId, output, sources) {
-  const hasCitationMarker = /\[[1-9]\d*\]/.test(output);
-  const outputWords = new Set(significantWords(output));
-  const sourceWords = sources.flatMap((source) => significantWords(source.snippet));
-  const overlapCount = sourceWords.filter((word) => outputWords.has(word)).length;
-  const overlapRatio = sourceWords.length ? overlapCount / sourceWords.length : 0;
-  if (!hasCitationMarker && overlapRatio < 0.1) {
-    console.warn(
-      `[grounding-check] job ${jobId} answer may not be grounded in provided sources (citations: ${hasCitationMarker}, overlap: ${overlapRatio.toFixed(2)})`,
-    );
-  }
+  return formatted;
 }
 
 export async function waitForChatJob(jobId, body, config, fetchImpl) {

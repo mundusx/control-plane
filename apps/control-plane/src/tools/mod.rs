@@ -1,7 +1,5 @@
-mod freshness;
 mod office_holder;
 mod weather;
-mod web_search;
 
 use crate::contracts::ChatMessage;
 use serde::Serialize;
@@ -80,16 +78,6 @@ pub fn execute(messages: &[ChatMessage]) -> Result<Option<ToolAnswer>, String> {
         execute_safely("current_office_holder", || office_holder::execute(messages))?
     {
         return Ok(Some(answer));
-    }
-    if freshness::requires_live_data(messages) {
-        return Ok(Some(match web_search::execute(messages) {
-            Ok(Some(answer)) => answer,
-            Ok(None) => ToolAnswer::unavailable(
-                "web_search",
-                "No trusted live-information provider matched this request.",
-            ),
-            Err(error) => ToolAnswer::unavailable("web_search", error),
-        }));
     }
     Ok(None)
 }
