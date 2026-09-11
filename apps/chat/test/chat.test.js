@@ -4140,6 +4140,7 @@ test("streaming relay exposes the first upstream delta before completion", async
         "Content-Type": "text/event-stream",
         "X-MundusX-Stream-Mode": "live-delta",
         "X-MundusX-Completion-Id": "chatcmpl-live",
+        "X-MundusX-Resume-Token": "resume-live",
       },
     }),
   );
@@ -4147,6 +4148,7 @@ test("streaming relay exposes the first upstream delta before completion", async
   assert.equal(events[0].type, "headers");
   assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "live-delta");
   assert.equal(events[0].headers["X-MundusX-Completion-Id"], "chatcmpl-live");
+  assert.equal(events[0].headers["X-MundusX-Resume-Token"], "resume-live");
   assert.equal(events[0].headers["X-Accel-Buffering"], "no");
   assert.equal(events[1].type, "flush");
   assert.equal(events[2].type, "write");
