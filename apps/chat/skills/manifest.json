@@ -10,6 +10,7 @@
     { "id": "weather", "file": "weather.md", "title": "Weather", "description": "Routes live conditions through the weather tool.", "enabled": true },
     { "id": "facts", "file": "facts.md", "title": "Facts", "description": "Requires grounded sources for factual and current-information answers.", "enabled": true },
     { "id": "chunk-planner", "file": "chunk-planner.md", "title": "Chunk planner", "description": "Splits complex work into bounded, dependency-aware sections.", "enabled": true },
+    { "id": "hermes-task-planner", "file": "hermes-task-planner.md", "title": "Hermes task planner", "description": "Lets Hermes delegate bounded independent analysis and validation while retaining one mutation owner.", "enabled": true },
     { "id": "verifier", "file": "verifier.md", "title": "Verifier", "description": "Describes output-quality checks; runtime activation remains separately gated.", "enabled": false },
     { "id": "security", "file": "security.md", "title": "Security", "description": "Reserved security instructions. Blank and disabled until configured by an administrator.", "enabled": false },
     { "id": "guardrails", "file": "guardrails.md", "title": "Guardrails", "description": "Reserved behavior instructions. Existing access controls remain enforced independently.", "enabled": false },
