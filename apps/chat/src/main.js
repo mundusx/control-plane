@@ -7068,7 +7068,21 @@ export function requiresValidatedStreaming(message, body = {}) {
 
 export function canLiveStreamChatTurn(body = {}) {
   const message = String(body?.message ?? "").trim();
-  return Boolean(message) && !detectClientMetadataTask(message);
+  if (!message || detectClientMetadataTask(message)) {
+    return false;
+  }
+  if (
+    isMultiIntentPlanningCandidate(message) ||
+    extractWeatherLocation(message) ||
+    looksLikeWeatherRequest(message.toLowerCase()) ||
+    extractAssistantIdentityTopic(message) ||
+    extractMundusXKnowledgeTopic(message) ||
+    extractCurrentOfficeQuery(message) ||
+    extractFactualSummaryTopic(message)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export async function streamChatTurn(response, body, config = configFromEnv(), fetchImpl = fetch) {

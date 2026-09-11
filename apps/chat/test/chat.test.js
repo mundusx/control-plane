@@ -4046,12 +4046,13 @@ test("OpenAI adapter correlates its stable id and OpenWebUI chat id", async () =
   assert.deepEqual(conversationWrites.map((entry) => entry.role), ["user", "assistant"]);
 });
 
-test("all user-facing MundusX Chat requests use one live stream path", () => {
+test("generative MundusX Chat requests stream while typed tool routes fall back", () => {
   assert.equal(canLiveStreamChatTurn({ message: "Explain distributed systems.", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Create a complete Java program", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Return a JSON schema for a customer record", toolMode: false }), true);
-  assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), true);
-  assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "berlin weather today", toolMode: true }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), false);
   assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "can we ask you, for free account in chatgpt, how many messages can i keep?", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "If I have 1TB, how many users can store 1000 messages of 280k tokens each?", toolMode: true }), true);
@@ -4291,7 +4292,7 @@ test("agent model provider configuration keeps aligned models and credentials", 
   ]);
 });
 
-test("internal metadata requests return an explicit polling fallback without upstream work", async () => {
+test("weather requests return an explicit tool-routing fallback without upstream work", async () => {
   const events = [];
   const response = {
     writeHead: (status, headers) => events.push({ status, headers }),
@@ -4300,7 +4301,7 @@ test("internal metadata requests return an explicit polling fallback without ups
   let fetchCalled = false;
   await streamChatTurn(
     response,
-    { message: "### Task:\nGenerate a concise title summarizing the chat history\n\n### Output:\nJSON only\n\n### Chat History:\n<chat_history>\nUSER: Hello\n</chat_history>", toolMode: false },
+    { message: "berlin weather today", toolMode: true },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async () => {
       fetchCalled = true;
