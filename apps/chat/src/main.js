@@ -310,7 +310,7 @@ export function page(config = configFromEnv()) {
     </button>`;
   const repositoryDialog = `<div class="projects-overlay" id="repository-dialog" hidden>
     <section class="harness-dialog projects-dialog" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title">
-      <button class="dialog-close" id="repository-dialog-close" type="button" aria-label="Close">&times;</button>
+      <button class="dialog-close" id="repository-dialog-close" type="button" aria-label="Close" data-overlay-close="projects">&times;</button>
       <header class="project-heading">
         <h2 id="project-dialog-title">Create project</h2>
       </header>
@@ -348,7 +348,7 @@ export function page(config = configFromEnv()) {
   </div>`;
   const settingsDialog = `<div class="projects-overlay" id="settings-dialog" hidden>
     <section class="harness-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
-      <button class="dialog-close" id="settings-dialog-close" type="button" aria-label="Close">&times;</button>
+      <button class="dialog-close" id="settings-dialog-close" type="button" aria-label="Close" data-overlay-close="settings">&times;</button>
       <header class="settings-heading"><h2 id="settings-dialog-title">Settings</h2><p>Manage your account, connections, computers, and external clients.</p></header>
       <div class="settings-layout">
         <nav class="settings-nav" aria-label="Settings sections">
@@ -372,7 +372,13 @@ export function page(config = configFromEnv()) {
             <div id="settings-device-list" class="settings-card-list"><p class="project-context-empty">Checking connected computers…</p></div>
           </section>
           <section class="settings-pane" data-settings-pane="personalization" hidden>
-            <h3>Personalization</h3><p class="settings-description">Project instructions provide repository-specific context. Administrators manage shared Global Skills, and Hermes selects installed capabilities when needed.</p>
+            <h3>Personalization</h3><p class="settings-description">Set account-wide preferences for how MundusX answers you.</p>
+            <article class="connection-card"><span class="connection-mark" aria-hidden="true">You</span><span><strong>Personal instructions</strong><small>Save your preferred language, answer length, tone, coding conventions, or accessibility needs.</small></span><a class="settings-action" href="/skills">Manage</a></article>
+            <section class="personalization-scope" aria-labelledby="personalization-scope-title">
+              <strong id="personalization-scope-title">How your instructions are applied</strong>
+              <p>Your enabled personal instructions follow your account across chats. Project instructions add repository-specific rules. Administrators control Global Skills, and Hermes selects available tools only when the request needs them.</p>
+              <p>Project instructions take priority for work inside that project.</p>
+            </section>
           </section>
           ${config.mcpEnabled ? `<section class="settings-pane" data-settings-pane="developer" hidden>
             <h3>External client access</h3>
@@ -1827,6 +1833,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .settings-action { display:inline-flex; min-height:38px; align-items:center; justify-content:center; padding:0 14px; border:1px solid var(--line-strong); border-radius:9px; color:var(--text); background:var(--panel); font-size:13px; font-weight:700; }
     .settings-action:hover,.settings-action:focus-visible { border-color:var(--blue); color:var(--blue); outline:none; }
     .settings-card-list { display:grid; gap:8px; }
+    .personalization-scope { display:grid; gap:8px; padding:14px; border:1px solid var(--line); border-radius:12px; background:var(--panel-2); }
+    .personalization-scope p { color:var(--muted); line-height:1.5; }
     .mcp-intro,.mcp-safety { color:var(--muted); line-height:1.5; }
     .mcp-endpoint { display:grid; gap:7px; font-weight:650; }
     .mcp-endpoint code,.mcp-token-once { padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--panel-2); overflow-wrap:anywhere; }
@@ -2731,6 +2739,17 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (mcpTokenOnceEl) mcpTokenOnceEl.hidden = true;
       if (mcpTokenValueEl) mcpTokenValueEl.textContent = "";
     }
+
+    // Use capture so modal controls remain reliable even when a nested widget
+    // stops propagation or throws from its own click handler.
+    document.addEventListener("click", (event) => {
+      const closeButton = event.target.closest?.("[data-overlay-close]");
+      if (!closeButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (closeButton.dataset.overlayClose === "settings") closeSettings();
+      if (closeButton.dataset.overlayClose === "projects") closeProjects();
+    }, true);
 
     async function loadMcpTokens() {
       if (!mcpTokenListEl) return;

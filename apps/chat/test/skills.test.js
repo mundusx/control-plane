@@ -42,10 +42,12 @@ test("skill draft validation bounds prompt lines and rejects secrets", () => {
   assert.match(unsafe.errors.join(" "), /credentials or private keys/);
 });
 
-test("authenticated Chat Skills page contains personal skills only", () => {
+test("authenticated personalization page contains personal instructions only", () => {
   const html = renderSkillsPage({ user: { email: "person@example.com" }, csrfToken: "csrf" });
   assert.doesNotMatch(html, /Global skills|edit_global|api\/skills\/global/);
-  assert.match(html, /Personal skills apply only to your account/);
+  assert.match(html, /Personal instructions apply only to your account/);
+  assert.match(html, /Personal instructions · MundusX Chat/);
+  assert.match(html, /Back to Settings/);
   assert.match(html, /\/api\/skills\/personal/);
   assert.match(html, /X-MundusX-CSRF/);
   assert.doesNotMatch(html, /localStorage/);
