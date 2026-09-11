@@ -55,8 +55,6 @@ import {
   streamOpenAiChatCompletion,
   streamChatTurn,
   waitForChatJob,
-  shouldUseHermesTaskPlanner,
-  withHermesTaskPlanner,
 } from "../src/main.js";
 import {
   detectCompleteCodeQualityFlags,
@@ -274,15 +272,13 @@ test("renders a usable chat page", () => {
   assert.match(html, /streamState\.status = "waiting"/);
   assert.match(html, /Chat · Waiting for the first response token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /let lastStreamActivityAt = Date\.now\(\)/);
-  assert.match(html, /const streamInactivityTimeoutMs = 75000/);
-  assert.match(html, /lastStreamActivityAt = Date\.now\(\)/);
+  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 60000/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
   assert.match(html, /unpaintedDeltaCharacters >= 24/);
   assert.match(html, /await yieldToStreamPaint\(\)/);
   assert.match(html, /\[chat-stream-render\]/);
   assert.match(html, /live\.textContent = output/);
-  assert.match(html, /MundusX response stream was inactive for 75 seconds/);
+  assert.match(html, /MundusX did not produce a first token within 60 seconds/);
   assert.match(html, /MundusX job did not complete during stream recovery/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
@@ -1894,46 +1890,6 @@ test("internal Hermes turns bypass public chat shortcuts", async () => {
   assert.notEqual(result.model, "mundusx-knowledge");
   assert.match(submittedJob.prompt, /select the next action/i);
   assert.equal(submittedJob.system_prompt, "You are the model inside a bounded coding agent.");
-});
-
-test("Hermes planner selects only complex tasks with delegation available", () => {
-  const delegation = [{ type: "function", function: { name: "delegate_task" } }];
-  assert.equal(shouldUseHermesTaskPlanner([
-    { role: "user", content: "What is 2 + 2?" },
-  ], delegation), false);
-  assert.equal(shouldUseHermesTaskPlanner([
-    { role: "user", content: "Build a production API, implement its tests, document it, and review the security boundaries." },
-  ], delegation), true);
-  assert.equal(shouldUseHermesTaskPlanner([
-    { role: "user", content: "Build a production API, implement its tests, document it, and review it." },
-  ], [{ type: "function", function: { name: "read_file" } }]), false);
-});
-
-test("Hermes planner is injected once and respects the administrator switch", () => {
-  const body = {
-    messages: [{ role: "user", content: "Implement and test a production service with several independent components." }],
-    tools: [{ type: "function", function: { name: "delegate_task" } }],
-  };
-  const planned = withHermesTaskPlanner(body);
-  assert.notEqual(planned, body);
-  assert.match(planned.messages[0].content, /two to four independent responsibilities/i);
-  assert.equal(withHermesTaskPlanner(planned), planned);
-  assert.equal(withHermesTaskPlanner(body, [{ skill_id: "hermes-task-planner", enabled: false }]), body);
-  const customized = withHermesTaskPlanner(body, [{
-    skill_id: "hermes-task-planner", enabled: true, content: "# Hermes Task Planner Skill\nUse two read-only tasks.",
-  }]);
-  assert.match(customized.messages[0].content, /Use two read-only tasks/);
-});
-
-test("Hermes planner does not restart after a delegation tool call", () => {
-  const messages = [
-    { role: "user", content: "Implement and test a production service with several independent components." },
-    { role: "assistant", tool_calls: [{ function: { name: "delegate_task" } }] },
-    { role: "tool", content: "Delegated analysis complete." },
-  ];
-  assert.equal(shouldUseHermesTaskPlanner(messages, [
-    { type: "function", function: { name: "delegate_task" } },
-  ]), false);
 });
 
 test("routes weather questions to wttr without queuing an LLM job", async () => {
@@ -4049,10 +4005,6 @@ test("generative MundusX Chat requests stream while typed tool routes fall back"
   assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "can we ask you, for free account in chatgpt, how many messages can i keep?", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "If I have 1TB, how many users can store 1000 messages of 280k tokens each?", toolMode: true }), true);
-  assert.equal(canLiveStreamChatTurn({
-    message: "Analyze GitHub, GitLab, Jira, and Notion. Split the work into independent tasks and run them in parallel.",
-    toolMode: true,
-  }), false);
 });
 
 test("native MundusX Chat streams complete projects as upstream deltas arrive", async () => {

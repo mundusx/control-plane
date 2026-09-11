@@ -78,7 +78,6 @@ const CHAT_SKILLS = {
   weather: SKILL_REGISTRY.content("weather", "# Weather Skill\nUse the weather tool for weather."),
   facts: SKILL_REGISTRY.content("facts", "# Facts Skill\nUse grounded factual sources."),
   chunkPlanner: SKILL_REGISTRY.content("chunk-planner", "# Chunk Planner Skill\nChunk only when useful."),
-  hermesTaskPlanner: SKILL_REGISTRY.content("hermes-task-planner", "# Hermes Task Planner Skill\nDelegate only independent read-only work."),
   verifier: SKILL_REGISTRY.content("verifier", "# Verifier Skill\nFlag malformed output."),
 };
 const loggedChatJobs = new Set();
@@ -4415,12 +4414,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       let completionId = response.headers.get("x-mundusx-completion-id") || null;
       let finishReason = null;
       let sawDone = false;
-      // The control plane sends SSE comments while a queued or reasoning-heavy
-      // request is still healthy. Treat those bytes as activity instead of
-      // abandoning a live response merely because visible content has not
-      // arrived yet.
-      let lastStreamActivityAt = Date.now();
-      const streamInactivityTimeoutMs = 75000;
+      const firstTokenDeadline = Date.now() + 60000;
       let unpaintedDeltaCharacters = 0;
 
       const yieldToStreamPaint = () => new Promise((resolve) => {
@@ -4433,22 +4427,20 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
       const readStreamChunk = async () => {
         if (output) return reader.read();
-        const remaining = lastStreamActivityAt + streamInactivityTimeoutMs - Date.now();
+        const remaining = firstTokenDeadline - Date.now();
         if (remaining <= 0) {
-          throw new Error("MundusX response stream was inactive for 75 seconds");
+          throw new Error("MundusX did not produce a first token within 60 seconds");
         }
         let timeoutId;
         try {
-          const next = await Promise.race([
+          return await Promise.race([
             reader.read(),
             new Promise((_, reject) => {
               timeoutId = window.setTimeout(() => {
-                reject(new Error("MundusX response stream was inactive for 75 seconds"));
+                reject(new Error("MundusX did not produce a first token within 60 seconds"));
               }, remaining);
             }),
           ]);
-          if (!next.done && next.value?.byteLength) lastStreamActivityAt = Date.now();
-          return next;
         } finally {
           window.clearTimeout(timeoutId);
         }
@@ -4465,11 +4457,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             prompt: message,
           });
           let payload = { job_id: completionId, status: "assigned" };
-          // A direct control-plane job may legitimately run for up to ten
-          // minutes. Keep recovery attached long enough to observe its real
-          // terminal state instead of replacing it with a premature client
-          // timeout.
-          const recoveryDeadline = Date.now() + 660000;
+          const recoveryDeadline = Date.now() + 120000;
           while (!["completed", "failed"].includes(payload.status)) {
             try {
               const polled = await fetch(
@@ -4637,7 +4625,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         meta.className = "meta";
         meta.textContent = "Chat · Waiting for the first response token";
         body.appendChild(meta);
-        setStatus("working", "Waiting");
+        setStatus("working", "Streaming");
         scrollChatToLatest();
         return;
       }
@@ -6401,11 +6389,7 @@ export function createServerApp(config = configFromEnv()) {
               !Array.isArray(body?.messages) || !Array.isArray(body?.tools)) {
             throw httpError(400, "Invalid project-agent v1 model job");
           }
-          const routedBody = withHermesTaskPlanner(
-            body,
-            await authStore.globalSkillOverrides(),
-          );
-          const accepted = await authStore.createProjectModelJob(connector.id, routedBody);
+          const accepted = await authStore.createProjectModelJob(connector.id, body);
           queueMicrotask(async () => {
             const modelRequest = await authStore.startProjectModelJob(connector.id, accepted.job_id).catch(() => null);
             if (!modelRequest) return;
@@ -6441,10 +6425,7 @@ export function createServerApp(config = configFromEnv()) {
         }
         if (request.method === "POST" && url.pathname === "/api/agent/model/v1/chat/completions") {
           const body = await readJsonBody(request);
-          const routedBody = withHermesTaskPlanner(
-            { ...body, model: PUBLIC_MODEL_ID },
-            await authStore.globalSkillOverrides(),
-          );
+          const routedBody = { ...body, model: PUBLIC_MODEL_ID };
           if (Array.isArray(routedBody.tools) && routedBody.tools.length) {
             // Preserve Hermes' native OpenAI messages and tool schema all the
             // way to the selected model runtime. The control plane is the
@@ -6829,48 +6810,6 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
   };
 }
 
-export function withHermesTaskPlanner(body = {}, globalOverrides = []) {
-  const messages = Array.isArray(body?.messages) ? body.messages : [];
-  const tools = Array.isArray(body?.tools) ? body.tools : [];
-  if (!shouldUseHermesTaskPlanner(messages, tools)) return body;
-
-  const override = (Array.isArray(globalOverrides) ? globalOverrides : [])
-    .find((item) => item?.skill_id === "hermes-task-planner");
-  if (override?.enabled === false) return body;
-  const content = String(override?.content ?? CHAT_SKILLS.hermesTaskPlanner ?? "").trim();
-  if (!content) return body;
-  if (messages.some((message) => message?.role === "system" && String(message?.content || "").includes("# Hermes Task Planner Skill"))) {
-    return body;
-  }
-  return {
-    ...body,
-    messages: [{ role: "system", content }, ...messages],
-  };
-}
-
-export function shouldUseHermesTaskPlanner(messages = [], tools = []) {
-  const hasDelegation = tools.some((tool) => {
-    const name = tool?.function?.name ?? tool?.name;
-    return name === "delegate_task";
-  });
-  if (!hasDelegation) return false;
-  const alreadyDelegated = messages.some((message) => Array.isArray(message?.tool_calls)
-    && message.tool_calls.some((call) => call?.function?.name === "delegate_task"));
-  if (alreadyDelegated) return false;
-  const userMessage = [...messages].reverse().find((message) => message?.role === "user");
-  const text = openAiMessageText(userMessage?.content).trim();
-  if (!text) return false;
-  const complexity = classifyChatRequestComplexity(text);
-  const responsibilities = new Set(
-    (text.toLowerCase().match(/\b(?:build|implement|create|fix|research|inspect|review|test|document|benchmark|compare)\b/g) || []),
-  );
-  return complexity.requiresDecomposition
-    || complexity.size === "long"
-    || looksLikeProductionCodeProjectRequest(text.toLowerCase())
-    || responsibilities.size >= 3
-    || /\b(?:in parallel|parallelize|split (?:this|the task)|multiple independent|research and (?:implement|compare|review)|implement and (?:test|document|review))\b/i.test(text);
-}
-
 export function isRetryableHermesModelFailure(value) {
   return /\b(?:408|425|429|500|502|503|504)\b|application failed to respond|timed?\s*out|temporar(?:y|ily)|connection (?:reset|closed|refused)/i
     .test(String(value || ""));
@@ -7166,7 +7105,6 @@ export function canLiveStreamChatTurn(body = {}) {
     return false;
   }
   if (
-    explicitlyRequestsParallelPlanning(message) ||
     isMultiIntentPlanningCandidate(message) ||
     extractWeatherLocation(message) ||
     looksLikeWeatherRequest(message.toLowerCase()) ||
@@ -7178,11 +7116,6 @@ export function canLiveStreamChatTurn(body = {}) {
     return false;
   }
   return true;
-}
-
-export function explicitlyRequestsParallelPlanning(message) {
-  const text = String(message ?? "").trim();
-  return /\b(?:run (?:it|them|these|the work|the tasks) in parallel|parallelize|parallelise|multiple independent tasks|split (?:it|this|the work|the task) into independent tasks)\b/i.test(text);
 }
 
 export async function streamChatTurn(response, body, config = configFromEnv(), fetchImpl = fetch) {

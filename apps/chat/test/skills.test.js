@@ -14,7 +14,7 @@ test("skill registry loads app-owned Markdown with stable metadata", () => {
   const catalog = registry.catalog();
 
   assert.equal(registry.version, 1);
-  assert.equal(catalog.length, 16);
+  assert.equal(catalog.length, 15);
   for (const id of ["security", "guardrails", "rag-integration", "model-provider"]) {
     assert.equal(registry.rawContent(id), "");
     assert.equal(registry.content(id), null);

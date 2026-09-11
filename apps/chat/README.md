@@ -188,13 +188,6 @@ custom-skill layer and cannot be replaced by a personal skill.
 
 Ordinary model answers use live streaming when the assigned worker supports it. Hermes crawler tasks use the local-agent task stream.
 
-Complex Hermes tasks can use the enabled `hermes-task-planner` Global Skill when
-the local runtime advertises `delegate_task`. Hermes submits a bounded batch of
-independent read-only analysis or validation tasks; their model calls can occupy
-compatible EHDA contributor slots concurrently. The parent Hermes task retains
-exclusive ownership of mutations and external actions. Administrators can
-disable or customize the planner independently in Global Skills.
-
 ## Legacy Hermes / OpenAI-Compatible Adapter
 
 New integrations should use the control plane directly:

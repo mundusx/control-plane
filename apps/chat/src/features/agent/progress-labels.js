@@ -12,7 +12,6 @@ function describeAgentProgress(event = {}, active = false) {
     write: ["Updating project files", "Apply the requested implementation changes."],
     inspect: ["Inspecting the codebase", "Read project context before choosing the next change."],
     research: ["Looking up information", "Gather information for the current request."],
-    delegation: ["Running independent tasks in parallel", "Gather bounded analysis or validation before the next dependent action."],
     command: ["Running a local command", "Execute the next command in the project workspace."],
   };
   if (["tool_started", "tool_proposed", "tool_completed"].includes(type)) {
@@ -20,7 +19,6 @@ function describeAgentProgress(event = {}, active = false) {
     if (!activity && metadata.verification === true) activity = "verification";
     if (!activity && ["read file", "search files", "read", "grep", "glob"].includes(tool)) activity = "inspect";
     if (!activity && ["write file", "apply patch", "patch", "write"].includes(tool)) activity = "write";
-    if (!activity && tool === "delegate task") activity = "delegation";
     const [action, purpose] = activities[activity] || [tool ? "Using " + tool : "Running a project tool", "Execute the next tool action for this request."];
     const success = metadata.is_error === true ? false : metadata.success;
     const outcome = type !== "tool_completed" ? "running" : success === false ? "failed" : success === true ? "succeeded" : "unknown";
