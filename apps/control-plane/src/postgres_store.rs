@@ -36,15 +36,15 @@ impl PostgresStore {
 
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
         let mut client = self.connect()?;
-        let devices: Vec<NodeRecord> = query_json_array(&mut client, DEVICES_RESTORE_SQL)?;
-        let jobs: Vec<JobRecord> = query_json_array(&mut client, JOBS_RESTORE_SQL)?;
-        let job_events: Vec<JobEventRecord> = query_json_array(
+        let devices: Vec<NodeRecord> = query_json_rows(&mut client, DEVICES_RESTORE_SQL)?;
+        let jobs: Vec<JobRecord> = query_json_rows(&mut client, JOBS_RESTORE_SQL)?;
+        let job_events: Vec<JobEventRecord> = query_json_rows(
             &mut client,
-            "select coalesce(jsonb_agg(to_jsonb(t) order by t.source_event_id asc nulls last, t.id asc)::text, '[]') from public.job_events t",
+            "select to_jsonb(t)::text from public.job_events t order by t.source_event_id asc nulls last, t.id asc",
         )?;
-        let credits_ledger: Vec<CreditsLedgerRecord> = query_json_array(
+        let credits_ledger: Vec<CreditsLedgerRecord> = query_json_rows(
             &mut client,
-            "select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at asc)::text, '[]') from public.credits_ledger t",
+            "select to_jsonb(t)::text from public.credits_ledger t order by t.created_at asc, t.id asc",
         )?;
 
         let mut state = ControlPlaneState::default();
@@ -389,7 +389,7 @@ returning user_id::text"#,
         let mut client = self.connect()?;
         client
             .execute(
-                "insert into public.chat_conversations (conversation_id) values ($1::uuid) on conflict (conversation_id) do nothing",
+                "insert into public.chat_conversations (conversation_id) values ($1::text::uuid) on conflict (conversation_id) do nothing",
                 &[&conversation_id],
             )
             .map_err(|error| format!("postgres chat conversation sync failed: {error}"))?;
@@ -414,7 +414,7 @@ returning user_id::text"#,
 
         client
             .execute(
-                "update public.chat_conversations set last_message_at = coalesce($2::timestamptz, last_message_at), message_count = (select count(*) from public.chat_messages where conversation_id = $1::uuid) where conversation_id = $1::uuid",
+                "update public.chat_conversations set last_message_at = coalesce($2::text::timestamptz, last_message_at), message_count = (select count(*) from public.chat_messages where conversation_id = $1::text::uuid) where conversation_id = $1::text::uuid",
                 &[&conversation_id, &created_at],
             )
             .map_err(|error| format!("postgres chat conversation update failed: {error}"))?;
@@ -440,7 +440,7 @@ returning user_id::text"#,
         let mut client = self.connect()?;
         let deleted = client
             .execute(
-                "delete from public.chat_conversations where conversation_id = $1::uuid",
+                "delete from public.chat_conversations where conversation_id = $1::text::uuid",
                 &[&conversation_id],
             )
             .map_err(|error| format!("postgres chat conversation delete failed: {error}"))?;
@@ -923,17 +923,6 @@ fn enum_value<T: serde::Serialize>(value: T) -> Result<String, String> {
         .ok_or_else(|| "harness enum did not serialize as a string".to_string())
 }
 
-fn query_json_array<T>(client: &mut Client, sql: &str) -> Result<Vec<T>, String>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let row = client
-        .query_one(sql, &[])
-        .map_err(|error| format!("postgres restore query failed: {error}"))?;
-    let raw: String = row.get(0);
-    serde_json::from_str(&raw).map_err(|error| format!("failed to parse postgres restore: {error}"))
-}
-
 fn query_json_array_optional<T>(client: &mut Client, sql: &str) -> Result<Vec<T>, String>
 where
     T: serde::de::DeserializeOwned,
@@ -945,8 +934,38 @@ where
                 .map_err(|error| format!("failed to parse postgres harness restore: {error}"))
         }
         Err(error) if error.code().is_some_and(|code| code.code() == "42P01") => Ok(Vec::new()),
-        Err(error) => Err(format!("postgres harness restore query failed: {error}")),
+        Err(error) => Err(format!("postgres harness restore query failed: {}", postgres_error(&error))),
     }
+}
+
+fn query_json_rows<T>(client: &mut Client, sql: &str) -> Result<Vec<T>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    client
+        .query(sql, &[])
+        .map_err(|error| format!("postgres restore query failed: {}", postgres_error(&error)))?
+        .into_iter()
+        .map(|row| {
+            let raw: String = row.get(0);
+            serde_json::from_str(&raw)
+                .map_err(|error| format!("failed to parse postgres restore row: {error}"))
+        })
+        .collect()
+}
+
+fn postgres_error(error: &postgres::Error) -> String {
+    let Some(database_error) = error.as_db_error() else {
+        return error.to_string();
+    };
+    let mut message = format!("{} (SQLSTATE {})", database_error.message(), database_error.code().code());
+    if let Some(detail) = database_error.detail() {
+        message.push_str(&format!("; detail: {detail}"));
+    }
+    if let Some(hint) = database_error.hint() {
+        message.push_str(&format!("; hint: {hint}"));
+    }
+    message
 }
 
 fn connect_client(database_url: &str) -> Result<Client, String> {
@@ -1037,7 +1056,7 @@ fn dedupe_credits_ledger(credits_ledger: Vec<CreditsLedgerRecord>) -> Vec<Credit
 }
 
 const DEVICES_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(jsonb_build_object(
+select jsonb_build_object(
   'node_id', node_id,
   'public_key_fingerprint', public_key_fingerprint,
   'public_key_hex', public_key_hex,
@@ -1084,12 +1103,13 @@ select coalesce(jsonb_agg(jsonb_build_object(
   ),
   'worker_health', worker_health_json,
   'updated_at', coalesce(updated_at_epoch::text, last_seen_at_epoch::text, '0')
-) order by updated_at_epoch asc nulls last, node_id asc)::text, '[]')
+)::text
 from public.devices
+order by updated_at_epoch asc nulls last, node_id asc
 "#;
 
 const JOBS_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(jsonb_build_object(
+select jsonb_build_object(
   'job_id', job_id,
   'request_id', request_id,
   'prompt', prompt,
@@ -1142,8 +1162,9 @@ select coalesce(jsonb_agg(jsonb_build_object(
   'backend', backend,
   'output', output,
   'error', error
-) order by submitted_at_epoch asc nulls last, job_id asc)::text, '[]')
+)::text
 from public.jobs
+order by submitted_at_epoch asc nulls last, job_id asc
 "#;
 
 const DEVICES_UPSERT_SQL: &str = r#"
@@ -1237,7 +1258,7 @@ insert into public.credits_ledger (
   id, user_id, device_id, job_id, parent_job_id, graph_node_id, entry_type,
   amount, currency, metadata, created_at
 ) values (
-  $1::uuid, $2::uuid, $3, $4, $5, $6, $7,
+  $1::text::uuid, $2::text::uuid, $3, $4, $5, $6, $7,
   $8::double precision::numeric, $9, $10::text::jsonb,
   case
     when $11::text ~ '^[0-9]+$' then to_timestamp(($11::text)::bigint)
@@ -1278,14 +1299,14 @@ on conflict (source_event_id) do update set
 const CHAT_MESSAGE_INSERT_SQL: &str = r#"
 with inserted as (
   insert into public.chat_messages (conversation_id, role, content, job_id, tool, metadata)
-  values ($1::uuid, $2, $3, $4, $5, $6::text::jsonb)
+  values ($1::text::uuid, $2, $3, $4, $5, $6::text::jsonb)
   on conflict (job_id) where job_id is not null do nothing
   returning *
 ), selected as (
   select * from inserted
   union all
   select * from public.chat_messages
-  where conversation_id = $1::uuid and job_id = $4
+  where conversation_id = $1::text::uuid and job_id = $4
   limit 1
 )
 select to_jsonb(selected)::text from selected limit 1
@@ -1296,7 +1317,7 @@ select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at asc, t.id asc)::text
 from (
   select *
   from public.chat_messages
-  where conversation_id = $1::uuid
+  where conversation_id = $1::text::uuid
   order by created_at desc, id desc
   limit $2
 ) t
@@ -1365,7 +1386,7 @@ insert into public.harness_tasks (
   $1, $2, $3, $4, $5, $6,
   $7::text::jsonb, $8, $9::text::jsonb, $10::text::jsonb,
   $11::text::jsonb, $12, $13, $14, $15,
-  $16, $17, $18, $19, $20::uuid, $21
+  $16, $17, $18, $19, $20::text::uuid, $21
 )
 on conflict (task_id) do update set
   harness_contract_version = excluded.harness_contract_version,
@@ -1397,7 +1418,7 @@ insert into public.harness_runners (
   network_default_disabled, max_workspace_mb, usable_memory_mb, parallel_slots,
   trusted_identity, ready, last_seen_epoch
 ) values (
-  $1, $2, $3, $4, $5::uuid, $6::text::jsonb,
+  $1, $2, $3, $4, $5::text::uuid, $6::text::jsonb,
   $7::text::jsonb, $8::text::jsonb, $9::text::jsonb, $10::text::jsonb,
   $11, $12, $13, $14, $15, $16, $17
 )

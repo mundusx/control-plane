@@ -78,7 +78,6 @@ const MAX_PAGE_SIZE: usize = 100;
 const MAX_CHAT_HISTORY_MESSAGES: usize = 12;
 const MAX_CHAT_HISTORY_CHARS: usize = 8_000;
 const MAX_CHAT_HISTORY_MESSAGE_CHARS: usize = 2_000;
-const HEARTBEAT_CHECKPOINT_INTERVAL_SECONDS: u64 = 60;
 const FILTER_QUERY_KEYS: &[&str] = &[
     "search",
     "start",
@@ -226,10 +225,6 @@ impl DatabaseMirror {
             Self::Postgres(store) => store.record_node_snapshot(node),
             Self::Supabase(store) => store.record_node_snapshot(node),
         }
-    }
-
-    fn record_heartbeat_checkpoint(&self, node: &NodeRecord) -> Result<(), String> {
-        self.record_node_snapshot(node)
     }
 
     fn record_job(&self, job: &JobRecord) -> Result<(), String> {
@@ -448,8 +443,6 @@ struct SupabaseSyncStatus {
     failure_count: u64,
     last_error: Option<String>,
     last_error_at: Option<String>,
-    #[serde(skip)]
-    heartbeat_checkpoints: BTreeMap<String, u64>,
 }
 
 impl SupabaseSyncStatus {
@@ -461,7 +454,6 @@ impl SupabaseSyncStatus {
             failure_count: 0,
             last_error: None,
             last_error_at: None,
-            heartbeat_checkpoints: BTreeMap::new(),
         }
     }
 
@@ -473,7 +465,6 @@ impl SupabaseSyncStatus {
             failure_count: 0,
             last_error: None,
             last_error_at: None,
-            heartbeat_checkpoints: BTreeMap::new(),
         }
     }
 
@@ -482,24 +473,6 @@ impl SupabaseSyncStatus {
         self.failure_count = self.failure_count.saturating_add(1);
         self.last_error = Some(error);
         self.last_error_at = Some(now_unix_seconds());
-    }
-
-    fn claim_heartbeat_checkpoint(&mut self, node_id: &str, now: u64) -> bool {
-        let due = self
-            .heartbeat_checkpoints
-            .get(node_id)
-            .map(|last| now.saturating_sub(*last) >= HEARTBEAT_CHECKPOINT_INTERVAL_SECONDS)
-            .unwrap_or(true);
-        if due {
-            self.heartbeat_checkpoints.insert(node_id.to_string(), now);
-        }
-        due
-    }
-
-    fn release_heartbeat_checkpoint(&mut self, node_id: &str, claimed_at: u64) {
-        if self.heartbeat_checkpoints.get(node_id) == Some(&claimed_at) {
-            self.heartbeat_checkpoints.remove(node_id);
-        }
     }
 
     fn summary(&self) -> String {
@@ -8638,36 +8611,8 @@ fn handle_connection_with_streams(
         }
         ("POST", "/v1/heartbeat") => match serde_json::from_str::<Heartbeat>(&request.body) {
             Ok(heartbeat) => {
-                let node_id = heartbeat.node_id.clone();
                 let now = now_unix_seconds();
-                let checkpoint_at = now.parse::<u64>().unwrap_or_default();
                 let record = state.lock().expect("state lock").heartbeat(heartbeat, now);
-                let checkpoint_due = sync_status
-                    .lock()
-                    .expect("sync status lock")
-                    .claim_heartbeat_checkpoint(&node_id, checkpoint_at);
-                if checkpoint_due {
-                    let mut checkpoint_failed = false;
-                    if let Ok(guard) = state.lock() {
-                        if let Err(error) = save_state(&guard) {
-                            eprintln!("failed to checkpoint control-plane state: {error}");
-                            checkpoint_failed = true;
-                        }
-                    }
-                    if let Some(db) = supabase.as_ref() {
-                        if let Err(error) = db.record_heartbeat_checkpoint(&record) {
-                            eprintln!("database heartbeat checkpoint skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
-                            checkpoint_failed = true;
-                        }
-                    }
-                    if checkpoint_failed {
-                        sync_status
-                            .lock()
-                            .expect("sync status lock")
-                            .release_heartbeat_checkpoint(&node_id, checkpoint_at);
-                    }
-                }
                 json_response("200 OK", serde_json::to_value(record).expect("json"))
             }
             Err(error) => json_response(
@@ -10562,22 +10507,6 @@ mod tests {
         degraded.note_failure("write failed".to_string());
         assert_eq!(degraded.dashboard_summary(), "postgres · degraded");
         assert_eq!(degraded.tone(), "amber");
-    }
-
-    #[test]
-    fn heartbeat_checkpoints_are_bounded_per_node() {
-        let mut status = SupabaseSyncStatus::enabled(StorageSource::Postgres);
-
-        assert!(status.claim_heartbeat_checkpoint("node-1", 100));
-        assert!(!status.claim_heartbeat_checkpoint("node-1", 159));
-        assert!(status.claim_heartbeat_checkpoint("node-1", 160));
-        assert!(status.claim_heartbeat_checkpoint("node-2", 160));
-
-        status.release_heartbeat_checkpoint("node-1", 160);
-        assert!(status.claim_heartbeat_checkpoint("node-1", 161));
-        assert!(!serde_json::to_string(&status)
-            .expect("status json")
-            .contains("heartbeat_checkpoints"));
     }
 
     #[test]
