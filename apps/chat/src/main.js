@@ -4411,6 +4411,15 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       let finishReason = null;
       let sawDone = false;
       const firstTokenDeadline = Date.now() + 60000;
+      let unpaintedDeltaCharacters = 0;
+
+      const yieldToStreamPaint = () => new Promise((resolve) => {
+        if (typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(() => resolve());
+        } else {
+          window.setTimeout(resolve, 16);
+        }
+      });
 
       const readStreamChunk = async () => {
         if (output) return reader.read();
@@ -4503,6 +4512,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         const delta = String(choice?.delta?.content || "");
         if (delta) {
           output += delta;
+          unpaintedDeltaCharacters += delta.length;
           streamState.status = "streaming";
           streamState.output = output;
           streamState.completionId = completionId;
@@ -4518,7 +4528,16 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           buffer += decoder.decode(next.value, { stream: true });
           const events = buffer.split(/\\r?\\n\\r?\\n/);
           buffer = events.pop() || "";
-          events.forEach(consumeEvent);
+          for (const event of events) {
+            consumeEvent(event);
+            // Fetch may deliver many SSE events in one read. Give Chrome a
+            // paint opportunity while consuming a burst so the answer remains
+            // visibly progressive instead of jumping from waiting to complete.
+            if (unpaintedDeltaCharacters >= 24) {
+              unpaintedDeltaCharacters = 0;
+              await yieldToStreamPaint();
+            }
+          }
         }
         buffer += decoder.decode();
         if (buffer.trim()) consumeEvent(buffer);
@@ -4527,6 +4546,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           throw new Error("MundusX replaced an invalid streamed draft with a validated result");
         }
         if (!output.trim()) throw new Error("MundusX completed without assistant output");
+        // Do not replace the streaming node with the completed view until the
+        // browser has painted the last received delta at least once.
+        if (unpaintedDeltaCharacters > 0) await yieldToStreamPaint();
       } catch (streamError) {
         await reader.cancel().catch(() => {});
         return recoverCompletedJob(streamError);
@@ -4549,7 +4571,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const live = document.createElement("section");
       live.className = "streaming-response";
       live.setAttribute("aria-live", "polite");
-      appendRichMessage(live, output);
+      try {
+        appendRichMessage(live, output);
+      } catch (error) {
+        // Partial Markdown is expected during a live response. A renderer
+        // failure must not abort the transport or force final-only recovery.
+        console.warn("[chat-stream-render]", error?.message || error);
+        live.textContent = output;
+      }
       body.appendChild(live);
       const meta = document.createElement("div");
       meta.className = "meta";
