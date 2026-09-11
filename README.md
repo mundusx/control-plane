@@ -55,9 +55,6 @@ The browser receives an opaque Secure/HttpOnly cookie, never an operator token. 
 | `MUNDUSX_CHAT_MAX_ACTIVE_REQUESTS` | No | Maximum admitted parent OpenAI chat requests. Defaults to 7 and is bounded to 1–64. Additional streaming requests wait FIFO with SSE keep-alives before graph planning; non-streaming requests receive `429` plus `Retry-After` so an intermediary cannot abandon a silent queued connection. |
 | `MUNDUSX_CHAT_TIMEOUT_SECONDS` | No | Maximum synchronous OpenAI chat execution wait after parent admission. Defaults to 600 seconds and is bounded to 5–900 seconds. |
 | `MUNDUSX_WEATHER_URL` | No | Weather-tool origin. Defaults to `https://wttr.in`; override only with a compatible trusted endpoint. |
-| `MUNDUSX_WEB_SEARCH_URL` | Required for generic fresh web queries | Trusted HTTPS JSON search endpoint. MundusX appends `q=<encoded query>` and accepts either `results[]` or Brave-style `web.results[]` records. If unset, current questions without a dedicated tool fail honestly instead of falling through to model memory. |
-| `MUNDUSX_WEB_SEARCH_API_KEY` | Provider-dependent | Optional search-provider credential sent only by the control plane. Never place it in node jobs or client payloads. |
-| `MUNDUSX_WEB_SEARCH_API_KEY_HEADER` | No | Search-provider credential header. Defaults to `X-Subscription-Token`. |
 
 Sports research is handled by the Hermes harness using its available search and browser tools. The gateway does not require a sports-provider key or replace harness tool results with a provider-specific sports answer.
 
@@ -137,7 +134,7 @@ These unauthenticated routes are the stable client boundary for Open WebUI, Herm
 | `GET` | `/v1/models` | Discover `mundusx-agnostic` in UAT or `ehda-agnostic` in Benz EHDA |
 | `POST` | `/v1/chat/completions` | Wait for validated output and return a completed OpenAI response |
 
-`stream: true` returns OpenAI-compatible SSE with a role chunk, content chunks, a terminal chunk, and `[DONE]`. Eligible ordinary text requests automatically use authenticated live worker deltas when a healthy streaming-capable node is available and advertise `X-MundusX-Stream-Mode: live-delta`; tools, structured modes, and unsupported nodes retain `validated-buffered` delivery. The OpenAI-compatible endpoint leaves search and other tool execution to the calling client. It forwards supplied tool definitions and tool results to inference, without intercepting current-information prompts or requiring `MUNDUSX_WEB_SEARCH_URL`. Clients must configure their own search tools and must not represent model-only answers as verified live research. Website Chat and the Hermes project harness retain their own tool orchestration.
+`stream: true` returns OpenAI-compatible SSE with a role chunk, content chunks, a terminal chunk, and `[DONE]`. Eligible ordinary text requests automatically use authenticated live worker deltas when a healthy streaming-capable node is available and advertise `X-MundusX-Stream-Mode: live-delta`; tools, structured modes, and unsupported nodes retain `validated-buffered` delivery. The OpenAI-compatible endpoint leaves search and other tool execution to the calling client. It forwards supplied tool definitions and tool results to inference without intercepting current-information prompts. Clients must configure their own search tools and must not represent model-only answers as verified live research. Website Chat uses Wikipedia/Wikidata for encyclopedic facts and delegates broader current-web research to the connected local Hermes crawler.
 
 ---
 

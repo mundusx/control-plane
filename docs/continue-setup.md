@@ -20,8 +20,8 @@ received 114 content chunks, beginning at 2.52 seconds and ending at 26.13 secon
 This verifies the API transport; rendering and file-creation approval remain
 Continue behavior. The example does not turn off approval or execute a tool itself.
 
-Continue's built-in web search is separate from MundusX/Hermes web search. A search
-service error should not be addressed by setting `MUNDUSX_WEB_SEARCH_URL` here.
+Continue's built-in web search is separate from the website Chat's local Hermes
+crawler. Search-service errors in Continue must be fixed in Continue's own tools.
 
 Native tool-fragment streaming is a separate draft requiring coordinated worker
 and gateway deployment. Do not enable it just by adding a capability to this file.

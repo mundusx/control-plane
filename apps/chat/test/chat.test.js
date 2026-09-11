@@ -30,6 +30,7 @@ import {
   fetchChatConversation,
   fetchNetworkSummary,
   needsGrounding,
+  requiresHermesWebResearch,
   normalizeAssistantDisplayText,
   protectMathSegments,
   normalizePublicOpenAiStreamEvent,
@@ -623,6 +624,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /projectActionsEl\.hidden = existingProjectMode/);
   assert.match(html, /Respond in planning\/chat mode and do not claim files were changed/);
   assert.match(html, /!activeProject \|\| runtimePreference === "cloud" \? false : await tryLocalAgentTurn/);
+  assert.match(html, /!activeProject && requiresHermesWebResearch\(message\)/);
+  assert.match(html, /runtime: "hermes"[\s\S]*optional: true[\s\S]*Research this request with your available browser and web-search tools/);
   assert.match(html, /Reconnecting without losing progress/);
   assert.match(html, /statusEl\.hidden = Boolean\(activeProject\)/);
   assert.match(html, /\.runtime-status-sentinel\[hidden\] \{ display: none; \}/);
@@ -3275,89 +3278,30 @@ test("gates web search on factual signals, not conversation or creative requests
   assert.equal(needsGrounding("What do you think about pineapple on pizza"), false);
 });
 
-test("routes tool-mode grounded requests through Brave Search and injects citable sources", async () => {
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    if (String(url).includes("api.search.brave.com")) {
-      assert.match(String(url), /q=What\+is\+Elon\+Musk/);
-      return jsonResponse({
-        web: {
-          results: [
-            { title: "Elon Musk net worth", url: "https://example.com/elon", description: "Elon Musk's net worth is estimated at $200 billion." },
-          ],
-        },
-      });
-    }
-    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
-    return jsonResponse({
-      job_id: "job-grounded-1",
-      job: {
-        job_id: "job-grounded-1",
-        status: "completed",
-        output: "Elon Musk's net worth is about $200 billion [1].",
-        execution_mode: "tool",
-      },
-    });
-  };
-
-  const result = await submitChatJob(
-    { message: "What is Elon Musk net worth right now?", toolMode: true },
-    configFromEnv({
-      MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai",
-      MUNDUSX_WEB_SEARCH_API_KEY: "test-key",
-    }),
-    fetchImpl,
-  );
-
-  assert.equal(result.tool, "web_search");
-  assert.equal(result.status, "completed");
-  assert.equal(result.sources.length, 1);
-  assert.equal(result.sources[0].url, "https://example.com/elon");
-  assert.match(result.output, /\$200 billion/);
-
-  const jobsCall = calls.find((url) => url === "https://uat.mundusx.ai/v1/jobs");
-  assert.ok(jobsCall);
+test("routes current-web research to Hermes and keeps weather on the website tool", () => {
+  assert.equal(requiresHermesWebResearch("Search the web for the latest Rust release"), true);
+  assert.equal(requiresHermesWebResearch("What is the Bitcoin price right now?"), true);
+  assert.equal(requiresHermesWebResearch("Who is Ada Lovelace?"), false);
+  assert.equal(requiresHermesWebResearch("What is the weather in Berlin today?"), false);
 });
 
-test("declines web search without an API key and falls through to a normal job", async () => {
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    if (String(url).includes("api.search.brave.com")) {
-      throw new Error("should not call Brave Search without an API key");
-    }
-    if (String(url).includes("wikipedia.org") || String(url).includes("opensearch")) {
-      return jsonResponse({ error: "not found" }, { status: 404 });
-    }
-    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
-    return jsonResponse({
-      job_id: "job-no-key",
-      job: { job_id: "job-no-key", status: "queued", execution_mode: "auto", graph: { nodes: [] } },
-    });
-  };
-
+test("fails honestly when a current-web request reaches Chat without a Hermes crawler", async () => {
   const result = await submitChatJob(
-    { message: "What is the current population of Japan?", toolMode: true },
+    { message: "Search the web for the latest Rust release", toolMode: true },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    fetchImpl,
+    async () => { throw new Error("current-web fallback must not call a search provider or model worker"); },
   );
 
-  assert.ok(!calls.some((url) => String(url).includes("api.search.brave.com")));
-  assert.equal(result.job_id, "job-no-key");
+  assert.equal(result.tool, "web_crawler");
+  assert.equal(result.status, "completed");
+  assert.match(result.output, /Hermes crawler on a connected computer/);
 });
 
-test("does not attempt web search when tool mode is off", async () => {
+test("does not route ordinary model requests to the Hermes crawler", async () => {
   const result = await submitChatJob(
-    { message: "What year did the Berlin Wall fall?" },
-    configFromEnv({
-      MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai",
-      MUNDUSX_WEB_SEARCH_API_KEY: "test-key",
-    }),
+    { message: "Write me a poem about the ocean", toolMode: true },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url) => {
-      if (String(url).includes("api.search.brave.com")) {
-        throw new Error("should not call web search when tool mode is off");
-      }
       assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
       return jsonResponse({
         job_id: "job-plain",
@@ -4550,52 +4494,10 @@ test("extracts current office-holder queries", () => {
   assert.equal(extractCurrentOfficeQuery("Write a president speech for USA"), null);
 });
 
-test("reattaches tracked citation sources when polling a grounded job to completion", async () => {
-  const config = configFromEnv({
-    MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai",
-    MUNDUSX_WEB_SEARCH_API_KEY: "test-key",
-  });
-
-  let jobStatus = "queued";
-  const fetchImpl = async (url) => {
-    if (String(url).includes("api.search.brave.com")) {
-      return jsonResponse({
-        web: {
-          results: [{ title: "Tokyo Population", url: "https://example.com/tokyo", description: "Tokyo has about 14 million residents." }],
-        },
-      });
-    }
-    if (url === "https://uat.mundusx.ai/v1/jobs") {
-      return jsonResponse({
-        job_id: "job-grounded-poll",
-        job: { job_id: "job-grounded-poll", status: "queued", execution_mode: "tool" },
-      });
-    }
-    assert.equal(url, "https://uat.mundusx.ai/v1/jobs/job-grounded-poll");
-    return jsonResponse({
-      job: {
-        job_id: "job-grounded-poll",
-        status: jobStatus,
-        output: "Tokyo has roughly 14 million residents [1].",
-        execution_mode: "tool",
-      },
-    });
-  };
-
-  const submitted = await submitChatJob(
-    { message: "How many people live in Tokyo right now?", toolMode: true },
-    config,
-    fetchImpl,
-  );
-  assert.equal(submitted.job_id, "job-grounded-poll");
-  assert.equal(submitted.status, "queued");
-
-  jobStatus = "completed";
-  const polled = await pollChatJob("job-grounded-poll", config, fetchImpl);
-
-  assert.equal(polled.tool, "web_search");
-  assert.equal(polled.sources.length, 1);
-  assert.equal(polled.sources[0].url, "https://example.com/tokyo");
+test("configuration no longer exposes a provider-specific web search path", () => {
+  const config = configFromEnv({});
+  assert.equal("webSearchBaseUrl" in config, false);
+  assert.equal("webSearchApiKey" in config, false);
 });
 
 test("polls chat job progress and final cleaned output", async () => {
