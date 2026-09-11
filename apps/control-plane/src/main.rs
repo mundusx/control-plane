@@ -601,6 +601,11 @@ fn parse_chat_completion_status_path(path: &str) -> Option<&str> {
     (!job_id.is_empty() && !job_id.contains('/')).then_some(job_id)
 }
 
+fn parse_chat_completion_cancel_path(path: &str) -> Option<&str> {
+    let job_id = path.strip_prefix("/v1/chat/completions/")?.strip_suffix("/cancel")?.trim();
+    (!job_id.is_empty() && !job_id.contains('/')).then_some(job_id)
+}
+
 fn resume_token_sha256(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
@@ -8732,6 +8737,57 @@ fn handle_connection_with_streams(
                 ),
             }
         }
+        ("POST", path) if parse_chat_completion_cancel_path(path).is_some() => {
+            let job_id = parse_chat_completion_cancel_path(path).expect("checked");
+            let provided_token = header_value(&request.headers, "x-mundusx-resume-token");
+            let expected_token = state
+                .lock()
+                .expect("state lock")
+                .jobs
+                .get(job_id)
+                .and_then(|record| record.chat_resume_token_sha256.clone());
+            match expected_token {
+                None => json_response("404 Not Found", openai_error("chat completion was not found")),
+                Some(expected) if provided_token.is_none_or(|provided| !resume_token_matches(&expected, provided)) => {
+                    json_response("401 Unauthorized", openai_error("a valid X-MundusX-Resume-Token header is required"))
+                }
+                Some(_) => {
+                    let now = now_unix_seconds();
+                    let mut guard = state.lock().expect("state lock");
+                    match guard.cancel_job(job_id, now.clone()) {
+                        Ok(record) => {
+                            let event = guard.record_job_event(
+                                None,
+                                Some(record.job_id.clone()),
+                                "chat_completion_cancelled",
+                                serde_json::to_value(&record).expect("json"),
+                                now,
+                            );
+                            if let Err(error) = save_state(&guard) {
+                                eprintln!("failed to save cancelled chat job: {error}");
+                            }
+                            if let Some(db) = supabase.as_ref() {
+                                if let Err(error) = db.record_job(&record) {
+                                    eprintln!("database cancelled chat job sync skipped: {error}");
+                                    note_supabase_failure(&sync_status, error);
+                                }
+                                if let Err(error) = db.record_job_event(&event) {
+                                    eprintln!("database cancelled chat event sync skipped: {error}");
+                                    note_supabase_failure(&sync_status, error);
+                                }
+                            }
+                            drop(guard);
+                            live_streams.lock().expect("live stream registry lock").remove(job_id);
+                            json_response("200 OK", serde_json::json!({
+                                "job_id": record.job_id,
+                                "status": "cancelled"
+                            }))
+                        }
+                        Err(error) => json_response("409 Conflict", openai_error(&error)),
+                    }
+                }
+            }
+        }
         ("GET", path) if parse_chat_completion_status_path(path).is_some() => {
             let job_id = parse_chat_completion_status_path(path).expect("checked");
             let provided_token = header_value(&request.headers, "x-mundusx-resume-token");
@@ -8944,6 +9000,7 @@ fn handle_connection_with_streams(
                                 created,
                                 public_model,
                                 live_stream_job,
+                                &resume_token,
                             )
                             .as_bytes(),
                         ) {
@@ -9602,7 +9659,7 @@ mod tests {
         json_response_with_retry_after, legacy_supabase_enabled_from_value,
         migration_database_url_from_values, now_unix_seconds, operator_auth_mode_from_env,
         operator_auth_startup_config_error, operator_auth_token_from_env,
-        parse_chat_completion_status_path, parse_conversation_messages_path,
+        parse_chat_completion_cancel_path, parse_chat_completion_status_path, parse_conversation_messages_path,
         parse_conversation_path, parse_harness_attempt_route,
         parse_harness_attempt_transition_route, parse_harness_task_route, parse_request,
         read_http_request, requires_device_signature, requires_operator_auth, resume_token_matches,
@@ -9633,6 +9690,14 @@ mod tests {
         );
         assert_eq!(
             parse_chat_completion_status_path("/v1/chat/completions/job-1/extra"),
+            None
+        );
+        assert_eq!(
+            parse_chat_completion_cancel_path("/v1/chat/completions/job-1/cancel"),
+            Some("job-1")
+        );
+        assert_eq!(
+            parse_chat_completion_cancel_path("/v1/chat/completions/job-1/cancel/extra"),
             None
         );
         let digest = resume_token_sha256("secret-token");
@@ -10090,6 +10155,83 @@ mod tests {
         assert!(authorized_response.starts_with("HTTP/1.1 200 OK"));
         assert!(authorized_response.contains("Validated graph result."));
         handler.join().expect("handler completes");
+    }
+
+    #[test]
+    fn chat_completion_cancel_requires_resume_token_and_stops_job() {
+        let mut initial_state = ControlPlaneState::default();
+        register_ready_node(&mut initial_state, "node-1", "host-1", "1");
+        register_ready_node(&mut initial_state, "node-2", "host-2", "1");
+        let state = Arc::new(Mutex::new(initial_state));
+        let sync_status = Arc::new(Mutex::new(SupabaseSyncStatus::disabled(
+            StorageSource::LocalJsonOnly,
+        )));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let handler_state = Arc::clone(&state);
+        let handler_sync = Arc::clone(&sync_status);
+        let handler = thread::spawn(move || {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().expect("accept request");
+                handle_connection(
+                    stream,
+                    Arc::clone(&handler_state),
+                    Arc::clone(&handler_sync),
+                    None,
+                    StorageSource::LocalJsonOnly,
+                );
+            }
+        });
+
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": "Design and implement a backend API plus frontend dashboard, tests, documentation, review, and security analysis."
+            }]
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(), body
+        );
+        let mut client = TcpStream::connect(address).expect("connect post");
+        client.write_all(request.as_bytes()).expect("write post");
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read post");
+        assert!(response.starts_with("HTTP/1.1 202 Accepted"));
+        let payload: serde_json::Value = serde_json::from_str(
+            response.split_once("\r\n\r\n").expect("HTTP response body").1,
+        )
+        .expect("pending payload");
+        let job_id = payload["mundusx"]["job_id"].as_str().expect("job id");
+        let token = payload["mundusx"]["resume_token"].as_str().expect("resume token");
+        let cancel_path = format!("/v1/chat/completions/{job_id}/cancel");
+
+        let unauthorized = format!(
+            "POST {cancel_path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{{}}"
+        );
+        let mut client = TcpStream::connect(address).expect("connect unauthorized cancel");
+        client.write_all(unauthorized.as_bytes()).expect("write unauthorized cancel");
+        let mut unauthorized_response = String::new();
+        client.read_to_string(&mut unauthorized_response).expect("read unauthorized cancel");
+        assert!(unauthorized_response.starts_with("HTTP/1.1 401 Unauthorized"));
+
+        let authorized = format!(
+            "POST {cancel_path} HTTP/1.1\r\nHost: localhost\r\nX-MundusX-Resume-Token: {token}\r\nContent-Length: 2\r\n\r\n{{}}"
+        );
+        let mut client = TcpStream::connect(address).expect("connect authorized cancel");
+        client.write_all(authorized.as_bytes()).expect("write authorized cancel");
+        let mut authorized_response = String::new();
+        client.read_to_string(&mut authorized_response).expect("read authorized cancel");
+        assert!(authorized_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(authorized_response.contains(r#""status":"cancelled""#));
+        handler.join().expect("handler completes");
+
+        let guard = state.lock().expect("state lock");
+        let job = guard.jobs.get(job_id).expect("cancelled job remains stored");
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.error.as_deref(), Some("cancelled by client"));
+        assert!(job.assigned_node_id.is_none());
     }
 
     #[test]

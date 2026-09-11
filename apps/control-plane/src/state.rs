@@ -700,6 +700,66 @@ impl ControlPlaneState {
             .ok_or_else(|| "unknown job".to_string())
     }
 
+    pub fn cancel_job(&mut self, job_id: &str, completed_at: String) -> Result<JobRecord, String> {
+        let mut affected_nodes = BTreeSet::new();
+        {
+            let job = self
+                .jobs
+                .get_mut(job_id)
+                .ok_or_else(|| "unknown job".to_string())?;
+            if matches!(job.status, JobStatus::Completed | JobStatus::Failed) {
+                return if job.error.as_deref() == Some("cancelled by client") {
+                    Ok(job.clone())
+                } else {
+                    Err("job is already complete".to_string())
+                };
+            }
+            if let Some(node_id) = job.assigned_node_id.as_ref() {
+                affected_nodes.insert(node_id.clone());
+            }
+            const REASON: &str = "cancelled by client";
+            job.status = JobStatus::Failed;
+            job.completed_at = Some(completed_at.clone());
+            job.assigned_node_id = None;
+            job.assigned_at = None;
+            job.worker_id = None;
+            job.backend = None;
+            job.error = Some(REASON.to_string());
+            job.active_graph_node_id = None;
+            if job.graph_execution_enabled {
+                for node in &mut job.graph.nodes {
+                    if let Some(node_id) = node.assigned_node_id.as_ref() {
+                        affected_nodes.insert(node_id.clone());
+                    }
+                    if matches!(node.status, JobGraphNodeStatus::Ready | JobGraphNodeStatus::Waiting | JobGraphNodeStatus::Running) {
+                        node.status = JobGraphNodeStatus::Failed;
+                        node.completed_at = Some(completed_at.clone());
+                        node.assigned_node_id = None;
+                        node.assigned_at = None;
+                        node.worker_id = None;
+                        node.backend = None;
+                        node.error = Some(REASON.to_string());
+                    }
+                }
+                job.graph.status = JobGraphStatus::Failed;
+                job.graph.merge_error = Some(REASON.to_string());
+                job.graph.updated_at = completed_at.clone();
+            }
+        }
+        for node_id in affected_nodes {
+            let remaining = self.active_assignment_count_for_node(&node_id);
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                if node.reported_state == AgentState::Busy && remaining == 0 {
+                    node.reported_state = AgentState::Ready;
+                }
+                node.updated_at = completed_at.clone();
+                Self::apply_policy_override(node);
+            }
+        }
+        self.reevaluate_queued_jobs();
+        Ok(self.jobs.get(job_id).expect("cancelled job remains stored").clone())
+    }
+
     pub fn set_operator_contribution_percent(
         &mut self,
         node_id: &str,

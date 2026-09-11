@@ -579,14 +579,14 @@ pub fn completion_response(
     })
 }
 
-pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool) -> String {
+pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token: &str) -> String {
     let mode = if live {
         "live-delta"
     } else {
         "validated-buffered"
     };
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nConnection: close\r\n\r\n: stream opened\n\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n: stream opened\n\n"
     )
 }
 
@@ -1016,7 +1016,7 @@ mod tests {
             "model": "mundusx-agnostic",
             "choices": [{"message": {"content": "Done."}, "finish_reason": "stop"}]
         });
-        let start = sse_start("chatcmpl-test", 1, "mundusx-agnostic", false);
+        let start = sse_start("chatcmpl-test", 1, "mundusx-agnostic", false, "resume-test");
         let finish = sse_finish(&completion);
         assert!(start.starts_with("HTTP/1.1 200 OK"));
         assert!(start.contains("Content-Type: text/event-stream"));
@@ -1101,9 +1101,10 @@ mod tests {
 
     #[test]
     fn live_sse_advertises_delta_mode() {
-        let start = sse_start("chatcmpl-live", 1, "mundusx-agnostic", true);
+        let start = sse_start("chatcmpl-live", 1, "mundusx-agnostic", true, "resume-live");
         assert!(start.contains("X-MundusX-Stream-Mode: live-delta"));
         assert!(start.contains("X-MundusX-Completion-Id: chatcmpl-live"));
+        assert!(start.contains("X-MundusX-Resume-Token: resume-live"));
     }
 
     #[test]
