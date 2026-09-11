@@ -274,13 +274,15 @@ test("renders a usable chat page", () => {
   assert.match(html, /streamState\.status = "waiting"/);
   assert.match(html, /Chat · Waiting for the first response token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 60000/);
+  assert.match(html, /let lastStreamActivityAt = Date\.now\(\)/);
+  assert.match(html, /const streamInactivityTimeoutMs = 75000/);
+  assert.match(html, /lastStreamActivityAt = Date\.now\(\)/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
   assert.match(html, /unpaintedDeltaCharacters >= 24/);
   assert.match(html, /await yieldToStreamPaint\(\)/);
   assert.match(html, /\[chat-stream-render\]/);
   assert.match(html, /live\.textContent = output/);
-  assert.match(html, /MundusX did not produce a first token within 60 seconds/);
+  assert.match(html, /MundusX response stream was inactive for 75 seconds/);
   assert.match(html, /MundusX job did not complete during stream recovery/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
@@ -4047,6 +4049,10 @@ test("generative MundusX Chat requests stream while typed tool routes fall back"
   assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "can we ask you, for free account in chatgpt, how many messages can i keep?", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "If I have 1TB, how many users can store 1000 messages of 280k tokens each?", toolMode: true }), true);
+  assert.equal(canLiveStreamChatTurn({
+    message: "Analyze GitHub, GitLab, Jira, and Notion. Split the work into independent tasks and run them in parallel.",
+    toolMode: true,
+  }), false);
 });
 
 test("native MundusX Chat streams complete projects as upstream deltas arrive", async () => {
