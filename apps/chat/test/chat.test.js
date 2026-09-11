@@ -55,8 +55,6 @@ import {
   streamOpenAiChatCompletion,
   streamChatTurn,
   waitForChatJob,
-  shouldUseHermesTaskPlanner,
-  withHermesTaskPlanner,
 } from "../src/main.js";
 import {
   detectCompleteCodeQualityFlags,
@@ -1892,46 +1890,6 @@ test("internal Hermes turns bypass public chat shortcuts", async () => {
   assert.notEqual(result.model, "mundusx-knowledge");
   assert.match(submittedJob.prompt, /select the next action/i);
   assert.equal(submittedJob.system_prompt, "You are the model inside a bounded coding agent.");
-});
-
-test("Hermes planner selects only complex tasks with delegation available", () => {
-  const delegation = [{ type: "function", function: { name: "delegate_task" } }];
-  assert.equal(shouldUseHermesTaskPlanner([
-    { role: "user", content: "What is 2 + 2?" },
-  ], delegation), false);
-  assert.equal(shouldUseHermesTaskPlanner([
-    { role: "user", content: "Build a production API, implement its tests, document it, and review the security boundaries." },
-  ], delegation), true);
-  assert.equal(shouldUseHermesTaskPlanner([
-    { role: "user", content: "Build a production API, implement its tests, document it, and review it." },
-  ], [{ type: "function", function: { name: "read_file" } }]), false);
-});
-
-test("Hermes planner is injected once and respects the administrator switch", () => {
-  const body = {
-    messages: [{ role: "user", content: "Implement and test a production service with several independent components." }],
-    tools: [{ type: "function", function: { name: "delegate_task" } }],
-  };
-  const planned = withHermesTaskPlanner(body);
-  assert.notEqual(planned, body);
-  assert.match(planned.messages[0].content, /two to four independent responsibilities/i);
-  assert.equal(withHermesTaskPlanner(planned), planned);
-  assert.equal(withHermesTaskPlanner(body, [{ skill_id: "hermes-task-planner", enabled: false }]), body);
-  const customized = withHermesTaskPlanner(body, [{
-    skill_id: "hermes-task-planner", enabled: true, content: "# Hermes Task Planner Skill\nUse two read-only tasks.",
-  }]);
-  assert.match(customized.messages[0].content, /Use two read-only tasks/);
-});
-
-test("Hermes planner does not restart after a delegation tool call", () => {
-  const messages = [
-    { role: "user", content: "Implement and test a production service with several independent components." },
-    { role: "assistant", tool_calls: [{ function: { name: "delegate_task" } }] },
-    { role: "tool", content: "Delegated analysis complete." },
-  ];
-  assert.equal(shouldUseHermesTaskPlanner(messages, [
-    { type: "function", function: { name: "delegate_task" } },
-  ]), false);
 });
 
 test("routes weather questions to wttr without queuing an LLM job", async () => {

@@ -70,22 +70,6 @@ the Chat account; the MCP connection token binds one local connector to that
 same account. MundusX does not upload Hermes configuration, provider keys,
 skills, memories, transcripts, or tool results.
 
-## Parallel planning
-
-When Hermes advertises its `delegate_task` tool, the Chat model adapter can add
-the administrator-controlled **Hermes task planner** skill to complex turns.
-The planner asks Hermes to submit one batch of two to four independent,
-read-only responsibilities. Each child model request is routed independently by
-the MundusX control plane, so compatible contributor slots can work at the same
-time. Short requests and dependent steps stay on the direct path.
-
-The parent Hermes task remains the only mutation owner. Delegated children may
-inspect, research, discover tests, or review results; they do not own file
-changes, approvals, commits, pushes, or completion claims. Independent
-validation may fan out after the parent applies changes. Disabling the Hermes
-task planner in Global Skills removes this guidance without disabling Hermes or
-its ordinary tools.
-
 ## Protocol and privacy
 
 The v1 bridge uses `/api/agent/connector/*` with the existing user-scoped MCP

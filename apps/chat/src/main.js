@@ -78,7 +78,6 @@ const CHAT_SKILLS = {
   weather: SKILL_REGISTRY.content("weather", "# Weather Skill\nUse the weather tool for weather."),
   facts: SKILL_REGISTRY.content("facts", "# Facts Skill\nUse grounded factual sources."),
   chunkPlanner: SKILL_REGISTRY.content("chunk-planner", "# Chunk Planner Skill\nChunk only when useful."),
-  hermesTaskPlanner: SKILL_REGISTRY.content("hermes-task-planner", "# Hermes Task Planner Skill\nDelegate only independent read-only work."),
   verifier: SKILL_REGISTRY.content("verifier", "# Verifier Skill\nFlag malformed output."),
 };
 const loggedChatJobs = new Set();
@@ -6390,11 +6389,7 @@ export function createServerApp(config = configFromEnv()) {
               !Array.isArray(body?.messages) || !Array.isArray(body?.tools)) {
             throw httpError(400, "Invalid project-agent v1 model job");
           }
-          const routedBody = withHermesTaskPlanner(
-            body,
-            await authStore.globalSkillOverrides(),
-          );
-          const accepted = await authStore.createProjectModelJob(connector.id, routedBody);
+          const accepted = await authStore.createProjectModelJob(connector.id, body);
           queueMicrotask(async () => {
             const modelRequest = await authStore.startProjectModelJob(connector.id, accepted.job_id).catch(() => null);
             if (!modelRequest) return;
@@ -6430,10 +6425,7 @@ export function createServerApp(config = configFromEnv()) {
         }
         if (request.method === "POST" && url.pathname === "/api/agent/model/v1/chat/completions") {
           const body = await readJsonBody(request);
-          const routedBody = withHermesTaskPlanner(
-            { ...body, model: PUBLIC_MODEL_ID },
-            await authStore.globalSkillOverrides(),
-          );
+          const routedBody = { ...body, model: PUBLIC_MODEL_ID };
           if (Array.isArray(routedBody.tools) && routedBody.tools.length) {
             // Preserve Hermes' native OpenAI messages and tool schema all the
             // way to the selected model runtime. The control plane is the
@@ -6816,48 +6808,6 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
     model: PUBLIC_MODEL_ID,
     choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
   };
-}
-
-export function withHermesTaskPlanner(body = {}, globalOverrides = []) {
-  const messages = Array.isArray(body?.messages) ? body.messages : [];
-  const tools = Array.isArray(body?.tools) ? body.tools : [];
-  if (!shouldUseHermesTaskPlanner(messages, tools)) return body;
-
-  const override = (Array.isArray(globalOverrides) ? globalOverrides : [])
-    .find((item) => item?.skill_id === "hermes-task-planner");
-  if (override?.enabled === false) return body;
-  const content = String(override?.content ?? CHAT_SKILLS.hermesTaskPlanner ?? "").trim();
-  if (!content) return body;
-  if (messages.some((message) => message?.role === "system" && String(message?.content || "").includes("# Hermes Task Planner Skill"))) {
-    return body;
-  }
-  return {
-    ...body,
-    messages: [{ role: "system", content }, ...messages],
-  };
-}
-
-export function shouldUseHermesTaskPlanner(messages = [], tools = []) {
-  const hasDelegation = tools.some((tool) => {
-    const name = tool?.function?.name ?? tool?.name;
-    return name === "delegate_task";
-  });
-  if (!hasDelegation) return false;
-  const alreadyDelegated = messages.some((message) => Array.isArray(message?.tool_calls)
-    && message.tool_calls.some((call) => call?.function?.name === "delegate_task"));
-  if (alreadyDelegated) return false;
-  const userMessage = [...messages].reverse().find((message) => message?.role === "user");
-  const text = openAiMessageText(userMessage?.content).trim();
-  if (!text) return false;
-  const complexity = classifyChatRequestComplexity(text);
-  const responsibilities = new Set(
-    (text.toLowerCase().match(/\b(?:build|implement|create|fix|research|inspect|review|test|document|benchmark|compare)\b/g) || []),
-  );
-  return complexity.requiresDecomposition
-    || complexity.size === "long"
-    || looksLikeProductionCodeProjectRequest(text.toLowerCase())
-    || responsibilities.size >= 3
-    || /\b(?:in parallel|parallelize|split (?:this|the task)|multiple independent|research and (?:implement|compare|review)|implement and (?:test|document|review))\b/i.test(text);
 }
 
 export function isRetryableHermesModelFailure(value) {
