@@ -318,6 +318,7 @@ export function page(config = configFromEnv()) {
       <form id="harness-form" class="harness-form">
         <section class="project-section project-create-fields" id="project-create-fields">
           <label class="project-field-wide">New project folder name<input name="project_slug" maxlength="80" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="my-app" autocomplete="off" required></label>
+          <label class="project-init-git"><input name="initialize_git" type="checkbox" checked> Initialize a local Git repository</label>
         </section>
         <p class="project-purpose-note" id="project-purpose-note"><span aria-hidden="true">✦</span><span>This creates a folder inside the local workspace you approved. Its chats and files stay together.</span></p>
         <section class="project-runner-context" id="project-runner-context" hidden>
@@ -345,25 +346,54 @@ export function page(config = configFromEnv()) {
       </form>` : ""}
     </section>
   </div>`;
-  const mcpDialog = config.mcpEnabled ? `<div class="projects-overlay" id="mcp-dialog" hidden>
-    <section class="harness-dialog mcp-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-dialog-title">
-      <button class="dialog-close" id="mcp-dialog-close" type="button" aria-label="Close">&times;</button>
-      <h2 id="mcp-dialog-title">MCP connections</h2>
-      <p class="mcp-intro">Connect Codex, ChatGPT desktop, OpenWebUI, or another MCP client to your MundusX projects and Harness runner.</p>
-      <label class="mcp-endpoint">Server URL<code>${escapeHtml(config.auth?.publicOrigin || "https://chat.mundusx.ai")}/mcp</code></label>
-      <form id="mcp-token-form" class="mcp-token-form">
-        <label>Connection name<input name="name" maxlength="80" value="My Codex" required></label>
-        <label>Expires<select name="expires_in_days"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">1 year</option></select></label>
-        <button type="submit">Create access token</button>
-      </form>
-      <section class="mcp-token-once" id="mcp-token-once" hidden>
-        <strong>Copy this token now</strong><p>It is shown once. MundusX stores only its digest.</p>
-        <div class="command-row"><code id="mcp-token-value"></code><button class="copy-command" type="button" data-copy-target="mcp-token-value">Copy</button></div>
-      </section>
-      <section class="mcp-token-list-section"><h3>Devices and access tokens</h3><div id="mcp-token-list" class="mcp-token-list"><p class="project-context-empty">Loading…</p></div></section>
-      <p class="mcp-safety">MCP can submit bounded UAT Harness work, inspect evidence, and cancel your tasks. Apply, merge, and deployment still require separate approval.</p>
+  const settingsDialog = `<div class="projects-overlay" id="settings-dialog" hidden>
+    <section class="harness-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
+      <button class="dialog-close" id="settings-dialog-close" type="button" aria-label="Close">&times;</button>
+      <header class="settings-heading"><h2 id="settings-dialog-title">Settings</h2><p>Manage your account, connections, computers, and external clients.</p></header>
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-label="Settings sections">
+          <button type="button" data-settings-tab="general" aria-current="true">General</button>
+          <button type="button" data-settings-tab="connections">Connections</button>
+          <button type="button" data-settings-tab="devices">Devices</button>
+          <button type="button" data-settings-tab="personalization">Personalization</button>
+          ${config.mcpEnabled ? `<button type="button" data-settings-tab="developer">Developer</button>` : ""}
+        </nav>
+        <div class="settings-content">
+          <section class="settings-pane" data-settings-pane="general">
+            <h3>General</h3><p class="settings-description">Choose how Chat looks and behaves on this browser.</p>
+            <label class="settings-control">Appearance<select id="settings-theme"><option value="system">Use system setting</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+          </section>
+          <section class="settings-pane" data-settings-pane="connections" hidden>
+            <h3>Connections</h3><p class="settings-description">Connect services that your projects can use. Private local clone and push also require GitHub credentials on the Hermes computer.</p>
+            <article class="connection-card"><span class="connection-mark" aria-hidden="true">GH</span><span><strong>GitHub</strong><small id="github-connection-status">Checking connection…</small></span><a class="settings-action" id="github-connect" href="/api/auth/github/start?return_to=/%3Fsettings%3Dconnections">Connect GitHub</a></article>
+          </section>
+          <section class="settings-pane" data-settings-pane="devices" hidden>
+            <h3>Devices</h3><p class="settings-description">Hermes computers keep project files and local tools on your device.</p>
+            <div id="settings-device-list" class="settings-card-list"><p class="project-context-empty">Checking connected computers…</p></div>
+          </section>
+          <section class="settings-pane" data-settings-pane="personalization" hidden>
+            <h3>Personalization</h3><p class="settings-description">Project instructions provide repository-specific context. Administrators manage shared Global Skills, and Hermes selects installed capabilities when needed.</p>
+          </section>
+          ${config.mcpEnabled ? `<section class="settings-pane" data-settings-pane="developer" hidden>
+            <h3>External client access</h3>
+            <p class="mcp-intro">Connect Continue, Codex, ChatGPT desktop, OpenWebUI, or another MCP-compatible client to your MundusX projects.</p>
+            <label class="mcp-endpoint">Server URL<code>${escapeHtml(config.auth?.publicOrigin || "https://chat.mundusx.ai")}/mcp</code></label>
+            <form id="mcp-token-form" class="mcp-token-form">
+              <label>Client name<input name="name" maxlength="80" value="My IDE" required></label>
+              <label>Expires<select name="expires_in_days"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">1 year</option></select></label>
+              <button type="submit">Create access token</button>
+            </form>
+            <section class="mcp-token-once" id="mcp-token-once" hidden>
+              <strong>Copy this token now</strong><p>It is shown once. MundusX stores only its digest.</p>
+              <div class="command-row"><code id="mcp-token-value"></code><button class="copy-command" type="button" data-copy-target="mcp-token-value">Copy</button></div>
+            </section>
+            <section class="mcp-token-list-section"><h4>Connected clients and access tokens</h4><div id="mcp-token-list" class="mcp-token-list"><p class="project-context-empty">Loading…</p></div></section>
+            <p class="mcp-safety">External clients receive the same bounded project permissions as Chat. Applying, merging, and deployment remain separately controlled.</p>
+          </section>` : ""}
+        </div>
+      </div>
     </section>
-  </div>` : "";
+  </div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1774,11 +1804,29 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .sr-only { position: absolute!important; width: 1px!important; height: 1px!important; padding: 0!important; margin: -1px!important; overflow: hidden!important; clip: rect(0,0,0,0)!important; white-space: nowrap!important; border: 0!important; }
     .projects-overlay { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:10px; background:rgba(38,44,62,.42); backdrop-filter:blur(2px); }
     .projects-overlay[hidden] { display:none; }
-    .mcp-dialog { position:relative; width:min(620px,calc(100vw - 32px)); display:grid; gap:16px; }
-    .mcp-dialog .dialog-close { position:absolute; top:14px; right:14px; z-index:2; width:36px; height:36px; display:grid; place-items:center; margin:0; padding:0; border:0; border-radius:9px; color:var(--text); background:transparent; font:inherit; font-size:26px; line-height:1; cursor:pointer; transition:background var(--motion-fast),transform var(--motion-fast); }
-    .mcp-dialog .dialog-close:hover,.mcp-dialog .dialog-close:focus-visible { background:var(--panel-2); outline:0; transform:scale(1.04); }
-    .mcp-dialog h2 { padding-right:44px; }
-    .mcp-dialog h2,.mcp-dialog h3,.mcp-dialog p { margin:0; }
+    .settings-dialog { position:relative; width:min(820px,calc(100vw - 32px)); min-height:520px; padding:0; overflow:hidden; }
+    .settings-dialog .dialog-close { position:absolute; top:14px; right:14px; z-index:2; width:36px; height:36px; display:grid; place-items:center; margin:0; padding:0; border:0; border-radius:9px; color:var(--text); background:transparent; font:inherit; font-size:26px; line-height:1; cursor:pointer; transition:background var(--motion-fast),transform var(--motion-fast); }
+    .settings-dialog .dialog-close:hover,.settings-dialog .dialog-close:focus-visible { background:var(--panel-2); outline:0; transform:scale(1.04); }
+    .settings-heading { padding:22px 64px 18px 24px; border-bottom:1px solid var(--line); }
+    .settings-heading h2,.settings-heading p,.settings-pane h3,.settings-pane h4,.settings-pane p { margin:0; }
+    .settings-heading p,.settings-description { margin-top:5px!important; color:var(--muted); line-height:1.45; }
+    .settings-layout { display:grid; grid-template-columns:190px minmax(0,1fr); min-height:430px; }
+    .settings-nav { display:grid; align-content:start; gap:4px; padding:16px 12px; border-right:1px solid var(--line); background:var(--bg); }
+    .settings-nav button { min-height:42px; padding:0 12px; border:0; border-radius:9px; color:var(--muted); background:transparent; font:inherit; font-weight:650; text-align:left; cursor:pointer; }
+    .settings-nav button:hover,.settings-nav button:focus-visible { color:var(--text); background:var(--panel-2); outline:none; }
+    .settings-nav button[aria-current="true"] { color:var(--blue); background:color-mix(in srgb,var(--blue) 10%,var(--panel)); }
+    .settings-content { min-width:0; padding:24px; }
+    .settings-pane { display:grid; align-content:start; gap:18px; }
+    .settings-pane[hidden] { display:none; }
+    .settings-control { display:grid; gap:7px; max-width:300px; font-size:13px; font-weight:700; }
+    .settings-control select { min-height:42px; padding:0 11px; border:1px solid var(--line-strong); border-radius:9px; color:var(--text); background:var(--panel); font:inherit; }
+    .connection-card,.settings-device-card { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:12px; padding:14px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+    .connection-card>span:nth-child(2),.settings-device-card>span { display:grid; gap:3px; min-width:0; }
+    .connection-card small,.settings-device-card small { color:var(--muted); overflow-wrap:anywhere; }
+    .connection-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:10px; color:var(--text); background:var(--panel-2); font-size:12px; font-weight:800; }
+    .settings-action { display:inline-flex; min-height:38px; align-items:center; justify-content:center; padding:0 14px; border:1px solid var(--line-strong); border-radius:9px; color:var(--text); background:var(--panel); font-size:13px; font-weight:700; }
+    .settings-action:hover,.settings-action:focus-visible { border-color:var(--blue); color:var(--blue); outline:none; }
+    .settings-card-list { display:grid; gap:8px; }
     .mcp-intro,.mcp-safety { color:var(--muted); line-height:1.5; }
     .mcp-endpoint { display:grid; gap:7px; font-weight:650; }
     .mcp-endpoint code,.mcp-token-once { padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--panel-2); overflow-wrap:anywhere; }
@@ -1805,6 +1853,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .project-heading h2 { margin:0; font-size:19px; font-weight:500; line-height:1.2; }
     .projects-dialog .harness-form { gap:16px; padding:10px 18px 18px; }
     .project-section { display:grid; gap:10px; padding:0; border:0; background:transparent; box-shadow:none; }
+    .project-init-git { display:flex!important; align-items:center; gap:9px; color:var(--muted); font-size:13px; font-weight:600; }
+    .project-init-git input { width:auto!important; margin:0; accent-color:var(--blue); }
     .project-field-wide { grid-column:1 / -1; line-height:1.25; }
     .project-field-wide input { line-height:1.3; }
     .project-purpose-note { display:flex; align-items:flex-start; gap:10px; margin:0; padding:12px 13px; border-radius:11px; color:var(--muted); background:color-mix(in srgb,var(--text) 7%,transparent); font-size:13px; line-height:1.4; }
@@ -2033,7 +2083,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     @media (max-width:1050px) { .capability-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
     @media (max-width:860px) { .welcome h1 { font-size:clamp(30px,8vw,42px); } }
     @media (max-width:560px) { .capability-grid{grid-template-columns:1fr 1fr;gap:8px}.capability-card{grid-template-columns:28px 1fr;padding:10px}.capability-icon{width:28px;height:28px}.welcome-heading{gap:4px}.active-project-context strong{max-width:90px}#web-search-label{display:none} }
-    @media (max-width:720px) { .projects-dialog{width:calc(100vw - 18px);max-height:calc(100vh - 18px)}.projects-dialog .dialog-close{top:10px;right:10px}.project-heading{padding:18px 52px 10px 16px}.projects-dialog .harness-form{padding:8px 16px 16px}.project-field-wide{grid-column:auto}.project-actions{align-items:stretch;flex-direction:column}.project-actions .harness-submit{width:100%}.mcp-token-form{grid-template-columns:1fr}.mcp-token-form button{width:100%} }
+    @media (max-width:720px) { .projects-dialog{width:calc(100vw - 18px);max-height:calc(100vh - 18px)}.projects-dialog .dialog-close{top:10px;right:10px}.project-heading{padding:18px 52px 10px 16px}.projects-dialog .harness-form{padding:8px 16px 16px}.project-field-wide{grid-column:auto}.project-actions{align-items:stretch;flex-direction:column}.project-actions .harness-submit{width:100%}.settings-dialog{width:calc(100vw - 18px);max-height:calc(100vh - 18px);overflow:auto}.settings-layout{grid-template-columns:1fr}.settings-nav{grid-template-columns:repeat(2,minmax(0,1fr));border-right:0;border-bottom:1px solid var(--line)}.settings-content{padding:18px}.connection-card,.settings-device-card{grid-template-columns:auto minmax(0,1fr)}.connection-card .settings-action{grid-column:1/-1}.mcp-token-form{grid-template-columns:1fr}.mcp-token-form button{width:100%} }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important; } }
   </style>
 </head>
@@ -2085,11 +2135,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             </span>
           </div>
           <div class="account-menu-divider"></div>
-          <details class="account-advanced">
-            <summary>Advanced</summary>
-            <a class="account-menu-item" href="/skills">${ICON_LAYERS}<span>My skills</span></a>
-            ${config.mcpEnabled ? `<button class="account-menu-item" id="account-mcp" type="button">${ICON_LAYERS}<span>MCP connections</span></button>` : ""}
-          </details>
+          <button class="account-menu-item" id="account-settings" type="button">${ICON_LAYERS}<span>Settings</span></button>
           <button class="account-menu-item" type="button">${ICON_HELP_RING}<span>Help</span><span class="chevron">${ICON_CHEVRON_RIGHT}</span></button>
           <button class="account-menu-item" id="account-logout" type="button">${ICON_LOGOUT}<span>Log out</span></button>
         </div>
@@ -2103,7 +2149,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       </div>
     </aside>
     ${repositoryDialog}
-    ${mcpDialog}
+    ${settingsDialog}
     <div class="app-toast" id="app-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <main id="chat-main" class="is-empty-chat">
       <canvas class="mesh-canvas" id="mesh-canvas" aria-hidden="true"></canvas>
@@ -2191,9 +2237,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const authGoogleEl = document.getElementById("auth-google");
     const authCloseEl = document.getElementById("auth-close");
     const accountWidgetEl = document.getElementById("account-widget");
-    const accountMcpEl = document.getElementById("account-mcp");
-    const mcpDialogEl = document.getElementById("mcp-dialog");
-    const mcpDialogCloseEl = document.getElementById("mcp-dialog-close");
+    const accountSettingsEl = document.getElementById("account-settings");
+    const settingsDialogEl = document.getElementById("settings-dialog");
+    const settingsDialogCloseEl = document.getElementById("settings-dialog-close");
+    const settingsThemeEl = document.getElementById("settings-theme");
+    const githubConnectionStatusEl = document.getElementById("github-connection-status");
+    const githubConnectEl = document.getElementById("github-connect");
+    const settingsDeviceListEl = document.getElementById("settings-device-list");
     const mcpTokenFormEl = document.getElementById("mcp-token-form");
     const mcpTokenOnceEl = document.getElementById("mcp-token-once");
     const mcpTokenValueEl = document.getElementById("mcp-token-value");
@@ -2484,6 +2534,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         document.querySelectorAll("[data-account-avatar]").forEach((node) => node.textContent = name.split(/\\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase());
         accountWidgetEl.hidden = false;
         guestWidgetEl.hidden = true;
+        renderGithubConnection();
+        const requestedSettingsTab = new URLSearchParams(location.search).get("settings");
+        if (requestedSettingsTab) {
+          openSettings(requestedSettingsTab);
+          history.replaceState(null, "", location.pathname + location.hash);
+        }
         const pendingPrompt = sessionStorage.getItem(pendingAuthPromptKey);
         if (pendingPrompt && !promptEl.value.trim()) {
           promptEl.value = pendingPrompt;
@@ -2618,17 +2674,60 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }, 2800);
     }
 
-    function openMcpConnections() {
-      if (!mcpDialogEl) return;
-      accountMenuEl?.classList.remove("is-open");
-      accountBarEl?.setAttribute("aria-expanded", "false");
-      mcpDialogEl.hidden = false;
-      loadMcpTokens();
+    function selectSettingsTab(tab) {
+      if (!settingsDialogEl) return;
+      const available = settingsDialogEl.querySelector('[data-settings-tab="' + tab + '"]') ? tab : "general";
+      settingsDialogEl.querySelectorAll("[data-settings-tab]").forEach((button) => button.setAttribute("aria-current", String(button.dataset.settingsTab === available)));
+      settingsDialogEl.querySelectorAll("[data-settings-pane]").forEach((pane) => { pane.hidden = pane.dataset.settingsPane !== available; });
+      if (available === "developer") void loadMcpTokens();
+      if (available === "devices") void loadSettingsDevices();
     }
 
-    function closeMcpConnections() {
-      if (!mcpDialogEl) return;
-      mcpDialogEl.hidden = true;
+    function renderGithubConnection() {
+      if (!githubConnectionStatusEl || !githubConnectEl) return;
+      const connected = currentUser?.github_connected === true;
+      githubConnectionStatusEl.textContent = connected ? "Connected to your GitHub account" : "Connect once to publish, clone, and open pull requests.";
+      githubConnectEl.textContent = connected ? "Manage" : "Connect GitHub";
+      githubConnectEl.href = connected ? "https://github.com/settings/installations" : "/api/auth/github/start?return_to=/%3Fsettings%3Dconnections";
+      if (connected) githubConnectEl.target = "_blank"; else githubConnectEl.removeAttribute("target");
+    }
+
+    async function loadSettingsDevices() {
+      if (!settingsDeviceListEl) return;
+      settingsDeviceListEl.innerHTML = '<p class="project-context-empty">Checking connected computers…</p>';
+      try {
+        const response = await fetch("/api/agent/status", { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Connected computers could not be loaded");
+        settingsDeviceListEl.replaceChildren();
+        const connections = Array.isArray(payload.connections) ? payload.connections : [];
+        if (!connections.length) {
+          const empty = document.createElement("p"); empty.className = "project-context-empty"; empty.textContent = "No Hermes computer is connected."; settingsDeviceListEl.append(empty); return;
+        }
+        for (const connection of connections) {
+          const card = document.createElement("article"); card.className = "settings-device-card";
+          const mark = document.createElement("span"); mark.className = "connection-mark"; mark.textContent = "H";
+          const details = document.createElement("span");
+          const name = document.createElement("strong"); name.textContent = connection.device_name || connection.connection_id || "Hermes computer";
+          const status = document.createElement("small"); status.textContent = connection.online ? "Online · Ready for local projects" : "Offline · Open MundusX on this computer to reconnect";
+          details.append(name, status); card.append(mark, details); settingsDeviceListEl.append(card);
+        }
+      } catch (error) { settingsDeviceListEl.textContent = error.message; }
+    }
+
+    function openSettings(tab = "general") {
+      if (!settingsDialogEl) return;
+      accountMenuEl?.classList.remove("is-open");
+      accountBarEl?.setAttribute("aria-expanded", "false");
+      settingsDialogEl.hidden = false;
+      if (settingsThemeEl) settingsThemeEl.value = localStorage.getItem("mundusx.chat.theme") || "system";
+      renderGithubConnection();
+      selectSettingsTab(tab);
+    }
+
+    function closeSettings() {
+      if (!settingsDialogEl) return;
+      settingsDialogEl.hidden = true;
       if (mcpTokenOnceEl) mcpTokenOnceEl.hidden = true;
       if (mcpTokenValueEl) mcpTokenValueEl.textContent = "";
     }
@@ -2691,8 +2790,23 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
     }
 
-    accountMcpEl?.addEventListener("click", openMcpConnections);
-    mcpDialogCloseEl?.addEventListener("click", closeMcpConnections);
+    accountSettingsEl?.addEventListener("click", () => openSettings("general"));
+    settingsDialogCloseEl?.addEventListener("click", closeSettings);
+    settingsDialogEl?.addEventListener("click", (event) => {
+      if (event.target === settingsDialogEl) closeSettings();
+      const tab = event.target.closest("[data-settings-tab]");
+      if (tab) selectSettingsTab(tab.dataset.settingsTab);
+    });
+    settingsThemeEl?.addEventListener("change", () => {
+      const selected = settingsThemeEl.value;
+      if (selected === "system") {
+        localStorage.removeItem("mundusx.chat.theme");
+        document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      } else {
+        localStorage.setItem("mundusx.chat.theme", selected);
+        document.documentElement.dataset.theme = selected;
+      }
+    });
     mcpTokenFormEl?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const submit = mcpTokenFormEl.querySelector('button[type="submit"]');
@@ -2752,9 +2866,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         event.preventDefault();
         closeProjects();
       }
-      if (mcpDialogEl && !mcpDialogEl.hidden) {
+      if (settingsDialogEl && !settingsDialogEl.hidden) {
         event.preventDefault();
-        closeMcpConnections();
+        closeSettings();
       }
       if (authGateEl && !authGateEl.hidden) {
         event.preventDefault();
@@ -3331,6 +3445,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         return;
       }
       setActiveProject({ slug: projectSlug });
+      harnessResultEl.textContent = data.get("initialize_git") ? "Creating project and initializing Git…" : "Creating project…";
+      try {
+        if (data.get("initialize_git")) {
+          await projectOperation(projectSlug, {
+            operation: "git_init",
+            author_name: currentUser?.display_name || currentUser?.email || "MundusX user",
+            author_email: currentUser?.email || "",
+          }, true);
+        } else {
+          await projectOperation(projectSlug, { operation: "ensure_project" }, true);
+        }
+      } catch (error) {
+        harnessResultEl.textContent = error.message || "Project could not be created";
+        return;
+      }
       harnessResultEl.textContent = "";
       harnessFormEl.reset();
       updateProjectCreateAvailability();
@@ -6367,6 +6496,20 @@ export function createServerApp(config = configFromEnv()) {
         if (!session) throw httpError(401, "GitHub sign-in is required");
         const result = await authStore.repositoryContents(session.id, githubContentsMatch[1], url.searchParams.get("path") || "", url.searchParams.get("ref") || "");
         return sendJson(response, 200, result);
+      }
+      const githubPullsMatch = url.pathname.match(/^\/api\/github\/repositories\/(\d+)\/pulls$/);
+      if (request.method === "POST" && githubPullsMatch) {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, "GitHub sign-in is required");
+        const body = await readJsonBody(request);
+        return sendJson(response, 201, await authStore.createPullRequest(session.id, githubPullsMatch[1], body));
+      }
+      const githubMergeMatch = url.pathname.match(/^\/api\/github\/repositories\/(\d+)\/pulls\/(\d+)\/merge$/);
+      if (request.method === "POST" && githubMergeMatch) {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, "GitHub sign-in is required");
+        const body = await readJsonBody(request);
+        return sendJson(response, 200, await authStore.mergePullRequest(session.id, githubMergeMatch[1], githubMergeMatch[2], body));
       }
       if (request.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
         const conversationId = decodeURIComponent(
@@ -12393,6 +12536,9 @@ export function selectChatSkills(message = "", globalOverrides = []) {
 
   for (const id of ["security", "guardrails", "rag-integration", "model-provider"]) {
     skills.push({ name: id + ".md", content: SKILL_REGISTRY.content(id) });
+  }
+  if (/\b(?:git|github|repository|repo|commit|branch|push|pull request|merge)\b/i.test(text)) {
+    skills.push({ name: "git-workflow.md", content: SKILL_REGISTRY.content("git-workflow") });
   }
   const overrides = new Map((Array.isArray(globalOverrides) ? globalOverrides : []).map((item) => [item.skill_id, item]));
   const ids = { "router.md": "router", "formatter.md": "formatter", "persona-atlas.md": "persona-atlas", "translation.md": "translation", "code.md": "code", "math.md": "math", "weather.md": "weather", "facts.md": "facts", "chunk-planner.md": "chunk-planner", "verifier.md": "verifier" };

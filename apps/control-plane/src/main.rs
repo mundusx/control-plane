@@ -3549,17 +3549,14 @@ fn control_plane_operator_page(
             admission_policy_html = render_admission_policy(state)
         ),
     };
-    let nav = [
-        OperatorPage::Nodes,
-        OperatorPage::Jobs,
-        OperatorPage::Credits,
-        OperatorPage::Registry,
-        OperatorPage::Skills,
-        OperatorPage::Settings,
-    ]
-    .into_iter()
-    .map(|nav_page| operator_nav_item(nav_page, page))
-    .collect::<String>();
+    let nav = format!(
+        r#"<span class="nav-group">Operations</span>{operations}<span class="nav-group">AI configuration</span>{ai}<span class="nav-group">System</span>{system}"#,
+        operations = [OperatorPage::Nodes, OperatorPage::Jobs, OperatorPage::Credits]
+            .into_iter().map(|nav_page| operator_nav_item(nav_page, page)).collect::<String>(),
+        ai = [OperatorPage::Registry, OperatorPage::Skills]
+            .into_iter().map(|nav_page| operator_nav_item(nav_page, page)).collect::<String>(),
+        system = operator_nav_item(OperatorPage::Settings, page),
+    );
 
     format!(
         r#"<!doctype html>
@@ -3596,6 +3593,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .brand {{ display:flex; align-items:center; gap:12px; font-family: "Space Grotesk", system-ui, sans-serif; font-size:22px; color:#fff; border-radius:8px; }}
       .brand-mark {{ width:54px; height:54px; border-radius:50%; object-fit:contain; filter:drop-shadow(0 0 16px rgba(70,174,255,.34)); }}
       .nav {{ display:grid; gap:8px; }}
+      .nav-group {{ margin:10px 13px 0; color:#718096; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }}
       .nav-item {{ min-height:54px; display:flex; align-items:center; gap:14px; border:1px solid transparent; border-radius:7px; padding:0 13px; color:#b9c5d6; }}
       .nav-item:hover,.nav-item:focus-visible {{ color:#ecf8ff; background:rgba(51,168,255,.1); outline:none; }}
       .nav-item.active {{ color:#55bdff; border-color:rgba(35,161,255,.7); background:linear-gradient(90deg,rgba(0,106,255,.26),rgba(0,165,255,.08)); box-shadow:0 0 24px rgba(0,128,255,.25),inset 0 0 22px rgba(0,136,255,.1); }}
@@ -3992,6 +3990,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         display: grid;
         gap: 8px;
       }}
+      .nav-group {{ margin:10px 13px 0; color:#718096; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }}
       .nav-item {{
         display: flex;
         align-items: center;
@@ -4873,11 +4872,14 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         <a class="brand motion-glow" href="/" aria-label="Control plane home"><img class="brand-mark" alt="Control plane logo" src="{logo_path}" /> <span>Control Plane</span></a>
         <nav class="nav">
           <a class="nav-item motion-lift active" href="/"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>Overview</a>
+          <span class="nav-group">Operations</span>
           <a class="nav-item motion-lift" href="/nodes"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/></svg>Nodes</a>
           <a class="nav-item motion-lift" href="/jobs"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16"/><path d="M4 17h16"/><circle cx="7" cy="7" r="2"/><circle cx="17" cy="17" r="2"/></svg>Jobs</a>
           <a class="nav-item motion-lift" href="/credits"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>Credits</a>
+          <span class="nav-group">AI configuration</span>
           <a class="nav-item motion-lift" href="/registry"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></svg>Registry</a>
           <a class="nav-item motion-lift" href="/skills"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Global Skills</a>
+          <span class="nav-group">System</span>
           <a class="nav-item motion-lift" href="/settings"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>Settings</a>
         </nav>
         <div class="sidebar-bottom">

@@ -22,6 +22,14 @@ projectTreeStyle.textContent = `
 .project-browser-dialog pre { white-space:pre-wrap; overflow-wrap:anywhere; font:13px/1.6 monospace; }
 .project-browser-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .project-browser-dialog p { font-size:13px; color:var(--muted); }
+.project-git-summary { display:grid; gap:0; margin-top:14px; border:1px solid var(--line); border-radius:11px; overflow:hidden; }
+.project-git-row { display:grid; grid-template-columns:140px minmax(0,1fr); gap:12px; padding:11px 13px; border-bottom:1px solid var(--line); }
+.project-git-row:last-child { border-bottom:0; }
+.project-git-row span:first-child { color:var(--muted); }
+.project-git-row strong { overflow-wrap:anywhere; }
+.project-git-changes { max-height:190px; overflow:auto; padding:10px 13px; border:1px solid var(--line); border-radius:10px; background:var(--bg); white-space:pre-wrap; font:12px/1.55 monospace; }
+.project-browser-actions input { flex:1 1 240px; min-width:180px; }
+.project-browser-actions .primary { border-color:var(--blue); color:white; background:var(--blue); }
 .project-actions-popover { width:224px; min-width:0; max-width:calc(100vw - 16px); max-height:calc(100vh - 16px); overflow-y:auto; box-sizing:border-box; }
 .project-actions-popover hr { margin:4px 3px; border:0; border-top:1px solid var(--line); }
 `;
@@ -184,9 +192,8 @@ function showProjectActions(slug, path, directory, root, anchor, position) {
   }
   if (root) {
     action("New chat in this project", () => { newChatEl.click(); setActiveProject({slug}); });
+    action("Git & Remote", () => openProjectGit(slug));
     action("Project instructions", () => editProjectDocument(slug, "instructions"));
-    action("Project skills", () => editProjectDocument(slug, "skills"));
-    action("Saved prompts", () => editProjectDocument(slug, "prompts"));
     separator();
   }
   if (directory) {
@@ -221,6 +228,100 @@ function showProjectActions(slug, path, directory, root, anchor, position) {
   actions.querySelector("button")?.focus({preventScroll:true});
 }
 
+function githubRepositoryFromRemote(remote) {
+  const match = String(remote || "").match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  return match ? {owner:match[1], name:match[2]} : null;
+}
+
+async function openProjectGit(slug) {
+  const dialog = projectBrowserDialog(slug + " · Git & Remote");
+  const intro = document.createElement("p"); intro.textContent = "Commit project changes locally, then connect and publish when you are ready.";
+  const summary = document.createElement("div"); summary.className = "project-git-summary";
+  const changes = document.createElement("div"); changes.className = "project-git-changes"; changes.hidden = true;
+  const status = document.createElement("p"); status.setAttribute("role", "status"); status.textContent = "Checking Git…";
+  const actions = document.createElement("div"); actions.className = "project-browser-actions";
+  dialog.append(intro, summary, changes, status, actions);
+
+  function row(label, value) {
+    const item = document.createElement("div"); item.className = "project-git-row";
+    const key = document.createElement("span"); key.textContent = label;
+    const content = document.createElement("strong"); content.textContent = value;
+    item.append(key, content); summary.append(item);
+  }
+  function action(label, callback, className = "") {
+    const control = document.createElement("button"); control.type = "button"; control.textContent = label; control.className = className;
+    control.addEventListener("click", async () => {
+      control.disabled = true; status.textContent = label + "…";
+      try { await callback(); await refresh(); }
+      catch (error) { status.textContent = error.message; }
+      finally { control.disabled = false; }
+    });
+    actions.append(control); return control;
+  }
+  async function publish(repositoryStatus) {
+    if (!currentUser?.github_connected) { location.href = "/api/auth/github/start?return_to=/%3Fsettings%3Dconnections"; return; }
+    if (repositoryStatus.changed_files || !repositoryStatus.has_commits) {
+      await projectOperation(slug, {operation:"git_commit", message:repositoryStatus.has_commits ? "Update project" : "Initial project version"}, true);
+    }
+    const response = await fetch("/api/github/repositories", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:slug, description:"Created with MundusX", visibility:"private", template:"generic", initialize:false}),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "GitHub repository could not be created");
+    const fullName = payload.repository?.full_name;
+    if (!fullName) throw new Error("GitHub did not return the repository name");
+    await projectOperation(slug, {operation:"git_remote_set", url:"https://github.com/" + fullName + ".git"}, true);
+    await projectOperation(slug, {operation:"git_push", branch:payload.repository?.default_branch || "main"}, true);
+    showToast("Project published to " + fullName);
+  }
+  async function refresh() {
+    const repositoryStatus = await projectOperation(slug, {operation:"git_status"});
+    summary.replaceChildren(); actions.replaceChildren(); status.textContent = "";
+    if (!repositoryStatus.initialized) {
+      row("Repository", "Not initialized");
+      action("Initialize Git", () => projectOperation(slug, {operation:"git_init", author_name:currentUser?.display_name || currentUser?.email || "MundusX user", author_email:currentUser?.email || ""}, true), "primary");
+      const cloneUrl = document.createElement("input"); cloneUrl.type = "url"; cloneUrl.placeholder = "https://github.com/owner/repository.git"; cloneUrl.setAttribute("aria-label", "GitHub repository URL");
+      actions.append(cloneUrl);
+      action("Clone repository", async () => {
+        const url = cloneUrl.value.trim();
+        if (!url) throw new Error("Enter a GitHub repository URL");
+        await projectOperation(slug, {operation:"git_clone", url}, true);
+      });
+      changes.hidden = true; return;
+    }
+    const remote = repositoryStatus.remote_url || "Not connected";
+    row("Repository", "Local Git repository");
+    row("Remote", remote);
+    row("Branch", repositoryStatus.branch || "main");
+    row("Changes", repositoryStatus.changed_files ? repositoryStatus.changed_files + " changed file" + (repositoryStatus.changed_files === 1 ? "" : "s") : "Working tree clean");
+    if (repositoryStatus.remote_url) row("Synchronization", (repositoryStatus.ahead || 0) + " ahead · " + (repositoryStatus.behind || 0) + " behind");
+    const changeLines = (repositoryStatus.changes || []).map((entry) => entry.status + " " + entry.path);
+    changes.hidden = !changeLines.length; changes.textContent = changeLines.join("\n");
+    if (repositoryStatus.changed_files) {
+      const message = document.createElement("input"); message.placeholder = "Commit message"; message.value = "Update project"; actions.append(message);
+      action("Commit", () => projectOperation(slug, {operation:"git_commit", message:message.value.trim()}, true), "primary");
+    }
+    if (!repositoryStatus.remote_url) {
+      if (currentUser?.github_connected) action("Publish privately to GitHub", () => publish(repositoryStatus), "primary");
+      else {
+        const connect = document.createElement("a"); connect.className = "settings-action"; connect.href = "/api/auth/github/start?return_to=/%3Fsettings%3Dconnections"; connect.textContent = "Connect GitHub"; actions.append(connect);
+      }
+    } else {
+      action("Fetch", () => projectOperation(slug, {operation:"git_fetch"}, true));
+      if (repositoryStatus.behind) action("Update safely", () => projectOperation(slug, {operation:"git_update"}, true));
+      action("Push branch", () => projectOperation(slug, {operation:"git_push", branch:repositoryStatus.branch || "main"}, true), "primary");
+      const github = githubRepositoryFromRemote(repositoryStatus.remote_url);
+      if (github && repositoryStatus.branch && repositoryStatus.branch !== "main") {
+        const pullRequest = document.createElement("a"); pullRequest.className = "settings-action"; pullRequest.target = "_blank"; pullRequest.rel = "noopener";
+        pullRequest.href = "https://github.com/" + github.owner + "/" + github.name + "/compare/main..." + encodeURIComponent(repositoryStatus.branch) + "?expand=1";
+        pullRequest.textContent = "Create pull request"; actions.append(pullRequest);
+      }
+    }
+  }
+  try { await refresh(); } catch (error) { status.textContent = error.message; }
+}
+
 async function editProjectDocument(slug, section) {
   const dialog = projectBrowserDialog(slug + " · " + section);
   const note = document.createElement("p");
@@ -241,7 +342,7 @@ async function editProjectDocument(slug, section) {
   async function loadDocument() {
     retry.hidden = true; editor.disabled = true; save.disabled = true;
     if (use) use.disabled = true;
-    status.textContent = "Loading�";
+    status.textContent = "Loading�";
     try {
       editor.value = (await projectOperation(slug, {operation:"config_read", section})).content || "";
       editor.disabled = false; save.disabled = false; status.textContent = "";

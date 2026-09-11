@@ -14,6 +14,7 @@
     { "id": "security", "file": "security.md", "title": "Security", "description": "Reserved security instructions. Blank and disabled until configured by an administrator.", "enabled": false },
     { "id": "guardrails", "file": "guardrails.md", "title": "Guardrails", "description": "Reserved behavior instructions. Existing access controls remain enforced independently.", "enabled": false },
     { "id": "rag-integration", "file": "rag-integration.md", "title": "RAG integration", "description": "Reserved retrieval instructions. This Markdown does not configure or call a RAG endpoint.", "enabled": false },
-    { "id": "model-provider", "file": "model-provider.md", "title": "Model provider", "description": "Reserved provider instructions. This Markdown does not register or route to a new model.", "enabled": false }
+    { "id": "model-provider", "file": "model-provider.md", "title": "Model provider", "description": "Reserved provider instructions. This Markdown does not register or route to a new model.", "enabled": false },
+    { "id": "git-workflow", "file": "git-workflow.md", "title": "Git workflow", "description": "Guides safe project initialization, commits, branches, pushes, pull requests, and merges.", "enabled": false }
   ]
 }

@@ -278,6 +278,75 @@ test("repository creation rejects invalid names before calling GitHub", async ()
   );
 });
 
+test("publishing an existing local project creates an empty GitHub repository", async () => {
+  let githubRequest;
+  const store = new PostgresAuthStore({}, { pool: {
+    async query() { return { rows: [] }; },
+  } });
+  store.githubJson = async (_userId, url, options) => {
+    githubRequest = { url, options };
+    return {
+      id: 85,
+      full_name: "alice/local-project",
+      private: true,
+      default_branch: "main",
+      owner: { login: "alice" },
+      permissions: { pull: true, push: true, admin: true },
+    };
+  };
+
+  await store.createRepository("user-alice", {
+    name: "local-project",
+    template: "generic",
+    initialize: false,
+  });
+
+  assert.equal(githubRequest.url, "https://api.github.com/user/repos");
+  assert.equal(githubRequest.options.body.auto_init, false);
+});
+
+test("pull request creation validates branches and uses the authorized repository", async () => {
+  let githubRequest;
+  const store = new PostgresAuthStore({}, { pool: {} });
+  store.authorizeRepository = async (_userId, repositoryId, options) => {
+    assert.equal(repositoryId, "42");
+    assert.deepEqual(options, { requirePush: true });
+    return { full_name: "alice/project", default_branch: "main" };
+  };
+  store.githubJson = async (_userId, url, options) => {
+    githubRequest = { url, options };
+    return { number: 7, title: options.body.title, state: "open", html_url: "https://github.com/alice/project/pull/7", head: { ref: "feature" }, base: { ref: "main" } };
+  };
+
+  const created = await store.createPullRequest("user-alice", "42", { title: "Add feature", head: "feature" });
+  assert.equal(githubRequest.url, "https://api.github.com/repos/alice/project/pulls");
+  assert.deepEqual(githubRequest.options.body, { title: "Add feature", body: "", head: "feature", base: "main" });
+  assert.equal(created.pull_request.number, 7);
+  await assert.rejects(
+    store.createPullRequest("user-alice", "42", { title: "Bad branch", head: "../main" }),
+    (error) => error.statusCode === 400,
+  );
+});
+
+test("pull request merge validates the method and delegates to GitHub", async () => {
+  let githubRequest;
+  const store = new PostgresAuthStore({}, { pool: {} });
+  store.authorizeRepository = async () => ({ full_name: "alice/project" });
+  store.githubJson = async (_userId, url, options) => {
+    githubRequest = { url, options };
+    return { merged: true, message: "Pull Request successfully merged", sha: "a".repeat(40) };
+  };
+
+  const result = await store.mergePullRequest("user-alice", "42", 7, { merge_method: "squash" });
+  assert.equal(githubRequest.url, "https://api.github.com/repos/alice/project/pulls/7/merge");
+  assert.deepEqual(githubRequest.options.body, { merge_method: "squash" });
+  assert.equal(result.merged, true);
+  await assert.rejects(
+    store.mergePullRequest("user-alice", "42", 7, { merge_method: "force" }),
+    (error) => error.statusCode === 400,
+  );
+});
+
 test("repository browser masks obvious embedded credentials and blocks secret files", async () => {
   const store = new PostgresAuthStore({}, { pool: {} });
   store.authorizeRepository = async () => ({ id: 42, full_name: "owner/repo", default_branch: "main", permissions: { pull: true, push: false, admin: false } });

@@ -14,13 +14,15 @@ test("skill registry loads app-owned Markdown with stable metadata", () => {
   const catalog = registry.catalog();
 
   assert.equal(registry.version, 1);
-  assert.equal(catalog.length, 14);
+  assert.equal(catalog.length, 15);
   for (const id of ["security", "guardrails", "rag-integration", "model-provider"]) {
     assert.equal(registry.rawContent(id), "");
     assert.equal(registry.content(id), null);
     assert.equal(catalog.find(skill => skill.id === id).enabled, false);
   }
   assert.equal(catalog.find((skill) => skill.id === "verifier")?.enabled, false);
+  assert.equal(catalog.find((skill) => skill.id === "git-workflow")?.enabled, false);
+  assert.match(registry.rawContent("git-workflow"), /^# Git Workflow Skill/);
   assert.match(registry.content("router"), /^# Router Skill/);
   assert.equal(registry.content("verifier"), null);
   assert.equal(registry.content("missing", "fallback"), "fallback");
