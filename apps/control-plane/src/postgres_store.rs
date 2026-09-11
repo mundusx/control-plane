@@ -36,15 +36,15 @@ impl PostgresStore {
 
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
         let mut client = self.connect()?;
-        let devices: Vec<NodeRecord> = query_json_array(&mut client, DEVICES_RESTORE_SQL)?;
-        let jobs: Vec<JobRecord> = query_json_array(&mut client, JOBS_RESTORE_SQL)?;
-        let job_events: Vec<JobEventRecord> = query_json_array(
+        let devices: Vec<NodeRecord> = query_json_rows(&mut client, DEVICES_RESTORE_SQL)?;
+        let jobs: Vec<JobRecord> = query_json_rows(&mut client, JOBS_RESTORE_SQL)?;
+        let job_events: Vec<JobEventRecord> = query_json_rows(
             &mut client,
-            "select coalesce(jsonb_agg(to_jsonb(t) order by t.source_event_id asc nulls last, t.id asc)::text, '[]') from public.job_events t",
+            "select to_jsonb(t)::text from public.job_events t order by t.source_event_id asc nulls last, t.id asc",
         )?;
-        let credits_ledger: Vec<CreditsLedgerRecord> = query_json_array(
+        let credits_ledger: Vec<CreditsLedgerRecord> = query_json_rows(
             &mut client,
-            "select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at asc)::text, '[]') from public.credits_ledger t",
+            "select to_jsonb(t)::text from public.credits_ledger t order by t.created_at asc, t.id asc",
         )?;
 
         let mut state = ControlPlaneState::default();
@@ -923,17 +923,6 @@ fn enum_value<T: serde::Serialize>(value: T) -> Result<String, String> {
         .ok_or_else(|| "harness enum did not serialize as a string".to_string())
 }
 
-fn query_json_array<T>(client: &mut Client, sql: &str) -> Result<Vec<T>, String>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let row = client
-        .query_one(sql, &[])
-        .map_err(|error| format!("postgres restore query failed: {}", postgres_error(&error)))?;
-    let raw: String = row.get(0);
-    serde_json::from_str(&raw).map_err(|error| format!("failed to parse postgres restore: {error}"))
-}
-
 fn query_json_array_optional<T>(client: &mut Client, sql: &str) -> Result<Vec<T>, String>
 where
     T: serde::de::DeserializeOwned,
@@ -947,6 +936,22 @@ where
         Err(error) if error.code().is_some_and(|code| code.code() == "42P01") => Ok(Vec::new()),
         Err(error) => Err(format!("postgres harness restore query failed: {}", postgres_error(&error))),
     }
+}
+
+fn query_json_rows<T>(client: &mut Client, sql: &str) -> Result<Vec<T>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    client
+        .query(sql, &[])
+        .map_err(|error| format!("postgres restore query failed: {}", postgres_error(&error)))?
+        .into_iter()
+        .map(|row| {
+            let raw: String = row.get(0);
+            serde_json::from_str(&raw)
+                .map_err(|error| format!("failed to parse postgres restore row: {error}"))
+        })
+        .collect()
 }
 
 fn postgres_error(error: &postgres::Error) -> String {
@@ -1051,7 +1056,7 @@ fn dedupe_credits_ledger(credits_ledger: Vec<CreditsLedgerRecord>) -> Vec<Credit
 }
 
 const DEVICES_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(jsonb_build_object(
+select jsonb_build_object(
   'node_id', node_id,
   'public_key_fingerprint', public_key_fingerprint,
   'public_key_hex', public_key_hex,
@@ -1098,12 +1103,13 @@ select coalesce(jsonb_agg(jsonb_build_object(
   ),
   'worker_health', worker_health_json,
   'updated_at', coalesce(updated_at_epoch::text, last_seen_at_epoch::text, '0')
-) order by updated_at_epoch asc nulls last, node_id asc)::text, '[]')
+)::text
 from public.devices
+order by updated_at_epoch asc nulls last, node_id asc
 "#;
 
 const JOBS_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(jsonb_build_object(
+select jsonb_build_object(
   'job_id', job_id,
   'request_id', request_id,
   'prompt', prompt,
@@ -1156,8 +1162,9 @@ select coalesce(jsonb_agg(jsonb_build_object(
   'backend', backend,
   'output', output,
   'error', error
-) order by submitted_at_epoch asc nulls last, job_id asc)::text, '[]')
+)::text
 from public.jobs
+order by submitted_at_epoch asc nulls last, job_id asc
 "#;
 
 const DEVICES_UPSERT_SQL: &str = r#"
