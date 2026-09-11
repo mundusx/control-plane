@@ -1811,7 +1811,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .projects-overlay { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:10px; background:rgba(38,44,62,.42); backdrop-filter:blur(2px); }
     .projects-overlay[hidden] { display:none; }
     .settings-dialog { position:relative; width:min(820px,calc(100vw - 32px)); min-height:520px; padding:0; overflow:hidden; }
-    .settings-dialog .dialog-close { position:absolute; top:14px; right:14px; z-index:2; width:36px; height:36px; display:grid; place-items:center; margin:0; padding:0; border:0; border-radius:9px; color:var(--text); background:transparent; font:inherit; font-size:26px; line-height:1; cursor:pointer; transition:background var(--motion-fast),transform var(--motion-fast); }
+    .settings-dialog .dialog-close { position:absolute; top:14px; right:14px; z-index:20; width:40px; height:40px; display:grid; place-items:center; margin:0; padding:0; border:0; border-radius:9px; color:var(--text); background:var(--panel); font:inherit; font-size:26px; line-height:1; cursor:pointer; pointer-events:auto; touch-action:manipulation; user-select:none; transition:background var(--motion-fast),transform var(--motion-fast); }
     .settings-dialog .dialog-close:hover,.settings-dialog .dialog-close:focus-visible { background:var(--panel-2); outline:0; transform:scale(1.04); }
     .settings-heading { padding:22px 64px 18px 24px; border-bottom:1px solid var(--line); }
     .settings-heading h2,.settings-heading p,.settings-pane h3,.settings-pane h4,.settings-pane p { margin:0; }
@@ -2746,7 +2746,6 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const closeButton = event.target.closest?.("[data-overlay-close]");
       if (!closeButton) return;
       event.preventDefault();
-      event.stopPropagation();
       if (closeButton.dataset.overlayClose === "settings") closeSettings();
       if (closeButton.dataset.overlayClose === "projects") closeProjects();
     }, true);
@@ -2810,6 +2809,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     }
 
     accountSettingsEl?.addEventListener("click", () => openSettings("general"));
+    settingsDialogCloseEl?.addEventListener("pointerdown", (event) => { event.preventDefault(); closeSettings(); });
     settingsDialogCloseEl?.addEventListener("click", closeSettings);
     settingsDialogEl?.addEventListener("click", (event) => {
       if (event.target === settingsDialogEl) closeSettings();
@@ -2878,6 +2878,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       void handleProjectTreeClick(event).catch((error) => showToast(error.message));
     });
     repositoryOpenMobileEl?.addEventListener("click", () => openProjects());
+    repositoryDialogCloseEl?.addEventListener("pointerdown", (event) => { event.preventDefault(); closeProjects(); });
     repositoryDialogCloseEl?.addEventListener("click", closeProjects);
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;

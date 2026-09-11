@@ -554,6 +554,9 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(projects, /id="repository-dialog-close"[^>]*type="button"[^>]*aria-label="Close"[^>]*data-overlay-close="projects"/);
   assert.match(html, /id="settings-dialog-close"[^>]*data-overlay-close="settings"/);
   assert.match(html, /document\.addEventListener\("click", \(event\) => \{[\s\S]*?\[data-overlay-close\][\s\S]*?closeSettings\(\)[\s\S]*?closeProjects\(\)[\s\S]*?\}, true\)/);
+  assert.match(html, /settingsDialogCloseEl\?\.addEventListener\("pointerdown",[\s\S]*?closeSettings\(\)/);
+  assert.match(html, /repositoryDialogCloseEl\?\.addEventListener\("pointerdown",[\s\S]*?closeProjects\(\)/);
+  assert.match(html, /\.settings-dialog \.dialog-close \{[^}]*z-index:20;[^}]*pointer-events:auto;[^}]*touch-action:manipulation/);
   assert.match(projects, /id="project-create-fields"[\s\S]*name="project_slug"[^>]*pattern="\[a-z0-9\]/);
   assert.match(projects, /name="initialize_git"[^>]*checked/);
   assert.match(projects, /Initialize a local Git repository/);
