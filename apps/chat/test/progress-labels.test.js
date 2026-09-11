@@ -38,3 +38,10 @@ test("failed and unknown tool results are never reported as successful",()=>{
     assert.doesNotMatch(result.label,/unconfirmed|verified/i);
   }
 });
+
+test("Hermes delegation is shown as parallel work",()=>{
+  const progress=describe({type:"tool_started",metadata:{tool:"delegate_task"}},true);
+  assert.equal(progress.label,"Running independent tasks in parallel");
+  assert.equal(progress.source,"Tool");
+  assert.match(progress.purpose,/bounded analysis or validation/i);
+});
