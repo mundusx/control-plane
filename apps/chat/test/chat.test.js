@@ -537,8 +537,11 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /data-settings-tab="devices"/);
   assert.match(html, /data-settings-tab="personalization"/);
   assert.match(html, /Connect GitHub/);
-  assert.match(html, /Administrators manage shared Global Skills/);
-  assert.match(html, /Hermes selects installed capabilities/);
+  assert.match(html, /Personal instructions/);
+  assert.match(html, /preferred language, answer length, tone, coding conventions, or accessibility needs/);
+  assert.match(html, /href="\/skills">Manage<\/a>/);
+  assert.match(html, /Administrators control Global Skills/);
+  assert.match(html, /Hermes selects available tools/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
   assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
   assert.match(html, /guestLoginEl\?\.addEventListener\("click", openAuthentication\)/);
@@ -548,7 +551,9 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(mainHeader, /id="repository-open-mobile"[^>]*aria-label="Open Projects"/);
   assert.match(projects, /role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby="project-dialog-title"/);
   assert.match(projects, /<h2 id="project-dialog-title">Create project<\/h2>/);
-  assert.match(projects, /id="repository-dialog-close"[^>]*type="button"[^>]*aria-label="Close"/);
+  assert.match(projects, /id="repository-dialog-close"[^>]*type="button"[^>]*aria-label="Close"[^>]*data-overlay-close="projects"/);
+  assert.match(html, /id="settings-dialog-close"[^>]*data-overlay-close="settings"/);
+  assert.match(html, /document\.addEventListener\("click", \(event\) => \{[\s\S]*?\[data-overlay-close\][\s\S]*?closeSettings\(\)[\s\S]*?closeProjects\(\)[\s\S]*?\}, true\)/);
   assert.match(projects, /id="project-create-fields"[\s\S]*name="project_slug"[^>]*pattern="\[a-z0-9\]/);
   assert.match(projects, /name="initialize_git"[^>]*checked/);
   assert.match(projects, /Initialize a local Git repository/);
