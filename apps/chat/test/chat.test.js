@@ -659,6 +659,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /updateProjectCreateAvailability\(\)/);
   assert.match(html, /operation: "git_init"/);
   assert.match(html, /operation: "ensure_project"/);
+  assert.match(html, /connection\.capabilities\?\.project_git === true/);
+  assert.match(html, /Update MundusX on this computer to use project Git and remote actions/);
   assert.match(html, /Git & Remote/);
   assert.doesNotMatch(html, /action\("Project skills"|action\("Saved prompts"|Copy relative path/);
   assert.match(html, /repositoryDialogCloseEl\?\.addEventListener\("click", closeProjects\)/);
