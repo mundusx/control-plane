@@ -50,7 +50,12 @@ async function projectOperation(slug, request, write = false) {
   const statusResponse = await fetch("/api/agent/status", {cache:"no-store"});
   if (!statusResponse.ok) throw new Error(statusResponse.status === 401 ? "Please sign in to browse this project." : "Could not check the local connection. Try again shortly.");
   const status = await statusResponse.json();
-  const capable = status.connections?.filter((connection) => connection.online && connection.capabilities?.project_browser === true) || [];
+  const browserCapable = status.connections?.filter((connection) => connection.online && connection.capabilities?.project_browser === true) || [];
+  const needsGit = String(request.operation || "").startsWith("git_");
+  if (needsGit && browserCapable.length && !browserCapable.some((connection) => connection.capabilities?.project_git === true)) {
+    throw new Error("Update MundusX on this computer to use project Git and remote actions.");
+  }
+  const capable = needsGit ? browserCapable.filter((connection) => connection.capabilities?.project_git === true) : browserCapable;
   const previousDevice = projectBrowserDevices.get(slug);
   const device = previousDevice ? capable.find((connection) => connection.connection_id === previousDevice) : capable[0];
   if (!device) {
