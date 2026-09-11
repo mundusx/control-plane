@@ -815,6 +815,7 @@ export class PostgresAuthStore {
     const description = String(input.description || "").trim();
     const visibility = String(input.visibility || "private").toLowerCase();
     const template = String(input.template || "java-maven").toLowerCase();
+    const initialize = input.initialize !== false;
     if (!/^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/.test(name)) {
       throw Object.assign(new Error("Repository name must use 1-100 letters, numbers, dots, dashes, or underscores"), { statusCode: 400 });
     }
@@ -829,7 +830,7 @@ export class PostgresAuthStore {
         name,
         description,
         private: visibility === "private",
-        auto_init: true,
+        auto_init: initialize,
       },
     });
     const repo = this.normalizeRepository(created);
@@ -907,6 +908,35 @@ export class PostgresAuthStore {
       throw Object.assign(new Error(requirePush ? "Write access to this repository is required" : "Repository access is required"), { statusCode: 403 });
     }
     return repo;
+  }
+
+  async createPullRequest(userId, repositoryId, input = {}) {
+    const repo = await this.authorizeRepository(userId, repositoryId, { requirePush: true });
+    const title = String(input.title || "").trim();
+    const body = String(input.body || "").trim();
+    const head = String(input.head || "").trim();
+    const base = String(input.base || repo.default_branch || "main").trim();
+    if (!title || title.length > 200) throw Object.assign(new Error("Pull request title must contain 1 to 200 characters"), { statusCode: 400 });
+    if (body.length > 20_000) throw Object.assign(new Error("Pull request description is too long"), { statusCode: 400 });
+    if (![head, base].every(validGithubRef)) throw Object.assign(new Error("Pull request branch is invalid"), { statusCode: 400 });
+    const created = await this.githubJson(userId, `https://api.github.com/repos/${repo.full_name}/pulls`, {
+      method: "POST",
+      body: { title, body, head, base },
+    });
+    return { pull_request: normalizePullRequest(created) };
+  }
+
+  async mergePullRequest(userId, repositoryId, numberValue, input = {}) {
+    const repo = await this.authorizeRepository(userId, repositoryId, { requirePush: true });
+    const number = Number(numberValue);
+    const mergeMethod = String(input.merge_method || "squash");
+    if (!Number.isInteger(number) || number < 1) throw Object.assign(new Error("Pull request number is invalid"), { statusCode: 400 });
+    if (!["merge", "squash", "rebase"].includes(mergeMethod)) throw Object.assign(new Error("Merge method is invalid"), { statusCode: 400 });
+    const merged = await this.githubJson(userId, `https://api.github.com/repos/${repo.full_name}/pulls/${number}/merge`, {
+      method: "PUT",
+      body: { merge_method: mergeMethod },
+    });
+    return { merged: Boolean(merged.merged), message: String(merged.message || ""), sha: String(merged.sha || "") };
   }
 
   async repositoryContents(userId, repositoryId, path = "", ref = "") {
@@ -1367,6 +1397,21 @@ export class PostgresAuthStore {
     [skillId, input.content, input.enabled !== false, session.id]);
     return result.rows[0];
   }
+}
+
+function validGithubRef(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(String(value || "")) && !String(value).includes("..") && !String(value).includes("//");
+}
+
+function normalizePullRequest(value = {}) {
+  return {
+    number: Number(value.number),
+    title: String(value.title || ""),
+    state: String(value.state || ""),
+    html_url: String(value.html_url || ""),
+    head: String(value.head?.ref || ""),
+    base: String(value.base?.ref || ""),
+  };
 }
 
 export function isSkillAdministrator(role) {

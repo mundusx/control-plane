@@ -21,6 +21,11 @@ test("Harness MCP exposes only bounded user-scoped tools", async (context) => {
       assert.equal(repositoryId, "42");
       return { tenant_id: "tenant-1", repository_source_id: "github:42:owner/repo" };
     },
+    async createLocalAgentTask(userId, input) {
+      assert.equal(userId, "user-1");
+      assert.equal(input.workspace_relative, "local-project");
+      return { task_id: "11111111-1111-4111-8111-111111111111", state: "queued" };
+    },
   };
   const harnessService = {
     async submitTask(input, options) { submitted = { input, options }; return { task_id: "htask_1", approval: "required" }; },
@@ -39,9 +44,14 @@ test("Harness MCP exposes only bounded user-scoped tools", async (context) => {
   const toolNames = listed.tools.map((tool) => tool.name).sort();
   assert.deepEqual(toolNames, [
     "mundusx_cancel_harness_task",
+    "mundusx_create_github_repository",
+    "mundusx_create_pull_request",
     "mundusx_get_harness_task",
+    "mundusx_get_project_task",
     "mundusx_list_projects",
     "mundusx_list_runners",
+    "mundusx_project_git_action",
+    "mundusx_project_git_status",
     "mundusx_read_repository",
     "mundusx_submit_harness_task",
   ]);
@@ -62,6 +72,13 @@ test("Harness MCP exposes only bounded user-scoped tools", async (context) => {
   assert.equal(submittedResult.structuredContent.approval, "required");
   assert.equal(submitted.options.session.id, "user-1");
   assert.equal(submitted.options.authority.repository_source_id, "github:42:owner/repo");
+
+  const gitStatus = await client.callTool({
+    name: "mundusx_project_git_status",
+    arguments: { project_slug: "local-project" },
+  });
+  assert.equal(gitStatus.structuredContent.project_slug, "local-project");
+  assert.equal(gitStatus.structuredContent.state, "queued");
 });
 
 test("Harness MCP rejects missing bearer credentials before protocol handling", async (context) => {

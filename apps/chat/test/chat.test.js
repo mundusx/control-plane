@@ -495,21 +495,25 @@ test("normalizes chat app environment", () => {
   assert.equal(config.mcpEnabled, false);
 });
 
-test("renders a user-scoped MCP connection manager only when enabled", () => {
+test("keeps MCP access inside the user-scoped Developer settings section", () => {
   const html = page(configFromEnv({
     MUNDUSX_MCP_ENABLED: "true",
     MUNDUSX_PUBLIC_ORIGIN: "https://chat.mundusx.ai",
   }));
-  assert.match(html, /id="account-mcp"[^>]*>[\s\S]*MCP connections/);
-  assert.match(html, /id="mcp-dialog"[^>]*hidden/);
+  assert.match(html, /id="account-settings"[^>]*>[\s\S]*Settings/);
+  assert.match(html, /id="settings-dialog"[^>]*hidden/);
+  assert.match(html, /data-settings-tab="developer"/);
+  assert.match(html, /External client access/);
   assert.match(html, /https:\/\/chat\.mundusx\.ai\/mcp/);
   assert.match(html, /id="mcp-token-form"/);
   assert.match(html, /Copy this token now/);
   assert.match(html, /MundusX stores only its digest/);
-  assert.match(html, /Apply, merge, and deployment still require separate approval/);
+  assert.match(html, /Applying, merging, and deployment remain separately controlled/);
   assert.match(html, /fetch\("\/api\/mcp\/tokens"/);
   assert.match(html, /data-revoke-mcp-token/);
-  assert.doesNotMatch(page(configFromEnv({})), /id="account-mcp"|id="mcp-dialog"/);
+  const withoutMcp = page(configFromEnv({}));
+  assert.match(withoutMcp, /id="settings-dialog"/);
+  assert.doesNotMatch(withoutMcp, /data-settings-tab="developer"|id="mcp-token-form"/);
 });
 
 test("renders local-first Projects without a separate Computer surface", () => {
@@ -527,7 +531,14 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /id="repository-open"[^>]*>[\s\S]*?<span>Projects<\/span>/);
   assert.match(workspaceNav, /id="repository-open"[\s\S]*Projects/);
   assert.doesNotMatch(html, /id="chats-open"|chatsOpenEl/);
-  assert.match(html, /class="account-menu-item" href="\/skills"[\s\S]*>My skills<\/span>/);
+  assert.match(html, /id="account-settings"[\s\S]*>Settings<\/span>/);
+  assert.doesNotMatch(html, />My skills<\/span>|>Advanced<\/summary>/);
+  assert.match(html, /data-settings-tab="connections"/);
+  assert.match(html, /data-settings-tab="devices"/);
+  assert.match(html, /data-settings-tab="personalization"/);
+  assert.match(html, /Connect GitHub/);
+  assert.match(html, /Administrators manage shared Global Skills/);
+  assert.match(html, /Hermes selects installed capabilities/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
   assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
   assert.match(html, /guestLoginEl\?\.addEventListener\("click", openAuthentication\)/);
@@ -539,6 +550,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(projects, /<h2 id="project-dialog-title">Create project<\/h2>/);
   assert.match(projects, /id="repository-dialog-close"[^>]*type="button"[^>]*aria-label="Close"/);
   assert.match(projects, /id="project-create-fields"[\s\S]*name="project_slug"[^>]*pattern="\[a-z0-9\]/);
+  assert.match(projects, /name="initialize_git"[^>]*checked/);
+  assert.match(projects, /Initialize a local Git repository/);
   assert.match(projects, /This creates a folder inside the local workspace you approved/);
   assert.doesNotMatch(projects, /documents\\mundusx\\projects|Default memory|class="project-mark"/);
   assert.doesNotMatch(projects, /Project type|Java \(Maven\)|Project options|name="project_template"/);
@@ -624,7 +637,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /pendingRunnerAction = \{ pending, message, project: activeProject, conversationId \}/);
   assert.match(html, /Runner connected\. Resuming your request/);
   assert.match(html, /if \(localRunnerReady\) void resumePendingRunnerAction\(\)/);
-  assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady\)/);
+  assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady && !reconnectTimedOut\)/);
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
   assert.match(projects, /MundusX-Setup\.exe/);
@@ -644,6 +657,10 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(html, /id="harness-open"|id="harness-dialog"|>Computer<\/button>/);
   assert.match(projects, /class="harness-submit"[^>]*disabled[^>]*>Create project/);
   assert.match(html, /updateProjectCreateAvailability\(\)/);
+  assert.match(html, /operation: "git_init"/);
+  assert.match(html, /operation: "ensure_project"/);
+  assert.match(html, /Git & Remote/);
+  assert.doesNotMatch(html, /action\("Project skills"|action\("Saved prompts"|Copy relative path/);
   assert.match(html, /repositoryDialogCloseEl\?\.addEventListener\("click", closeProjects\)/);
   assert.match(html, /function closeProjects\(\)[\s\S]*?repositoryDialogEl\.hidden = true/);
   assert.match(html, /event\.key !== "Escape"[\s\S]*?closeProjects\(\)/);
@@ -722,6 +739,18 @@ test("selects focused markdown skills by request type", () => {
   );
   assert.ok(
     selectChatSkills("Who is Sara Duterte from PH?").some((skill) => skill.name === "facts.md"),
+  );
+  assert.equal(
+    selectChatSkills("Initialize Git and push this repository").some((skill) => skill.name === "git-workflow.md"),
+    false,
+  );
+  assert.equal(
+    selectChatSkills("Initialize Git and push this repository", [{
+      skill_id: "git-workflow",
+      enabled: true,
+      content: "# Git workflow\nUse a feature branch and open a pull request.",
+    }]).some((skill) => skill.name === "git-workflow.md"),
+    true,
   );
 });
 
