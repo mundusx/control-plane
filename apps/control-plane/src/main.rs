@@ -9106,11 +9106,11 @@ fn handle_connection_with_streams(
                                         let delta: serde_json::Value = serde_json::from_str(delta)
                                             .map_err(|e| format!("invalid native stream delta: {e}"))?;
                                         native_stream.push(&delta)?;
-                                        format!("data: {}\n\n", serde_json::json!({
+                                        chat_gateway::sse_frame(&format!("data: {}\n\n", serde_json::json!({
                                             "id": completion_id, "object":"chat.completion.chunk",
                                             "created":created, "model":public_model,
                                             "choices":[{"index":0,"delta":delta,"finish_reason":null}]
-                                        }))
+                                        })))
                                     }
                                     Some(delta) => {
                                         streamed_content.push_str(delta);
@@ -9174,7 +9174,7 @@ fn handle_connection_with_streams(
                             if wants_stream {
                                 if native_tool_turn {
                                     let event = serde_json::json!({"error":{"message":error,"type":"native_stream_error"}});
-                                    let _ = stream.write_all(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes());
+                                    let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
                                     return;
                                 }
                                 let completion = chat_gateway::completion_response(
@@ -9218,7 +9218,7 @@ fn handle_connection_with_streams(
                                 .remove(&record.job_id);
                             if native_tool_turn && completed.status != JobStatus::Completed {
                                 let event = serde_json::json!({"error":{"message":"native tool generation failed before completion","type":"native_stream_error"}});
-                                let _ = stream.write_all(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes());
+                                let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
                             } else if native_tool_turn {
                                 match native_stream.remainder(&completion["choices"][0]["message"]) {
                                     Ok(delta) => {
@@ -9226,14 +9226,14 @@ fn handle_connection_with_streams(
                                             let event = serde_json::json!({"id":completion_id,"object":"chat.completion.chunk",
                                                 "created":created,"model":public_model,
                                                 "choices":[{"index":0,"delta":delta,"finish_reason":null}]});
-                                            let _ = stream.write_all(format!("data: {event}\n\n").as_bytes());
+                                            let _ = stream.write_all(chat_gateway::sse_frame(&format!("data: {event}\n\n")).as_bytes());
                                         }
                                         let reason = completion["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
                                         let _ = stream.write_all(chat_gateway::sse_end(&completion_id, created, public_model, reason).as_bytes());
                                     }
                                     Err(error) => {
                                         let event = serde_json::json!({"error":{"message":error,"type":"stream_reconciliation_error"}});
-                                        let _ = stream.write_all(format!("data: {event}\n\ndata: [DONE]\n\n").as_bytes());
+                                        let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
                                     }
                                 }
                             } else if let Ok(remainder) =
