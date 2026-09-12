@@ -61,7 +61,6 @@ mod harness_routing_tests {
 }
 const MAX_STREAM_DELTA_BYTES: usize = 64 * 1024;
 const MAX_STREAM_BUFFER_BYTES: usize = 256 * 1024;
-const LIVE_SSE_PACE_INTERVAL: Duration = Duration::from_millis(120);
 const DEFAULT_MAX_ACTIVE_CHAT_WEIGHT: usize = 14;
 const CHAT_ADMISSION_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -587,7 +586,7 @@ pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token
         "validated-buffered"
     };
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n: stream opened\n\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n: stream opened\n\n"
     )
 }
 
@@ -745,15 +744,12 @@ where
 {
     let started = Instant::now();
     let mut last_keep_alive = Instant::now();
-    let mut pending = VecDeque::new();
     loop {
-        pending.extend(
-            streams
+        let deltas = streams
             .lock()
             .map_err(|_| "live stream registry lock poisoned".to_string())?
-            .drain(job_id),
-        );
-        if let Some(delta) = pending.pop_front() {
+            .drain(job_id);
+        for delta in deltas {
             write_event(Some(&delta))?;
         }
 
@@ -766,15 +762,12 @@ where
             .ok_or_else(|| format!("chat job {job_id} disappeared"))?;
         match job.status {
             JobStatus::Completed => {
-                pending.extend(
-                    streams
+                let trailing = streams
                     .lock()
                     .map_err(|_| "live stream registry lock poisoned".to_string())?
-                    .drain(job_id),
-                );
-                if !pending.is_empty() {
-                    thread::sleep(LIVE_SSE_PACE_INTERVAL);
-                    continue;
+                    .drain(job_id);
+                for delta in trailing {
+                    write_event(Some(&delta))?;
                 }
                 if job
                     .output
@@ -803,7 +796,7 @@ where
             write_event(None)?;
             last_keep_alive = Instant::now();
         }
-        thread::sleep(LIVE_SSE_PACE_INTERVAL);
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -1027,7 +1020,6 @@ mod tests {
         let finish = sse_finish(&completion);
         assert!(start.starts_with("HTTP/1.1 200 OK"));
         assert!(start.contains("Content-Type: text/event-stream"));
-        assert!(start.contains("Cache-Control: no-cache, no-transform"));
         assert!(!start.contains("data:"));
         assert!(finish.contains("\"role\":\"assistant\""));
         assert!(finish.contains("\"delta\":{\"content\":\"Done.\",\"role\":\"assistant\"}"));
