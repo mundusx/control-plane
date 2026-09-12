@@ -9101,6 +9101,7 @@ fn handle_connection_with_streams(
                             &record.job_id,
                             chat_gateway::timeout_from_env(),
                             |delta| {
+                                let is_data_event = delta.is_some();
                                 let event = match delta {
                                     Some(delta) if native_tool_turn => {
                                         let delta: serde_json::Value = serde_json::from_str(delta)
@@ -9122,6 +9123,11 @@ fn handle_connection_with_streams(
                                         )
                                     }
                                     None => chat_gateway::sse_keep_alive().to_string(),
+                                };
+                                let event = if is_data_event {
+                                    chat_gateway::sse_live_flush_frame(event)
+                                } else {
+                                    event
                                 };
                                 stream
                                     .write_all(event.as_bytes())
