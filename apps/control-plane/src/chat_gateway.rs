@@ -61,7 +61,7 @@ mod harness_routing_tests {
 }
 const MAX_STREAM_DELTA_BYTES: usize = 64 * 1024;
 const MAX_STREAM_BUFFER_BYTES: usize = 256 * 1024;
-const MIN_LIVE_SSE_FRAME_BYTES: usize = 2 * 1024;
+const LIVE_SSE_PACE_INTERVAL: Duration = Duration::from_millis(120);
 const DEFAULT_MAX_ACTIVE_CHAT_WEIGHT: usize = 14;
 const CHAT_ADMISSION_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -591,20 +591,6 @@ pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token
     )
 }
 
-/// Make a live SSE data event large enough that HTTP intermediaries forward it
-/// promptly instead of coalescing many small token events. The padding is an
-/// SSE comment, so clients ignore it and see the original data event unchanged.
-pub fn sse_live_flush_frame(mut event: String) -> String {
-    if event.len() >= MIN_LIVE_SSE_FRAME_BYTES {
-        return event;
-    }
-    let deficit = MIN_LIVE_SSE_FRAME_BYTES - event.len();
-    event.push(':');
-    event.extend(std::iter::repeat(' ').take(deficit.saturating_sub(3)));
-    event.push_str("\n\n");
-    event
-}
-
 pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
     let chunk = json!({
         "id": id,
@@ -759,12 +745,15 @@ where
 {
     let started = Instant::now();
     let mut last_keep_alive = Instant::now();
+    let mut pending = VecDeque::new();
     loop {
-        let deltas = streams
+        pending.extend(
+            streams
             .lock()
             .map_err(|_| "live stream registry lock poisoned".to_string())?
-            .drain(job_id);
-        for delta in deltas {
+            .drain(job_id),
+        );
+        if let Some(delta) = pending.pop_front() {
             write_event(Some(&delta))?;
         }
 
@@ -777,12 +766,15 @@ where
             .ok_or_else(|| format!("chat job {job_id} disappeared"))?;
         match job.status {
             JobStatus::Completed => {
-                let trailing = streams
+                pending.extend(
+                    streams
                     .lock()
                     .map_err(|_| "live stream registry lock poisoned".to_string())?
-                    .drain(job_id);
-                for delta in trailing {
-                    write_event(Some(&delta))?;
+                    .drain(job_id),
+                );
+                if !pending.is_empty() {
+                    thread::sleep(LIVE_SSE_PACE_INTERVAL);
+                    continue;
                 }
                 if job
                     .output
@@ -811,7 +803,7 @@ where
             write_event(None)?;
             last_keep_alive = Instant::now();
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(LIVE_SSE_PACE_INTERVAL);
     }
 }
 
@@ -884,10 +876,9 @@ pub fn validate_request(request: &ChatCompletionRequest) -> Result<(), String> {
 mod tests {
     use super::{
         completion_response, history_contains_sensitive_data, is_openwebui_metadata_request,
-        models_response, output_hit_generation_limit, public_model_id, sse_delta, sse_finish,
-        sse_live_flush_frame, sse_start, strip_generation_limit_marker, validate_model,
-        validated_stream_remainder, ChatAdmissionController, LiveStreamRegistry, PushDeltaResult,
-        MIN_LIVE_SSE_FRAME_BYTES,
+        models_response, output_hit_generation_limit, public_model_id, sse_finish, sse_start,
+        strip_generation_limit_marker, validate_model, validated_stream_remainder,
+        ChatAdmissionController, LiveStreamRegistry, PushDeltaResult,
     };
     use crate::tools::{ToolAnswer, ToolSource};
     use std::sync::{mpsc, Arc};
@@ -1041,16 +1032,6 @@ mod tests {
         assert!(finish.contains("\"role\":\"assistant\""));
         assert!(finish.contains("\"delta\":{\"content\":\"Done.\",\"role\":\"assistant\"}"));
         assert!(finish.contains("data: [DONE]"));
-    }
-
-    #[test]
-    fn pads_live_sse_data_with_an_ignored_comment() {
-        let original = sse_delta("chatcmpl-test", 1, "mundusx-agnostic", "Hello");
-        let frame = sse_live_flush_frame(original.clone());
-        assert!(frame.starts_with(&original));
-        assert!(frame.len() >= MIN_LIVE_SSE_FRAME_BYTES);
-        assert!(frame[original.len()..].starts_with(':'));
-        assert!(frame.ends_with("\n\n"));
     }
 
     #[test]
