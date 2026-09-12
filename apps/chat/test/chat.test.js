@@ -501,6 +501,11 @@ test("normalizes chat app environment", () => {
   assert.equal(config.mcpEnabled, false);
 });
 
+test("migrates the retired production control-plane origin", () => {
+  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://mundusx.ai/" });
+  assert.equal(config.controlPlaneUrl, "https://uat.mundusx.ai");
+});
+
 test("keeps MCP access inside the user-scoped Developer settings section", () => {
   const html = page(configFromEnv({
     MUNDUSX_MCP_ENABLED: "true",
@@ -4218,7 +4223,7 @@ test("native Hermes providers preserve OpenAI tools and fail over before streami
 test("native Hermes tools fail fast when the MundusX model node is outdated", async () => {
   resetAgentProviderCircuits();
   const response = { writeHead() {}, write() {}, end() {} };
-  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://mundusx.ai" });
+  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" });
   await assert.rejects(
     relayNativeHermesToolStream(response, {
       model: "mundusx-agnostic",

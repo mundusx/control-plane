@@ -7,7 +7,7 @@ This service powers the canonical MundusX browser chat at `https://chat.mundusx.
 ## Run locally
 
 ```powershell
-$env:MUNDUSX_CONTROL_PLANE_URL = "https://mundusx.ai"
+$env:MUNDUSX_CONTROL_PLANE_URL = "https://uat.mundusx.ai"
 $env:PORT = "3002"
 pnpm --filter @mundusx/chat dev
 ```
@@ -30,7 +30,7 @@ Recommended Railway settings:
 Required environment:
 
 ```text
-MUNDUSX_CONTROL_PLANE_URL=https://mundusx.ai
+MUNDUSX_CONTROL_PLANE_URL=https://uat.mundusx.ai
 ```
 
 Optional environment:
@@ -131,7 +131,7 @@ Railway provides `PORT`; the app reads it automatically.
 | Name | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3002` | HTTP port for the chat app |
-| `MUNDUSX_CONTROL_PLANE_URL` | `https://mundusx.ai` | Production control-plane API origin |
+| `MUNDUSX_CONTROL_PLANE_URL` | `https://uat.mundusx.ai` | UAT control-plane API origin |
 | `MUNDUSX_OPERATOR_TOKEN` | unset | Optional bearer token for protected UAT/API deployments |
 | `OPENGPU_OPERATOR_TOKEN` | unset | Deprecated fallback token name |
 | `MUNDUSX_CHAT_AUTH_REQUIRED` | `true` | Requires an active individual session for browser `/api/*` routes; fail-closed when storage is unavailable |
