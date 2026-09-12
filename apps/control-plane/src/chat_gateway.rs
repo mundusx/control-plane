@@ -586,8 +586,17 @@ pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token
         "validated-buffered"
     };
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n: stream opened\n\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nTransfer-Encoding: chunked\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n{}",
+        sse_frame(": stream opened\n\n")
     )
+}
+
+pub fn sse_frame(payload: &str) -> String {
+    format!("{:X}\r\n{}\r\n", payload.len(), payload)
+}
+
+pub fn sse_terminal(payload: &str) -> String {
+    format!("{}{}0\r\n\r\n", sse_frame(payload), sse_frame("data: [DONE]\n\n"))
 }
 
 pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
@@ -598,7 +607,7 @@ pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
         "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": Value::Null}]
     });
-    format!("data: {chunk}\n\n")
+    sse_frame(&format!("data: {chunk}\n\n"))
 }
 
 pub fn sse_end(id: &str, created: u64, model: &str, finish_reason: &str) -> String {
@@ -609,7 +618,7 @@ pub fn sse_end(id: &str, created: u64, model: &str, finish_reason: &str) -> Stri
         "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
     });
-    format!("data: {end}\n\ndata: [DONE]\n\n")
+    sse_terminal(&format!("data: {end}\n\n"))
 }
 
 pub fn validated_stream_remainder<'a>(
@@ -668,8 +677,8 @@ pub fn sse_finish(completion: &Value) -> String {
     }
 }
 
-pub fn sse_keep_alive() -> &'static str {
-    ": mundusx keep-alive\n\n"
+pub fn sse_keep_alive() -> String {
+    sse_frame(": mundusx keep-alive\n\n")
 }
 
 pub fn wait_for_job(
@@ -1050,7 +1059,8 @@ mod tests {
         assert!(stream.contains("\"tool_calls\""));
         assert!(stream.contains("\"index\":0"));
         assert!(stream.contains("\"finish_reason\":\"tool_calls\""));
-        assert!(stream.ends_with("data: [DONE]\n\n"));
+        assert!(stream.contains("data: [DONE]\n\n"));
+        assert!(stream.ends_with("0\r\n\r\n"));
     }
 
     #[test]
