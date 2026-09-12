@@ -33,7 +33,8 @@ import {
 
 export { localProjectAuthority };
 
-const DEFAULT_CONTROL_PLANE_URL = "https://mundusx.ai";
+const DEFAULT_CONTROL_PLANE_URL = "https://uat.mundusx.ai";
+const LEGACY_CONTROL_PLANE_URL = "https://mundusx.ai";
 const DEFAULT_TIMEOUT_SECONDS = 90;
 const DEFAULT_TOOL_PLANNER_TIMEOUT_SECONDS = 12;
 const DEFAULT_WEATHER_TTL_SECONDS = 7200;
@@ -151,7 +152,9 @@ export function configFromEnv(env = process.env) {
   return {
     auth: authConfigFromEnv(env),
     port: Number(env.PORT ?? "3002"),
-    controlPlaneUrl: normalizeOrigin(env.MUNDUSX_CONTROL_PLANE_URL ?? DEFAULT_CONTROL_PLANE_URL),
+    controlPlaneUrl: normalizeControlPlaneOrigin(
+      env.MUNDUSX_CONTROL_PLANE_URL ?? DEFAULT_CONTROL_PLANE_URL,
+    ),
     operatorToken: (env.MUNDUSX_OPERATOR_TOKEN ?? env.OPENGPU_OPERATOR_TOKEN ?? "").trim(),
     harnessServiceToken: (env.MUNDUSX_HARNESS_SERVICE_TOKEN ?? "").trim(),
     harnessUiEnabled,
@@ -13697,6 +13700,11 @@ function normalizeRepeatKey(value) {
 
 function normalizeOrigin(value) {
   return String(value || DEFAULT_CONTROL_PLANE_URL).replace(/\/+$/, "");
+}
+
+function normalizeControlPlaneOrigin(value) {
+  const origin = normalizeOrigin(value);
+  return origin === LEGACY_CONTROL_PLANE_URL ? DEFAULT_CONTROL_PLANE_URL : origin;
 }
 
 function positiveInteger(value, fallback) {

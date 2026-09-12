@@ -5,7 +5,7 @@ import { adminLoginAssertion, handleAdminLogin } from "../src/features/admin-log
 
 const secret = "test-secret-that-is-at-least-32-characters";
 const nonce = "a".repeat(64);
-const origin = "https://mundusx.ai";
+const origin = "https://uat.mundusx.ai";
 test("admin assertion is signed, short lived, audience and challenge bound", () => {
   const [body, signature] = adminLoginAssertion({ email:"Admin@Example.com", provider:"google" }, nonce, origin, secret, 1000000).split(".");
   assert.equal(signature, createHmac("sha256", secret).update(body).digest("hex"));
