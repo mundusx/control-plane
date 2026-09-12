@@ -61,6 +61,7 @@ mod harness_routing_tests {
 }
 const MAX_STREAM_DELTA_BYTES: usize = 64 * 1024;
 const MAX_STREAM_BUFFER_BYTES: usize = 256 * 1024;
+const MIN_LIVE_SSE_FRAME_BYTES: usize = 2 * 1024;
 const DEFAULT_MAX_ACTIVE_CHAT_WEIGHT: usize = 14;
 const CHAT_ADMISSION_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -586,8 +587,22 @@ pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token
         "validated-buffered"
     };
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n: stream opened\n\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nX-Accel-Buffering: no\r\nX-MundusX-Stream-Mode: {mode}\r\nX-MundusX-Completion-Id: {id}\r\nX-MundusX-Resume-Token: {resume_token}\r\nConnection: close\r\n\r\n: stream opened\n\n"
     )
+}
+
+/// Make a live SSE data event large enough that HTTP intermediaries forward it
+/// promptly instead of coalescing many small token events. The padding is an
+/// SSE comment, so clients ignore it and see the original data event unchanged.
+pub fn sse_live_flush_frame(mut event: String) -> String {
+    if event.len() >= MIN_LIVE_SSE_FRAME_BYTES {
+        return event;
+    }
+    let deficit = MIN_LIVE_SSE_FRAME_BYTES - event.len();
+    event.push(':');
+    event.extend(std::iter::repeat(' ').take(deficit.saturating_sub(3)));
+    event.push_str("\n\n");
+    event
 }
 
 pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
@@ -869,9 +884,10 @@ pub fn validate_request(request: &ChatCompletionRequest) -> Result<(), String> {
 mod tests {
     use super::{
         completion_response, history_contains_sensitive_data, is_openwebui_metadata_request,
-        models_response, output_hit_generation_limit, public_model_id, sse_finish, sse_start,
-        strip_generation_limit_marker, validate_model, validated_stream_remainder,
-        ChatAdmissionController, LiveStreamRegistry, PushDeltaResult,
+        models_response, output_hit_generation_limit, public_model_id, sse_delta, sse_finish,
+        sse_live_flush_frame, sse_start, strip_generation_limit_marker, validate_model,
+        validated_stream_remainder, ChatAdmissionController, LiveStreamRegistry, PushDeltaResult,
+        MIN_LIVE_SSE_FRAME_BYTES,
     };
     use crate::tools::{ToolAnswer, ToolSource};
     use std::sync::{mpsc, Arc};
@@ -1020,10 +1036,21 @@ mod tests {
         let finish = sse_finish(&completion);
         assert!(start.starts_with("HTTP/1.1 200 OK"));
         assert!(start.contains("Content-Type: text/event-stream"));
+        assert!(start.contains("Cache-Control: no-cache, no-transform"));
         assert!(!start.contains("data:"));
         assert!(finish.contains("\"role\":\"assistant\""));
         assert!(finish.contains("\"delta\":{\"content\":\"Done.\",\"role\":\"assistant\"}"));
         assert!(finish.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn pads_live_sse_data_with_an_ignored_comment() {
+        let original = sse_delta("chatcmpl-test", 1, "mundusx-agnostic", "Hello");
+        let frame = sse_live_flush_frame(original.clone());
+        assert!(frame.starts_with(&original));
+        assert!(frame.len() >= MIN_LIVE_SSE_FRAME_BYTES);
+        assert!(frame[original.len()..].starts_with(':'));
+        assert!(frame.ends_with("\n\n"));
     }
 
     #[test]
