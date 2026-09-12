@@ -274,8 +274,10 @@ test("renders a usable chat page", () => {
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
   assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 60000/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
-  assert.match(html, /unpaintedDeltaCharacters >= 24/);
-  assert.match(html, /await yieldToStreamPaint\(\)/);
+  assert.match(html, /function requestAnimationFrame|requestAnimationFrame\(commitStreamPaint\)/);
+  assert.match(html, /scheduleStreamPaint\(\)/);
+  assert.match(html, /await flushStreamPaint\(\)/);
+  assert.match(html, /highlightCode: false/);
   assert.match(html, /\[chat-stream-render\]/);
   assert.match(html, /live\.textContent = output/);
   assert.match(html, /MundusX did not produce a first token within 60 seconds/);
