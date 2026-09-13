@@ -269,8 +269,11 @@ test("renders a usable chat page", () => {
   assert.match(html, /streamState\.status = "waiting"/);
   assert.match(html, /Streaming - waiting for first token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 60000/);
-  assert.match(html, /MundusX did not produce a first token within 60 seconds/);
+  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 90000/);
+  assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
+  assert.match(html, /unpaintedDeltaCharacters >= 24/);
+  assert.match(html, /await yieldToStreamPaint\(\)/);
+  assert.match(html, /MundusX did not produce a first token within 90 seconds/);
   assert.match(html, /MundusX job did not complete during stream recovery/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
@@ -1311,6 +1314,70 @@ test("adapts token budgets to stronger node model and GPU capacity", async () =>
 
   assert.equal(calls[0].max_tokens, 1024);
   assert.equal(calls[1].max_tokens, 2048);
+});
+
+test("discovers nested contributed-cluster capacity for a full Solidity response", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (url.endsWith("/v1/nodes?page=1&page_size=25")) {
+      return jsonResponse({ items: [{
+        node_id: "node-gx10",
+        state: "ready",
+        reported_state: "ready",
+        backend: "vllm",
+        policy_allowed: true,
+        computed_policy_allowed: true,
+        on_battery: false,
+        available_memory_mb: 7533,
+        available_gpu_percent: 70,
+        capabilities: {
+          capacity_class: "server",
+          usable_memory_mb: 105864,
+          active_model: {
+            name: "qwen3-coder",
+            active: true,
+            capacity_class: "server",
+            context_tokens: 180000,
+            output_capacity_mode: "context_window",
+          },
+        },
+        worker_health: {
+          healthy: true,
+          runtime_ready: true,
+          model_name: "qwen3-coder",
+          cuda_device_available: true,
+          capabilities: {
+            capacity_class: "server",
+            max_context_tokens: 180000,
+            usable_memory_mb: 105864,
+            models: [{
+              name: "qwen3-coder",
+              active: true,
+              capacity_class: "server",
+              context_tokens: 180000,
+              output_capacity_mode: "context_window",
+            }],
+          },
+        },
+      }] });
+    }
+    calls.push(JSON.parse(init.body));
+    return jsonResponse({
+      job_id: "job-solidity",
+      job: { job_id: "job-solidity", status: "queued", graph: { nodes: [] } },
+    });
+  };
+
+  await submitChatJob(
+    { message: "give me a full solidity code to act as KYC we need 2 issuer signature here and 1 target" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(calls[0].execution_mode, "single");
+  assert.equal(calls[0].max_tokens, 12288);
+  assert.equal(calls[0].max_tokens_source, "auto");
+  assert.match(calls[0].system_prompt, /one fenced code block/i);
 });
 
 test("keeps conservative token budgets for low capability nodes", async () => {
@@ -4079,6 +4146,7 @@ test("native MundusX Chat streams complete projects as upstream deltas arrive", 
     { message: prompt, toolMode: false, executionMode: "auto", voicePersona: "marie" },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
+      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
       requests.push({ url, init });
       if (url.endsWith("/v1/chat/completions")) return new Response(upstreamBody, {
         status: 200,
@@ -4203,6 +4271,7 @@ test("live MundusX Chat stream preserves history and persists one user and assis
       writes.push(JSON.parse(init.body));
       return jsonResponse({ stored: true });
     }
+    if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
     if (url.endsWith("/v1/chat/completions")) {
       upstreamRequest = JSON.parse(init.body);
       return new Response(new ReadableStream({

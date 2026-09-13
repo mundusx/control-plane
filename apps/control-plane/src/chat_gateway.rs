@@ -704,8 +704,27 @@ pub fn timeout_from_env() -> Duration {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(600)
-        .clamp(5, 900);
+        .clamp(5, 1_800);
     Duration::from_secs(seconds)
+}
+
+/// Give larger generations enough wall-clock time without slowing ordinary chat.
+/// The configured timeout remains the floor, while the requested output budget
+/// supplies a conservative eight-token-per-second allowance plus startup time.
+pub fn timeout_for_job(job: &JobRecord) -> Duration {
+    timeout_for_max_tokens(timeout_from_env(), job.max_tokens)
+}
+
+fn timeout_for_max_tokens(configured: Duration, max_tokens: Option<u32>) -> Duration {
+    let generated_seconds = max_tokens
+        .map(|tokens| 120_u64.saturating_add(u64::from(tokens).div_ceil(8)))
+        .unwrap_or(0);
+    Duration::from_secs(
+        configured
+            .as_secs()
+            .max(generated_seconds)
+            .clamp(5, 1_800),
+    )
 }
 
 pub fn max_active_chat_requests_from_env() -> usize {
@@ -769,7 +788,8 @@ mod tests {
     use super::{
         completion_response, history_contains_sensitive_data, is_openwebui_metadata_request,
         models_response, output_hit_generation_limit, public_model_id, sse_finish, sse_start,
-        strip_generation_limit_marker, validate_model, validated_stream_remainder,
+        strip_generation_limit_marker, timeout_for_max_tokens, validate_model,
+        validated_stream_remainder,
         ChatAdmissionController, LiveStreamRegistry, PushDeltaResult,
     };
     use crate::tools::{ToolAnswer, ToolSource};
@@ -1037,5 +1057,13 @@ mod tests {
             ),
             "partial"
         );
+    }
+
+    #[test]
+    fn scales_chat_timeout_with_requested_output_budget() {
+        let configured = Duration::from_secs(600);
+        assert_eq!(timeout_for_max_tokens(configured, Some(512)).as_secs(), 600);
+        assert_eq!(timeout_for_max_tokens(configured, Some(12_288)).as_secs(), 1_656);
+        assert_eq!(timeout_for_max_tokens(configured, Some(32_768)).as_secs(), 1_800);
     }
 }
