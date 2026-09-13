@@ -3004,10 +3004,21 @@ impl ControlPlaneState {
         let Some(now_seconds) = parse_unix_seconds(now) else {
             return (Vec::new(), Vec::new());
         };
-        let ready_heartbeats = self
+        // A multi-slot node may truthfully report Ready while one of its slots is
+        // still generating. Treating that heartbeat as an abandoned claim causes
+        // healthy chat work to be requeued after the 45-second grace period.
+        // The early recovery heuristic is only reliable for single-slot nodes,
+        // where Ready means there cannot be an active worker.
+        let ready_single_slot_heartbeats = self
             .nodes
             .iter()
             .filter(|(_, node)| node.reported_state == AgentState::Ready)
+            .filter(|(_, node)| {
+                node.worker_health
+                    .as_ref()
+                    .map(|health| health.capabilities.max_parallel_jobs.max(1) == 1)
+                    .unwrap_or(true)
+            })
             .filter_map(|(node_id, node)| {
                 parse_unix_seconds(&node.updated_at).map(|updated_at| (node_id.clone(), updated_at))
             })
@@ -3030,7 +3041,7 @@ impl ControlPlaneState {
                 .assigned_node_id
                 .clone()
                 .unwrap_or_else(|| "unknown node".to_string());
-            let abandoned_ready_claim = ready_heartbeats
+            let abandoned_ready_claim = ready_single_slot_heartbeats
                 .get(&node_id)
                 .is_some_and(|heartbeat_at| *heartbeat_at > assigned_at_seconds)
                 && job
@@ -10304,6 +10315,38 @@ mod tests {
             .job
             .expect("retry claim");
         assert_eq!(state.jobs["job-1"].graph.nodes[0].attempt_count, 2);
+    }
+
+    #[test]
+    fn ready_heartbeat_keeps_an_active_direct_claim_on_a_multi_slot_node() {
+        let mut state = ready_state();
+        {
+            let node = state.nodes.get_mut("node-1").expect("node exists");
+            let health = node.worker_health.as_mut().expect("worker health");
+            health.parallel_slots = 16;
+            health.capabilities.max_parallel_jobs = 16;
+        }
+        state.submit_job(
+            classification_request("Explain dependency injection."),
+            "2".to_string(),
+        );
+        state
+            .claim_job("node-1", "3".to_string())
+            .job
+            .expect("direct claim");
+
+        let mut ready = ready_heartbeat("node-1", "49");
+        ready.worker_health.parallel_slots = 16;
+        ready.worker_health.capabilities.max_parallel_jobs = 16;
+        state.heartbeat(ready, "49".to_string());
+        let maintenance = state.run_maintenance_with_nodes("49");
+
+        assert!(maintenance.changed_jobs.is_empty());
+        assert!(maintenance.changed_events.is_empty());
+        let job = state.jobs.get("job-1").expect("active direct job");
+        assert_eq!(job.status, JobStatus::Assigned);
+        assert_eq!(job.assigned_node_id.as_deref(), Some("node-1"));
+        assert_eq!(job.graph.nodes[0].attempt_count, 1);
     }
 
     #[test]
