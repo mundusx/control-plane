@@ -4335,7 +4335,7 @@ test("live MundusX Chat stream preserves history and persists one user and assis
   assert.equal(writes[1].jobId, "chatcmpl-browser");
 });
 
-test("live code-project follow-ups receive the full project output budget", async () => {
+test("normal Chat uses a fixed code budget without node-capacity discovery", async () => {
   const encoder = new TextEncoder();
   let upstreamRequest = null;
   const response = {
@@ -4346,46 +4346,6 @@ test("live code-project follow-ups receive the full project output budget", asyn
     end() { this.writableEnded = true; },
   };
   const fetchImpl = async (url, init = {}) => {
-    if (url.endsWith("/v1/nodes?page=1&page_size=25")) {
-      return jsonResponse({ items: [{
-        node_id: "node-gx10",
-        state: "ready",
-        reported_state: "ready",
-        backend: "vllm",
-        policy_allowed: true,
-        computed_policy_allowed: true,
-        available_memory_mb: 8000,
-        available_gpu_percent: 70,
-        capabilities: {
-          capacity_class: "server",
-          usable_memory_mb: 105864,
-          active_model: {
-            name: "qwen3-coder",
-            active: true,
-            capacity_class: "server",
-            context_tokens: 180000,
-            output_capacity_mode: "context_window",
-          },
-        },
-        worker_health: {
-          healthy: true,
-          runtime_ready: true,
-          model_name: "qwen3-coder",
-          capabilities: {
-            capacity_class: "server",
-            max_context_tokens: 180000,
-            usable_memory_mb: 105864,
-            models: [{
-              name: "qwen3-coder",
-              active: true,
-              capacity_class: "server",
-              context_tokens: 180000,
-              output_capacity_mode: "context_window",
-            }],
-          },
-        },
-      }] });
-    }
     if (url.endsWith("/v1/chat/completions")) {
       upstreamRequest = JSON.parse(init.body);
       return new Response(new ReadableStream({
@@ -4415,9 +4375,39 @@ test("live code-project follow-ups receive the full project output budget", asyn
     fetchImpl,
   );
 
-  assert.ok(upstreamRequest.max_tokens >= 12288);
+  assert.equal(upstreamRequest.max_tokens, 6144);
   assert.match(upstreamRequest.messages[0].content, /finish every requested route/i);
   assert.match(upstreamRequest.messages.at(-1).content, /\/no_think$/);
+});
+
+test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {
+  const encoder = new TextEncoder();
+  let upstreamRequest = null;
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {}, write() { return true; },
+    end() { this.writableEnded = true; },
+  };
+  await streamChatTurn(
+    response,
+    { message: "can u show me a solidity code for decentralized exchange?", toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url, init = {}) => {
+      assert.equal(url.endsWith("/v1/chat/completions"), true);
+      upstreamRequest = JSON.parse(init.body);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"id":"chatcmpl-solidity","choices":[{"delta":{"content":"contract DEX {}"},"finish_reason":"stop"}]}\n\n' +
+            'data: [DONE]\n\n',
+          ));
+          controller.close();
+        },
+      }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+    },
+  );
+  assert.equal(upstreamRequest.max_tokens, 512);
+  assert.equal(upstreamRequest.mode, "chat");
 });
 
 test("Hermes model discovery intentionally hides heterogeneous implementation details", () => {

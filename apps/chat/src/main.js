@@ -6545,7 +6545,6 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   }
 
   const model = String(body?.model ?? config.modelOverride ?? "").trim();
-  const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona, body?.skillContext);
   if (codeProjectContinuation) {
     systemPrompt += " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections.";
@@ -6564,8 +6563,8 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     temperature: typeof body?.temperature === "number" ? body.temperature : 0.2,
     top_p: typeof body?.topP === "number" ? body.topP : 0.9,
     max_tokens: codeProjectContinuation
-      ? adaptiveTokenBudget("codeProject", 6144, capacityProfile)
-      : inferMaxTokens(message, body?.maxTokens, capacityProfile),
+      ? 6144
+      : inferMaxTokens(message, body?.maxTokens),
   };
   if (model) requestBody.model = model;
 
