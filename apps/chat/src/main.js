@@ -4417,7 +4417,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       let completionId = response.headers.get("x-mundusx-completion-id") || null;
       let finishReason = null;
       let sawDone = false;
-      const firstTokenDeadline = Date.now() + 60000;
+      const firstTokenDeadline = Date.now() + 90000;
       let unpaintedDeltaCharacters = 0;
 
       const yieldToStreamPaint = () => new Promise((resolve) => {
@@ -4432,7 +4432,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         if (output) return reader.read();
         const remaining = firstTokenDeadline - Date.now();
         if (remaining <= 0) {
-          throw new Error("MundusX did not produce a first token within 60 seconds");
+          throw new Error("MundusX did not produce a first token within 90 seconds");
         }
         let timeoutId;
         try {
@@ -4440,7 +4440,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             reader.read(),
             new Promise((_, reject) => {
               timeoutId = window.setTimeout(() => {
-                reject(new Error("MundusX did not produce a first token within 60 seconds"));
+                reject(new Error("MundusX did not produce a first token within 90 seconds"));
               }, remaining);
             }),
           ]);
@@ -4460,7 +4460,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             prompt: message,
           });
           let payload = { job_id: completionId, status: "assigned" };
-          const recoveryDeadline = Date.now() + 120000;
+          const recoveryDeadline = Date.now() + 30 * 60 * 1000;
           while (!["completed", "failed"].includes(payload.status)) {
             try {
               const polled = await fetch(
@@ -7158,6 +7158,8 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     });
   }
 
+  const model = String(body?.model ?? config.modelOverride ?? "").trim();
+  const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
   const requestBody = {
     stream: true,
     messages: [
@@ -7167,8 +7169,9 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     ],
     temperature: typeof body?.temperature === "number" ? body.temperature : 0.2,
     top_p: typeof body?.topP === "number" ? body.topP : 0.9,
-    max_tokens: inferMaxTokens(message, body?.maxTokens),
+    max_tokens: inferMaxTokens(message, body?.maxTokens, capacityProfile),
   };
+  if (model) requestBody.model = model;
 
   return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
     onComplete: async ({ content, completionId }) => {
@@ -8015,18 +8018,35 @@ function capacityProfileFromNode(node, requestedModel = "") {
   if (health.healthy === false || health.runtime_ready === false) {
     return null;
   }
-  const modelName = requestedModel || health.model_name || node.model || "";
+  const capabilityModels = nodeCapabilityModels(node);
+  const activeCapabilityModel = capabilityModels.find((model) => model?.active === true) ?? capabilityModels[0];
+  const modelName = requestedModel || health.model_name || activeCapabilityModel?.name || node.model || "";
   const gpuAvailable = positiveInteger(node.available_gpu_percent, 0);
-  const memoryMb = positiveInteger(node.available_memory_mb, 0);
-  const cudaReady = health.cuda_device_available === true || String(node.backend ?? "").toLowerCase() === "cuda";
+  const workerCapabilities = health.capabilities ?? {};
+  const nodeCapabilities = node.capabilities ?? {};
+  const memoryMb = Math.max(
+    positiveInteger(node.available_memory_mb, 0),
+    positiveInteger(nodeCapabilities.usable_memory_mb, 0),
+    positiveInteger(workerCapabilities.usable_memory_mb, 0),
+    positiveInteger(workerCapabilities.available_memory_mb, 0),
+  );
+  const backend = String(node.backend ?? health.backend ?? "").toLowerCase();
+  const cudaReady = health.cuda_device_available === true || ["cuda", "vllm"].includes(backend);
   const lowVram = String(health.notes ?? "").toLowerCase().includes("low-vram");
   const contextWindowTokens = contextWindowTokensForNode(node, modelName);
+  const maxOutputTokens = maxOutputTokensForNode(node, modelName, contextWindowTokens);
+  const capacityClass = String(
+    activeCapabilityModel?.capacity_class ?? workerCapabilities.capacity_class ?? nodeCapabilities.capacity_class ?? "",
+  ).toLowerCase();
   const base = capacityProfileFromModel(modelName, {
     gpuAvailable,
     memoryMb,
     cudaReady,
     lowVram,
     contextWindowTokens,
+    maxOutputTokens,
+    capacityClass,
+    backend,
   });
   return {
     ...base,
@@ -8041,10 +8061,17 @@ function capacityProfileFromModel(modelName, node = null) {
   const cudaReady = node?.cudaReady ?? false;
   const lowVram = node?.lowVram ?? false;
   const contextWindowTokens = positiveInteger(node?.contextWindowTokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
+  const maxOutputTokens = positiveInteger(node?.maxOutputTokens, 0) || null;
+  const capacityClass = String(node?.capacityClass ?? "").toLowerCase();
+  const backend = String(node?.backend ?? "").toLowerCase();
   let tier = "small";
   let score = modelBillions * 10;
 
-  if (!lowVram && cudaReady && modelBillions >= 14 && memoryMb >= 16000 && gpuAvailable >= 40) {
+  if (!lowVram && cudaReady && contextWindowTokens >= 32768 && memoryMb >= 32768 &&
+      (["server", "xlarge"].includes(capacityClass) || backend === "vllm")) {
+    tier = "xlarge";
+    score += 100;
+  } else if (!lowVram && cudaReady && modelBillions >= 14 && memoryMb >= 16000 && gpuAvailable >= 40) {
     tier = "xlarge";
     score += 80;
   } else if (!lowVram && cudaReady && modelBillions >= 7 && memoryMb >= 8000 && gpuAvailable >= 35) {
@@ -8058,13 +8085,13 @@ function capacityProfileFromModel(modelName, node = null) {
     score += 25;
   }
 
-  return { tier, modelBillions, gpuAvailable, memoryMb, cudaReady, lowVram, contextWindowTokens, score };
+  return { tier, modelBillions, gpuAvailable, memoryMb, cudaReady, lowVram, contextWindowTokens, maxOutputTokens, capacityClass, backend, score };
 }
 
 function contextWindowTokensForNode(node, modelName) {
   const capabilities = node?.capabilities ?? {};
   const requested = String(modelName ?? "").trim().toLowerCase();
-  const models = Array.isArray(capabilities.models) ? capabilities.models : [];
+  const models = nodeCapabilityModels(node);
   const matchingModel = models.find((model) => {
     const names = [model?.name, ...(Array.isArray(model?.aliases) ? model.aliases : [])]
       .map((value) => String(value ?? "").trim().toLowerCase())
@@ -8072,9 +8099,42 @@ function contextWindowTokensForNode(node, modelName) {
     return requested && names.includes(requested);
   });
   return positiveInteger(
-    matchingModel?.context_tokens ?? capabilities.max_context_tokens,
+    matchingModel?.context_tokens ?? node?.worker_health?.capabilities?.max_context_tokens ?? capabilities.max_context_tokens,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
   );
+}
+
+function maxOutputTokensForNode(node, modelName, contextWindowTokens) {
+  const requested = String(modelName ?? "").trim().toLowerCase();
+  const models = nodeCapabilityModels(node);
+  const matchingModel = models.find((model) => {
+    const names = [model?.name, ...(Array.isArray(model?.aliases) ? model.aliases : [])]
+      .map((value) => String(value ?? "").trim().toLowerCase())
+      .filter(Boolean);
+    return requested && names.includes(requested);
+  }) ?? models.find((model) => model?.active === true) ?? models[0];
+  const explicit = positiveInteger(matchingModel?.max_output_tokens, 0);
+  if (explicit > 0) return explicit;
+  if (String(matchingModel?.output_capacity_mode ?? "").toLowerCase() === "context_window") {
+    return Math.max(1, contextWindowTokens - CONTEXT_SAFETY_TOKENS);
+  }
+  return null;
+}
+
+function nodeCapabilityModels(node) {
+  const direct = Array.isArray(node?.capabilities?.models) ? node.capabilities.models : [];
+  const worker = Array.isArray(node?.worker_health?.capabilities?.models)
+    ? node.worker_health.capabilities.models
+    : [];
+  const active = [node?.capabilities?.active_model, node?.worker_health?.capabilities?.active_model]
+    .filter((model) => model && typeof model === "object");
+  const seen = new Set();
+  return [...direct, ...worker, ...active].filter((model) => {
+    const key = String(model?.name ?? "").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function modelSizeBillions(modelName) {
@@ -11966,7 +12026,7 @@ function normalizeExecutionMode(value) {
 function inferMaxTokens(message, explicitValue, capacityProfile = null, codeTransformationFollowUp = false) {
   const explicit = positiveInteger(explicitValue, 0);
   if (explicit > 0) {
-    return explicit;
+    return boundedTokenBudget(explicit, capacityProfile);
   }
 
   const lower = message.toLowerCase();
@@ -12041,11 +12101,22 @@ function adaptiveTokenBudget(kind, fallback, capacityProfile) {
   const tier = capacityProfile?.tier ?? "small";
   const budgets = {
     small: { normal: 512, long: 768, detailed: 1024, research: 2048, codeSmall: 1536, code: 4096, codeProject: 6144 },
-    medium: { normal: 768, long: 1024, detailed: 1536, research: 3072, codeSmall: 2048, code: 4096, codeProject: 6144 },
-    large: { normal: 1024, long: 1536, detailed: 2048, research: 4096, codeSmall: 3072, code: 4096, codeProject: 8192 },
-    xlarge: { normal: 2048, long: 3072, detailed: 4096, research: 6144, codeSmall: 4096, code: 6144, codeProject: 8192 },
+    medium: { normal: 768, long: 1024, detailed: 1536, research: 3072, codeSmall: 3072, code: 6144, codeProject: 8192 },
+    large: { normal: 1024, long: 1536, detailed: 2048, research: 4096, codeSmall: 4096, code: 8192, codeProject: 12288 },
+    xlarge: { normal: 2048, long: 3072, detailed: 4096, research: 8192, codeSmall: 6144, code: 12288, codeProject: 16384 },
   };
-  return budgets[tier]?.[kind] ?? fallback;
+  return boundedTokenBudget(budgets[tier]?.[kind] ?? fallback, capacityProfile);
+}
+
+function boundedTokenBudget(requested, capacityProfile) {
+  const contextWindow = positiveInteger(
+    capacityProfile?.contextWindowTokens,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+  );
+  const advertisedOutput = positiveInteger(capacityProfile?.maxOutputTokens, 0);
+  const contextCeiling = Math.max(1, contextWindow - CONTEXT_SAFETY_TOKENS);
+  const ceiling = Math.min(32768, contextCeiling, advertisedOutput || Number.POSITIVE_INFINITY);
+  return Math.max(1, Math.min(positiveInteger(requested, 1), ceiling));
 }
 
 function expandedAutoRetryBudget(currentBudget, capacityProfile) {
@@ -12188,6 +12259,12 @@ function looksLikeComplexSingleFileCodeRequest(lower) {
     "student",
     "enrollment",
     "record",
+    "solidity",
+    "smart contract",
+    "issuer signature",
+    "multi-signature",
+    "multisignature",
+    "kyc",
   ]);
 }
 
@@ -12218,7 +12295,7 @@ function looksLikeCompleteProgramRequest(lower) {
     "detailed program",
     "deatailed program",
     "turbo c program",
-  ]) || (
+  ]) || /\b(?:full|complete|working)\s+(?:[a-z0-9.+#-]+\s+){0,3}(?:code|program|contract)\b/i.test(lower) || (
     containsAny(lower, [
       "convert this code",
       "convert the code",

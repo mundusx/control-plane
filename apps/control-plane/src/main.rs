@@ -9115,7 +9115,7 @@ fn handle_connection_with_streams(
                             &state,
                             &live_streams,
                             &record.job_id,
-                            chat_gateway::timeout_from_env(),
+                            chat_gateway::timeout_for_job(&record),
                             |delta| {
                                 let event = match delta {
                                     Some(delta) if native_tool_turn => {
@@ -9149,7 +9149,7 @@ fn handle_connection_with_streams(
                         chat_gateway::wait_for_job_with_keepalive(
                             &state,
                             &record.job_id,
-                            chat_gateway::timeout_from_env(),
+                            chat_gateway::timeout_for_job(&record),
                             || {
                                 stream
                                     .write_all(chat_gateway::sse_keep_alive().as_bytes())
@@ -9161,7 +9161,7 @@ fn handle_connection_with_streams(
                         chat_gateway::wait_for_job(
                             &state,
                             &record.job_id,
-                            chat_gateway::timeout_from_env(),
+                            chat_gateway::timeout_for_job(&record),
                         )
                     };
                     let completed = match completed_result {
