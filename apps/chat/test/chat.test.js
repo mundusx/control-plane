@@ -572,12 +572,12 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /pendingRunnerAction = \{ pending, message, project: activeProject, conversationId \}/);
   assert.match(html, /Runner connected\. Resuming your request/);
   assert.match(html, /if \(localRunnerReady\) void resumePendingRunnerAction\(\)/);
-  assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady\)/);
+  assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady && !reconnectTimedOut\)/);
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
   assert.match(projects, /MundusX-Setup\.exe/);
-  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.60\/MundusX-Setup\.exe/);
-  assert.match(html, /const latestLocalAgentVersion = "0\.1\.60"/);
+  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.66\/MundusX-Setup\.exe/);
+  assert.match(html, /const latestLocalAgentVersion = "0\.1\.66"/);
   assert.match(html, /projectReadinessEl\.dataset\.state = updateAvailable \? "update"/);
   assert.match(html, /projectReadinessTitleEl\.textContent = updateAvailable \? "Update required"/);
   assert.match(html, /projectAgentUpdateEl\.textContent = updateAvailable[\s\S]*?"Update now"/);
