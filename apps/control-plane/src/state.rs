@@ -30,7 +30,7 @@ const CODING_DIRECT_JOB_LEASE_SECONDS: u64 = 1_800;
 const DEFAULT_QUEUED_JOB_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CRITICAL_ROLE_WAIT_SECONDS: u64 = 60;
 const DEFAULT_NODE_HEARTBEAT_STALE_SECONDS: u64 = 60;
-const READY_SINGLE_SLOT_CLAIM_GRACE_SECONDS: u64 = 45;
+const READY_CLAIM_GRACE_SECONDS: u64 = 45;
 const REDUCER_SECTION_CHARS_COMPACT: usize = 1_200;
 const REDUCER_SECTION_CHARS_STANDARD: usize = 4_000;
 const REDUCER_SECTION_CHARS_STRONG: usize = 6_000;
@@ -2467,6 +2467,9 @@ impl ControlPlaneState {
             let active_graph_node_id = selected_graph_node_id;
             if active_graph_node_id.is_none() {
                 job.max_tokens = Some(job_max_tokens_for_node(job, &claiming_node));
+                if let Some(direct_node) = job.graph.nodes.first_mut() {
+                    direct_node.attempt_count = direct_node.attempt_count.saturating_add(1);
+                }
             }
             if graph_node_is_merge(&job.graph, active_graph_node_id.as_deref())
                 && reducer_profile(&claiming_node) == ReducerProfile::Compact
@@ -3001,6 +3004,14 @@ impl ControlPlaneState {
         let Some(now_seconds) = parse_unix_seconds(now) else {
             return (Vec::new(), Vec::new());
         };
+        let ready_heartbeats = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.reported_state == AgentState::Ready)
+            .filter_map(|(node_id, node)| {
+                parse_unix_seconds(&node.updated_at).map(|updated_at| (node_id.clone(), updated_at))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut expired = Vec::new();
 
         for job in self.jobs.values_mut() {
@@ -3014,19 +3025,53 @@ impl ControlPlaneState {
                 continue;
             };
             let lease_seconds = direct_job_lease_seconds_for(job.scheduling_requirements.task_type);
-            if now_seconds.saturating_sub(assigned_at_seconds) < lease_seconds {
-                continue;
-            }
-
+            let assignment_age = now_seconds.saturating_sub(assigned_at_seconds);
             let node_id = job
                 .assigned_node_id
                 .clone()
                 .unwrap_or_else(|| "unknown node".to_string());
-            let error = format!(
-                "direct assignment timed out after {lease_seconds}s on {node_id}; the worker did not return a terminal result"
-            );
-            job.status = JobStatus::Failed;
-            job.completed_at = Some(now.to_string());
+            let abandoned_ready_claim = ready_heartbeats
+                .get(&node_id)
+                .is_some_and(|heartbeat_at| *heartbeat_at > assigned_at_seconds)
+                && assignment_age >= READY_CLAIM_GRACE_SECONDS;
+            if assignment_age < lease_seconds && !abandoned_ready_claim {
+                continue;
+            }
+
+            let direct_attempt = job
+                .graph
+                .nodes
+                .first()
+                .map(|node| node.attempt_count)
+                .unwrap_or(1);
+            let max_attempts = job
+                .graph
+                .nodes
+                .first()
+                .map(|node| node.max_attempts)
+                .unwrap_or(1);
+            let lease_expired = assignment_age >= lease_seconds;
+            let retrying = abandoned_ready_claim && !lease_expired && direct_attempt < max_attempts;
+            let error = if abandoned_ready_claim && !lease_expired {
+                format!(
+                    "node reported ready without completing its direct assignment after {}s on {node_id}",
+                    READY_CLAIM_GRACE_SECONDS
+                )
+            } else {
+                format!(
+                    "direct assignment timed out after {lease_seconds}s on {node_id}; the worker did not return a terminal result"
+                )
+            };
+            job.status = if retrying {
+                JobStatus::Queued
+            } else {
+                JobStatus::Failed
+            };
+            job.completed_at = if retrying {
+                None
+            } else {
+                Some(now.to_string())
+            };
             job.assigned_node_id = None;
             job.assigned_at = None;
             job.worker_id = None;
@@ -3035,13 +3080,25 @@ impl ControlPlaneState {
             job.error = Some(error.clone());
             job.active_graph_node_id = None;
             job.graph.updated_at = now.to_string();
-            job.graph.merge_error = Some(error.clone());
-            expired.push((job.clone(), node_id, assigned_at, lease_seconds, error));
+            job.graph.status = if retrying {
+                JobGraphStatus::Created
+            } else {
+                JobGraphStatus::Failed
+            };
+            job.graph.merge_error = if retrying { None } else { Some(error.clone()) };
+            expired.push((
+                job.clone(),
+                node_id,
+                assigned_at,
+                lease_seconds,
+                error,
+                retrying,
+            ));
         }
 
         let released_nodes = expired
             .iter()
-            .map(|(_, node_id, _, _, _)| node_id.clone())
+            .map(|(_, node_id, _, _, _, _)| node_id.clone())
             .collect::<Vec<_>>();
         for node_id in released_nodes {
             let remaining_assignments = self.active_assignment_count_for_node(&node_id);
@@ -3054,16 +3111,21 @@ impl ControlPlaneState {
         }
 
         let mut changed_events = Vec::new();
-        for (job, node_id, assigned_at, lease_seconds, error) in &expired {
+        for (job, node_id, assigned_at, lease_seconds, error, retrying) in &expired {
             changed_events.push(self.record_job_event(
                 Some(node_id.clone()),
                 Some(job.job_id.clone()),
-                "job_assignment_expired",
+                if *retrying {
+                    "job_assignment_requeued"
+                } else {
+                    "job_assignment_expired"
+                },
                 serde_json::json!({
-                    "status": JobStatus::Failed,
+                    "status": job.status,
                     "assigned_at": assigned_at,
                     "completed_at": now,
                     "lease_seconds": lease_seconds,
+                    "retrying": retrying,
                     "error": error,
                 }),
                 now.to_string(),
@@ -3074,7 +3136,10 @@ impl ControlPlaneState {
             self.reevaluate_queued_jobs();
         }
         (
-            expired.into_iter().map(|(job, _, _, _, _)| job).collect(),
+            expired
+                .into_iter()
+                .map(|(job, _, _, _, _, _)| job)
+                .collect(),
             changed_events,
         )
     }
@@ -3121,7 +3186,7 @@ impl ControlPlaneState {
                     .and_then(|node_id| ready_single_slot_heartbeats.get(node_id))
                     .is_some_and(|heartbeat_at| *heartbeat_at > assigned_at);
                 let abandoned_ready_claim = node_reported_ready_after_assignment
-                    && assignment_age >= READY_SINGLE_SLOT_CLAIM_GRACE_SECONDS;
+                    && assignment_age >= READY_CLAIM_GRACE_SECONDS;
                 if assignment_age < lease_seconds && !abandoned_ready_claim {
                     continue;
                 }
@@ -3134,7 +3199,7 @@ impl ControlPlaneState {
                 let stale_error = if abandoned_ready_claim {
                     format!(
                         "single-slot node reported ready without completing its assignment after {}s on {}",
-                        READY_SINGLE_SLOT_CLAIM_GRACE_SECONDS,
+                        READY_CLAIM_GRACE_SECONDS,
                         stale_node_id.as_deref().unwrap_or("unknown node")
                     )
                 } else {
@@ -10138,7 +10203,9 @@ mod tests {
             .job
             .expect("direct claim");
 
-        state.heartbeat(ready_heartbeat("node-1", "602"), "602".to_string());
+        let mut busy = ready_heartbeat("node-1", "602");
+        busy.agent_state = AgentState::Busy;
+        state.heartbeat(busy, "602".to_string());
         let still_running = state.run_maintenance_with_nodes("602");
         assert!(still_running.changed_jobs.is_empty());
         assert!(still_running.changed_events.is_empty());
@@ -10185,6 +10252,40 @@ mod tests {
     }
 
     #[test]
+    fn ready_heartbeat_requeues_an_abandoned_direct_claim() {
+        let mut state = ready_state();
+        state.submit_job(
+            classification_request("Explain dependency injection."),
+            "2".to_string(),
+        );
+        state
+            .claim_job("node-1", "3".to_string())
+            .job
+            .expect("direct claim");
+
+        state.heartbeat(ready_heartbeat("node-1", "49"), "49".to_string());
+        let recovered = state.run_maintenance_with_nodes("49");
+
+        assert_eq!(recovered.changed_jobs.len(), 1);
+        assert_eq!(recovered.changed_events.len(), 1);
+        assert_eq!(
+            recovered.changed_events[0].event_type,
+            "job_assignment_requeued"
+        );
+        let job = state.jobs.get("job-1").expect("requeued direct job");
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.assigned_node_id, None);
+        assert_eq!(job.completed_at, None);
+        assert_eq!(job.graph.nodes[0].attempt_count, 1);
+
+        state
+            .claim_job("node-1", "50".to_string())
+            .job
+            .expect("retry claim");
+        assert_eq!(state.jobs["job-1"].graph.nodes[0].attempt_count, 2);
+    }
+
+    #[test]
     fn direct_coding_assignment_keeps_a_thirty_minute_lease() {
         let mut state = ready_state();
         state.submit_job(
@@ -10199,7 +10300,9 @@ mod tests {
             .job
             .expect("direct coding claim");
 
-        state.heartbeat(ready_heartbeat("node-1", "604"), "604".to_string());
+        let mut busy = ready_heartbeat("node-1", "604");
+        busy.agent_state = AgentState::Busy;
+        state.heartbeat(busy, "604".to_string());
         state.run_maintenance("604");
         assert_eq!(state.jobs["job-1"].status, JobStatus::Assigned);
 
