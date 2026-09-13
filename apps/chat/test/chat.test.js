@@ -4315,6 +4315,91 @@ test("live MundusX Chat stream preserves history and persists one user and assis
   assert.equal(writes[1].jobId, "chatcmpl-browser");
 });
 
+test("live code-project follow-ups receive the full project output budget", async () => {
+  const encoder = new TextEncoder();
+  let upstreamRequest = null;
+  const response = {
+    writableEnded: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    write: () => true,
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.endsWith("/v1/nodes?page=1&page_size=25")) {
+      return jsonResponse({ items: [{
+        node_id: "node-gx10",
+        state: "ready",
+        reported_state: "ready",
+        backend: "vllm",
+        policy_allowed: true,
+        computed_policy_allowed: true,
+        available_memory_mb: 8000,
+        available_gpu_percent: 70,
+        capabilities: {
+          capacity_class: "server",
+          usable_memory_mb: 105864,
+          active_model: {
+            name: "qwen3-coder",
+            active: true,
+            capacity_class: "server",
+            context_tokens: 180000,
+            output_capacity_mode: "context_window",
+          },
+        },
+        worker_health: {
+          healthy: true,
+          runtime_ready: true,
+          model_name: "qwen3-coder",
+          capabilities: {
+            capacity_class: "server",
+            max_context_tokens: 180000,
+            usable_memory_mb: 105864,
+            models: [{
+              name: "qwen3-coder",
+              active: true,
+              capacity_class: "server",
+              context_tokens: 180000,
+              output_capacity_mode: "context_window",
+            }],
+          },
+        },
+      }] });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      upstreamRequest = JSON.parse(init.body);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"id":"chatcmpl-project","choices":[{"delta":{"content":"Complete project."},"finish_reason":"stop"}]}\n\n' +
+            "data: [DONE]\n\n",
+          ));
+          controller.close();
+        },
+      }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  await streamChatTurn(
+    response,
+    {
+      message: "nice how about now we create schools also, then connect enrollment, courses, and subjects?",
+      historyMessages: [
+        { role: "user", content: "Create a complete Node.js student CRUD API." },
+        { role: "assistant", content: "```javascript\nconst app = express();\napp.get('/students', handler);\n```" },
+      ],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.ok(upstreamRequest.max_tokens >= 12288);
+  assert.match(upstreamRequest.messages[0].content, /finish every requested route/i);
+  assert.match(upstreamRequest.messages.at(-1).content, /\/no_think$/);
+});
+
 test("Hermes model discovery intentionally hides heterogeneous implementation details", () => {
   const result = openAiModelsResponse(configFromEnv({ MUNDUSX_CHAT_MODEL: "physical/private-model" }));
   assert.deepEqual(result.data, [{
