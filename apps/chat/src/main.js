@@ -2723,14 +2723,34 @@ export function page(config = configFromEnv()) {
       if (projectReadinessEl) projectReadinessEl.hidden = false;
       if (projectReadinessTitleEl) projectReadinessTitleEl.textContent = "Checking local agent…";
       if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Looking for MundusX Agent or Hermes on your connected computer.";
-      const [agentResponse, runnerResponse] = await Promise.all([
-        fetch("/api/agent/status"),
-        fetch("/api/harness/runners"),
+      const fetchLocalStatus = async (path, fallbackMessage) => {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 8000);
+        try {
+          const response = await fetch(path, { signal: controller.signal });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || fallbackMessage);
+          return body;
+        } catch (error) {
+          if (error?.name === "AbortError") throw new Error(fallbackMessage + " (timed out)");
+          throw error;
+        } finally {
+          window.clearTimeout(timer);
+        }
+      };
+      const [agentResult, runnerResult] = await Promise.allSettled([
+        fetchLocalStatus("/api/agent/status", "Agent status could not be loaded"),
+        fetchLocalStatus("/api/harness/runners", "Runner status could not be loaded"),
       ]);
-      const agentStatus = await agentResponse.json();
-      const payload = await runnerResponse.json();
-      if (!agentResponse.ok) throw new Error(agentStatus.error || "Agent status could not be loaded");
-      if (!runnerResponse.ok) throw new Error(payload.error || "Runner status could not be loaded");
+      if (agentResult.status === "rejected" && runnerResult.status === "rejected") {
+        throw new Error(agentResult.reason?.message || runnerResult.reason?.message || "Local runner status unavailable");
+      }
+      const agentStatus = agentResult.status === "fulfilled"
+        ? agentResult.value
+        : { online: false, connections: [] };
+      const payload = runnerResult.status === "fulfilled"
+        ? runnerResult.value
+        : { runners: [], projects: [] };
       lastLocalAgentStatus = agentStatus;
       const connections = Array.isArray(agentStatus.connections) ? agentStatus.connections : [];
       const onlineConnections = connections.filter((connection) => connection.online);
