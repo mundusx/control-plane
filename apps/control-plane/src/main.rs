@@ -697,6 +697,24 @@ fn should_enable_live_stream(
         && streaming_node_available
 }
 
+fn chat_job_execution_mode(
+    wants_stream: bool,
+    mode_selected: bool,
+    metadata_request: bool,
+    sensitive_history: bool,
+    native_tool_turn: bool,
+) -> JobExecutionMode {
+    // OpenAI-compatible streaming must remain a single worker turn. A graph
+    // cannot expose one coherent token stream while its planner and reducer
+    // stages are still running, so auto decomposition makes ordinary chat look
+    // stalled until the complete graph has finished.
+    if wants_stream || mode_selected || metadata_request || sensitive_history || native_tool_turn {
+        JobExecutionMode::Single
+    } else {
+        JobExecutionMode::Auto
+    }
+}
+
 fn job_artifacts_path(job_id: &str) -> String {
     format!("/v1/jobs/{job_id}/artifacts")
 }
@@ -8913,15 +8931,13 @@ fn handle_connection_with_streams(
                         preferred_backend: crate::contracts::Backend::Auto,
                         routing_mode: RoutingMode::Normal,
                         runtime_mode: RuntimeMode::Local,
-                        execution_mode: if mode.is_some() || metadata_request || sensitive_history {
-                            JobExecutionMode::Single
-                        } else {
-                            if native_tool_turn {
-                                JobExecutionMode::Single
-                            } else {
-                                JobExecutionMode::Auto
-                            }
-                        },
+                        execution_mode: chat_job_execution_mode(
+                            wants_stream,
+                            mode.is_some(),
+                            metadata_request,
+                            sensitive_history,
+                            native_tool_turn,
+                        ),
                         // Plan without forcing single execution; eligible direct jobs are
                         // upgraded to live streaming after the graph decision is known.
                         stream: false,
@@ -9663,7 +9679,8 @@ mod tests {
         parse_conversation_path, parse_harness_attempt_route,
         parse_harness_attempt_transition_route, parse_harness_task_route, parse_request,
         read_http_request, requires_device_signature, requires_operator_auth, resume_token_matches,
-        resume_token_sha256, select_harness_runner, should_enable_live_stream,
+        chat_job_execution_mode, resume_token_sha256, select_harness_runner,
+        should_enable_live_stream,
         status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
         HarnessAttemptRoute, HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource,
         SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
@@ -9755,6 +9772,18 @@ mod tests {
         let mut graph = direct;
         graph.graph_execution_enabled = true;
         assert!(!should_enable_live_stream(true, false, None, &graph, true));
+    }
+
+    #[test]
+    fn streamed_chat_uses_one_direct_job_instead_of_an_auto_graph() {
+        assert_eq!(
+            chat_job_execution_mode(true, false, false, false, false),
+            JobExecutionMode::Single
+        );
+        assert_eq!(
+            chat_job_execution_mode(false, false, false, false, false),
+            JobExecutionMode::Auto
+        );
     }
 
     fn chat_message(role: &str, content: &str) -> ChatMessage {
