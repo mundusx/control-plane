@@ -8160,25 +8160,28 @@ fn handle_connection_with_streams(
         }
         ("GET", "/v1/jobs/next") => {
             if let Some(node_id) = query_param(query, "node_id") {
-                let mut guard = state.lock().expect("state lock");
-                let claim = guard.claim_job(node_id, now_unix_seconds());
-                if let Some(job) = claim.job.as_ref() {
-                    let event = guard.record_job_event(
-                        Some(node_id.to_string()),
-                        Some(job.job_id.clone()),
-                        "job_claimed",
-                        serde_json::to_value(job).expect("json"),
-                        now_unix_seconds(),
-                    );
-                    if let Some(db) = supabase.as_ref() {
+                let (claim, event) = {
+                    let mut guard = state.lock().expect("state lock");
+                    let claim = guard.claim_job(node_id, now_unix_seconds());
+                    let event = claim.job.as_ref().map(|job| {
+                        guard.record_job_event(
+                            Some(node_id.to_string()),
+                            Some(job.job_id.clone()),
+                            "job_claimed",
+                            serde_json::to_value(job).expect("json"),
+                            now_unix_seconds(),
+                        )
+                    });
+                    (claim, event)
+                };
+                if let (Some(db), Some(event)) = (supabase.cloned(), event) {
+                    let sync_status = Arc::clone(&sync_status);
+                    thread::spawn(move || {
                         if let Err(error) = db.record_job_event(&event) {
                             eprintln!("database claim sync skipped: {error}");
                             note_supabase_failure(&sync_status, error);
                         }
-                    }
-                }
-                if let Err(error) = save_state(&guard) {
-                    eprintln!("failed to save control-plane state: {error}");
+                    });
                 }
                 json_response("200 OK", serde_json::to_value(claim).expect("json"))
             } else {
@@ -8573,25 +8576,19 @@ fn handle_connection_with_streams(
                     .expect("sync status lock")
                     .claim_heartbeat_checkpoint(&node_id, checkpoint_at);
                 if checkpoint_due {
-                    let mut checkpoint_failed = false;
-                    if let Ok(guard) = state.lock() {
-                        if let Err(error) = save_state(&guard) {
-                            eprintln!("failed to checkpoint control-plane state: {error}");
-                            checkpoint_failed = true;
-                        }
-                    }
-                    if let Some(db) = supabase.as_ref() {
-                        if let Err(error) = db.record_heartbeat_checkpoint(&record) {
-                            eprintln!("database heartbeat checkpoint skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
-                            checkpoint_failed = true;
-                        }
-                    }
-                    if checkpoint_failed {
-                        sync_status
-                            .lock()
-                            .expect("sync status lock")
-                            .release_heartbeat_checkpoint(&node_id, checkpoint_at);
+                    if let Some(db) = supabase.cloned() {
+                        let sync_status = Arc::clone(&sync_status);
+                        let checkpoint_record = record.clone();
+                        thread::spawn(move || {
+                            if let Err(error) = db.record_heartbeat_checkpoint(&checkpoint_record) {
+                                eprintln!("database heartbeat checkpoint skipped: {error}");
+                                note_supabase_failure(&sync_status, error);
+                                sync_status
+                                    .lock()
+                                    .expect("sync status lock")
+                                    .release_heartbeat_checkpoint(&node_id, checkpoint_at);
+                            }
+                        });
                     }
                 }
                 json_response("200 OK", serde_json::to_value(record).expect("json"))
@@ -9274,6 +9271,9 @@ fn handle_connection_with_streams(
                 let completion_clone = completion.clone();
                 let mut guard = state.lock().expect("state lock");
                 let record = guard.complete_job(completion, now_unix_seconds());
+                let mut completion_event = None;
+                let mut credit_award = None;
+                let mut credit_event = None;
                 if let Some(job) = record.as_ref() {
                     let completed_at = job.completed_at.clone().unwrap_or_else(now_unix_seconds);
                     let completed_graph_node = job
@@ -9286,47 +9286,51 @@ fn handle_connection_with_streams(
                         job.status,
                         completed_graph_node.map(|node| node.status),
                     );
-                    let event = guard.record_job_event(
+                    completion_event = Some(guard.record_job_event(
                         Some(completion_clone.node_id.clone()),
                         Some(job.job_id.clone()),
                         event_type,
                         serde_json::to_value(job).expect("json"),
                         now_unix_seconds(),
-                    );
-                    if let Some(db) = supabase.as_ref() {
-                        if let Err(error) = db.record_job_event(&event) {
-                            eprintln!("database completion event skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
-                        }
-                    }
+                    ));
                     if matches!(job.status, crate::contracts::JobStatus::Completed)
                         || job.last_completed_graph_node_id.is_some()
                     {
                         if let Some(award) = guard.award_job_reward(job, completed_at) {
-                            let award_event = guard.record_job_event(
+                            credit_event = Some(guard.record_job_event(
                                 award.device_id.clone(),
                                 award.job_id.clone(),
                                 "credit_awarded",
                                 serde_json::to_value(&award).expect("json"),
                                 award.created_at.clone(),
-                            );
-                            if let Some(db) = supabase.as_ref() {
-                                if let Err(error) = db.record_credit_award(&award) {
-                                    eprintln!("database credit sync skipped: {error}");
-                                    note_supabase_failure(&sync_status, error);
-                                }
-                                if let Err(error) = db.record_job_event(&award_event) {
-                                    eprintln!("database credit event skipped: {error}");
-                                    note_supabase_failure(&sync_status, error);
-                                }
-                            }
+                            ));
+                            credit_award = Some(award);
                         }
                     }
                 }
                 if let Err(error) = save_state(&guard) {
                     eprintln!("failed to save control-plane state: {error}");
                 }
+                drop(guard);
                 if let Some(db) = supabase.as_ref() {
+                    if let Some(event) = completion_event.as_ref() {
+                        if let Err(error) = db.record_job_event(event) {
+                            eprintln!("database completion event skipped: {error}");
+                            note_supabase_failure(&sync_status, error);
+                        }
+                    }
+                    if let Some(award) = credit_award.as_ref() {
+                        if let Err(error) = db.record_credit_award(award) {
+                            eprintln!("database credit sync skipped: {error}");
+                            note_supabase_failure(&sync_status, error);
+                        }
+                    }
+                    if let Some(event) = credit_event.as_ref() {
+                        if let Err(error) = db.record_job_event(event) {
+                            eprintln!("database credit event skipped: {error}");
+                            note_supabase_failure(&sync_status, error);
+                        }
+                    }
                     if let Some(job) = record.as_ref() {
                         if matches!(
                             job.status,
