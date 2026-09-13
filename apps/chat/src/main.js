@@ -4746,6 +4746,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         if (finishReason === "error") {
           throw new Error("MundusX replaced an invalid streamed draft with a validated result");
         }
+        if (finishReason === "length") {
+          streamState.status = "failed";
+          streamState.error = "The model reached its output limit before the response was complete. Retry will use the larger project budget.";
+          renderConversationStreamState(streamState);
+          return true;
+        }
         if (!output.trim()) throw new Error("MundusX completed without assistant output");
         // Do not replace the streaming node with the completed view until the
         // browser has painted the last received delta at least once.
@@ -7354,6 +7360,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       .filter((entry) => entry.content)
       .slice(-20)
     : [];
+  const codeProjectContinuation = isCodeProjectContinuation(message, historyMessages);
   if (conversationId) {
     await appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
       console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
@@ -7362,10 +7369,14 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
 
   const model = String(body?.model ?? config.modelOverride ?? "").trim();
   const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
+  let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona, body?.skillContext);
+  if (codeProjectContinuation) {
+    systemPrompt += " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections.";
+  }
   const requestBody = {
     stream: true,
     messages: [
-      { role: "system", content: buildChatSystemPrompt(message, body?.voicePersona, body?.skillContext) },
+      { role: "system", content: systemPrompt },
       ...historyMessages,
       // Qwen3 workers released before node-agent 0.1.40 do not pass
       // chat_template_kwargs to vLLM. The soft switch keeps live chat from
@@ -7374,7 +7385,9 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     ],
     temperature: typeof body?.temperature === "number" ? body.temperature : 0.2,
     top_p: typeof body?.topP === "number" ? body.topP : 0.9,
-    max_tokens: inferMaxTokens(message, body?.maxTokens, capacityProfile),
+    max_tokens: codeProjectContinuation
+      ? adaptiveTokenBudget("codeProject", 6144, capacityProfile)
+      : inferMaxTokens(message, body?.maxTokens, capacityProfile),
   };
   if (model) requestBody.model = model;
 
@@ -13028,6 +13041,18 @@ function isCodeTransformationFollowUp(message, history) {
   return Array.isArray(history) && history.some((entry) =>
     looksLikeCodeContent(entry?.content) ||
     looksLikeCompleteProgramRequest(String(entry?.content ?? "").toLowerCase())
+  );
+}
+
+function isCodeProjectContinuation(message, history) {
+  const lower = String(message ?? "").toLowerCase();
+  const asksToExtendProject = /\b(?:add|build|connect|create|extend|implement|include|integrate|update)\b/.test(lower);
+  if (!asksToExtendProject || !Array.isArray(history)) {
+    return false;
+  }
+  return history.some((entry) =>
+    looksLikeCodeContent(entry?.content) ||
+    looksLikeCompleteProgramRequest(String(entry?.content ?? "").toLowerCase()),
   );
 }
 
