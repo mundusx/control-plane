@@ -4239,9 +4239,8 @@ test("streaming relay exposes the first upstream delta before completion", async
   assert.equal(events.at(-1).type, "end");
 });
 
-test("normal Chat streams direct even when a prompt could use discovery", async () => {
+test("normal Chat answers a focused weather request directly from wttr.in", async () => {
   const events = [];
-  const encoder = new TextEncoder();
   const response = {
     writableEnded: false,
     writeHead: (status, headers) => events.push({ status, headers }),
@@ -4255,30 +4254,29 @@ test("normal Chat streams direct even when a prompt could use discovery", async 
   const requests = [];
   const result = await streamChatTurn(
     response,
-    { message: "Weather in Warsaw?", toolMode: false },
+    { message: "What's the weaather today in Stuttgart?", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
-      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
-      if (url.endsWith("/v1/chat/completions")) {
-        requests.push(JSON.parse(init.body));
-        return new Response(new ReadableStream({
-          start(controller) {
-            controller.enqueue(encoder.encode(
-              'data: {"id":"chatcmpl-weather","choices":[{"delta":{"content":"Direct answer."},"finish_reason":null}]}\n\n' +
-              'data: {"id":"chatcmpl-weather","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
-              'data: [DONE]\n\n',
-            ));
-            controller.close();
-          },
-        }), { status: 200 });
+      requests.push({ url, init });
+      if (url === "https://wttr.in/Stuttgart?format=j1") {
+        return jsonResponse({
+          nearest_area: [{ areaName: [{ value: "Stuttgart" }], region: [{ value: "Baden-Wurttemberg" }], country: [{ value: "Germany" }] }],
+          current_condition: [{
+            weatherDesc: [{ value: "Sunny" }], temp_C: "21", temp_F: "70",
+            FeelsLikeC: "20", FeelsLikeF: "68", humidity: "45", windspeedKmph: "8",
+            localObsDateTime: "2026-09-14 12:00 PM",
+          }],
+        });
       }
       throw new Error(`unexpected URL ${url}`);
     },
   );
-  assert.equal(result.content, "Direct answer.");
+  assert.match(result.content, /Weather for Stuttgart, Baden-Wurttemberg, Germany: Sunny/);
+  assert.equal(result.tool, "weather");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].stream, true);
-  assert.equal(requests[0].mode, "chat");
+  assert.equal(requests[0].url, "https://wttr.in/Stuttgart?format=j1");
+  assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "direct-tool");
+  assert.match(events.map((event) => String(event.value ?? "")).join(""), /data: \[DONE\]/);
   assert.equal(response.writableEnded, true);
 });
 
