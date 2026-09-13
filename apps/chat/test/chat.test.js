@@ -110,6 +110,10 @@ test("renders a usable chat page", () => {
   assert.doesNotMatch(html, /Welcome to[\s\S]*MundusX[\s\S]*Chat/);
   assert.doesNotMatch(html, /Example Questions/);
   assert.match(html, /id="chat-form"/);
+  assert.match(html, /monitorHarnessTask/);
+  assert.match(html, /Connection interrupted · reconnecting to the same task/);
+  assert.match(html, /\/api\/harness\/tasks\/.*\/cancel/);
+  assert.match(html, /Changes prepared and validation finished/);
   assert.match(html, /<textarea id="prompt" name="prompt" rows="1"/);
   assert.match(html, /grid-template-columns: auto minmax\(0, 1fr\) auto auto/);
   assert.match(html, /#enter-to-send-toggle \{ display: none; \}/);
