@@ -2828,7 +2828,7 @@ export function page(config = configFromEnv()) {
       if (body) body.textContent = "Runner connected. Resuming your request…";
       setStatus("working", "Working");
       try {
-        await runActiveProjectTask(action.pending, action.message, action.project);
+        await runActiveProjectTask(action.pending, action.message, action.project, action.conversationId);
         syncNetworkRuntimeStatus(true);
       } catch (error) {
         failConversationStream(action.conversationId, action.pending, action.message, error);
@@ -3516,7 +3516,7 @@ export function page(config = configFromEnv()) {
             await openProjects({ showRunnerSetup: true, project: activeProject });
             return;
           }
-          await runActiveProjectTask(pending, message, activeProject);
+          await runActiveProjectTask(pending, message, activeProject, conversationId);
           syncNetworkRuntimeStatus(true);
           return;
         }
@@ -3548,7 +3548,7 @@ export function page(config = configFromEnv()) {
       }
     });
 
-    async function runActiveProjectTask(pending, message, project) {
+    async function runActiveProjectTask(pending, message, project, conversationId) {
       const projectTemplate = inferProjectTemplate(message);
       const response = await fetch("/api/harness/tasks", {
         method: "POST",
@@ -3563,9 +3563,203 @@ export function page(config = configFromEnv()) {
       });
       const payload = await readApiPayload(response, "project task submission failed");
       if (!response.ok) throw new Error(payload.error || "Project task submission failed");
-      const body = pending.querySelector(".message-body");
-      if (body) body.textContent = "Queued work for " + project.slug + ". Task " + payload.task_id + " is awaiting UAT execution approval.";
+      const initial = { task: { task_id: payload.task_id, state: payload.state || "created" } };
+      renderHarnessTaskProgress(pending, initial, project, { conversationId });
+      void monitorHarnessTask(pending, payload.task_id, project, conversationId).catch((error) => {
+        const body = pending.querySelector(".message-body");
+        if (body) body.textContent = "Harness task " + payload.task_id + " could not be monitored: " + error.message;
+        if (!conversationId || activeHistoryId === conversationId) setStatus("error", "Harness error");
+      });
       setStatus("ready", "Project queued");
+    }
+
+    async function monitorHarnessTask(pending, taskId, project, conversationId) {
+      let payload = { task: { task_id: taskId, state: "created" } };
+      let recoveryDeadline = 0;
+      let cancellationRequested = false;
+      const startedAt = Date.now();
+      const cancelTask = async () => {
+        if (cancellationRequested || harnessTaskSettled(payload)) return;
+        cancellationRequested = true;
+        renderHarnessTaskProgress(pending, payload, project, {
+          conversationId, startedAt, cancelling: true, onCancel: cancelTask,
+        });
+        const response = await fetch("/api/harness/tasks/" + encodeURIComponent(taskId) + "/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const cancelled = await readApiPayload(response, "Harness cancellation failed");
+        if (!response.ok) {
+          cancellationRequested = false;
+          throw new Error(cancelled.error || "Harness cancellation failed");
+        }
+        payload = { ...payload, task: cancelled };
+        renderHarnessTaskProgress(pending, payload, project, { conversationId, startedAt });
+      };
+
+      while (!harnessTaskSettled(payload)) {
+        await sleep(1000);
+        try {
+          const response = await fetch("/api/harness/tasks/" + encodeURIComponent(taskId));
+          payload = await readApiPayload(response, "Harness task poll failed");
+          if (!response.ok) {
+            const error = new Error(payload.error || "Harness task poll failed");
+            error.status = response.status;
+            throw error;
+          }
+          recoveryDeadline = 0;
+        } catch (pollError) {
+          const status = Number(pollError?.status);
+          const retryable = !Number.isFinite(status) || [408, 425, 429, 500, 502, 503, 504].includes(status);
+          recoveryDeadline ||= Date.now() + 30 * 60 * 1000;
+          if (!retryable || Date.now() >= recoveryDeadline) throw pollError;
+          renderHarnessTaskProgress(pending, payload, project, {
+            conversationId, startedAt, reconnecting: true,
+            cancelling: cancellationRequested, onCancel: cancelTask,
+          });
+          continue;
+        }
+        renderHarnessTaskProgress(pending, payload, project, {
+          conversationId, startedAt, cancelling: cancellationRequested, onCancel: cancelTask,
+        });
+      }
+      renderHarnessTaskProgress(pending, payload, project, { conversationId, startedAt });
+    }
+
+    function harnessTaskSettled(payload) {
+      const state = String(payload?.task?.state || "").toLowerCase();
+      if (["completed", "failed", "cancelled", "expired"].includes(state)) return true;
+      if (state !== "awaiting_approval") return false;
+      return (payload?.attempts || []).some((attempt) => attempt?.state === "succeeded")
+        || (payload?.artifacts || []).length > 0;
+    }
+
+    function renderHarnessTaskProgress(pending, payload, project, options = {}) {
+      const body = pending.querySelector(".message-body");
+      if (!body) return;
+      const task = payload?.task || {};
+      const state = String(task.state || "created").toLowerCase();
+      const attempts = Array.isArray(payload?.attempts) ? payload.attempts : [];
+      const attempt = attempts.find((item) => item?.attempt_id === task.current_attempt_id) || attempts.at(-1) || {};
+      const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
+      const validations = Array.isArray(payload?.validations) ? payload.validations : [];
+      const toolCalls = Array.isArray(payload?.tool_calls) ? payload.tool_calls : [];
+      const auditEvents = Array.isArray(payload?.audit_events) ? payload.audit_events : [];
+      const changedPaths = [...new Set(artifacts.flatMap((artifact) => Array.isArray(artifact?.changed_paths) ? artifact.changed_paths : []))].slice(0, 20);
+      const labels = {
+        created: ["Waiting for execution approval", "The task is saved and can be executed after approval."],
+        queued: ["Waiting for a runner", "The approved task is queued for an available Harness runner."],
+        reserved: ["Runner reserved", "Capacity is reserved for this task."],
+        preparing: ["Preparing the workspace", "Harness is creating an isolated project workspace."],
+        running: ["Working on project files", "Harness is applying the requested changes."],
+        validating: ["Validating the changes", "Harness is running the configured checks."],
+        awaiting_approval: ["Changes prepared and validation finished", "Review the evidence before applying or promoting the result."],
+        retry_pending: ["Preparing another attempt", "Harness kept the task and will retry it safely."],
+        cancelling: ["Stopping safely", "Harness is stopping the active operation."],
+        completed: ["Task completed", "Harness completed the requested work."],
+        failed: ["Task failed", task.terminal_code || attempt.failure_code || "Harness could not complete this task."],
+        cancelled: ["Task stopped", "The Harness task was cancelled."],
+        expired: ["Task expired", "The task exceeded its allowed lifetime."],
+      };
+      const status = options.cancelling
+        ? labels.cancelling
+        : options.reconnecting
+          ? ["Connection interrupted · reconnecting to the same task", "Your task remains saved; MundusX is checking it again without resubmitting."]
+          : labels[state] || ["Checking task progress", "Harness is reporting its current state."];
+
+      body.replaceChildren();
+      const headingRow = document.createElement("div");
+      headingRow.className = "agent-progress-heading";
+      const orb = document.createElement("span");
+      orb.className = "agent-progress-orb";
+      orb.setAttribute("aria-hidden", "true");
+      const heading = document.createElement("strong");
+      heading.textContent = "Harness · " + (project?.slug || "Project");
+      headingRow.append(orb, heading);
+      body.appendChild(headingRow);
+
+      const timeline = document.createElement("div");
+      timeline.className = "agent-progress-timeline";
+      const current = document.createElement("div");
+      current.className = "agent-progress-current";
+      const dot = document.createElement("span");
+      dot.className = "agent-progress-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const currentText = document.createElement("span");
+      currentText.textContent = status[0];
+      current.append(dot, currentText);
+      timeline.appendChild(current);
+      const purpose = document.createElement("p");
+      purpose.className = "meta";
+      purpose.textContent = status[1];
+      timeline.appendChild(purpose);
+
+      const meta = document.createElement("div");
+      meta.className = "agent-progress-meta";
+      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - Number(options.startedAt || Date.now())) / 1000));
+      const facts = ["Elapsed " + elapsedSeconds + "s", "Task " + String(task.task_id || "").slice(0, 18)];
+      const modelTurns = Number(attempt.model_turns || 0);
+      const recordedToolCalls = Math.max(Number(attempt.tool_calls || 0), toolCalls.length);
+      if (modelTurns) facts.push(modelTurns + " model turn" + (modelTurns === 1 ? "" : "s"));
+      if (recordedToolCalls) facts.push(recordedToolCalls + " tool call" + (recordedToolCalls === 1 ? "" : "s"));
+      if (validations.length) facts.push(validations.length + " validation" + (validations.length === 1 ? "" : "s"));
+      for (const fact of facts) {
+        const item = document.createElement("span");
+        item.textContent = fact;
+        meta.appendChild(item);
+      }
+      timeline.appendChild(meta);
+
+      const latestAudit = auditEvents.at(-1);
+      if (latestAudit?.event_type) {
+        const history = document.createElement("div");
+        history.className = "agent-progress-history";
+        const row = document.createElement("div");
+        row.className = "agent-progress-step";
+        const check = document.createElement("span");
+        check.className = "agent-progress-check";
+        check.textContent = ["failed", "cancelled", "expired"].includes(state) ? "!" : "✓";
+        const text = document.createElement("span");
+        text.textContent = String(latestAudit.event_type).replaceAll("_", " ");
+        row.append(check, text);
+        history.appendChild(row);
+        timeline.appendChild(history);
+      }
+      body.appendChild(timeline);
+
+      if (changedPaths.length) {
+        const files = document.createElement("div");
+        files.className = "agent-progress-history";
+        for (const path of changedPaths) {
+          const row = document.createElement("div");
+          row.className = "agent-progress-step";
+          const check = document.createElement("span");
+          check.className = "agent-progress-check";
+          check.textContent = "✓";
+          const text = document.createElement("span");
+          text.textContent = path;
+          row.append(check, text);
+          files.appendChild(row);
+        }
+        body.appendChild(files);
+      }
+
+      if (typeof options.onCancel === "function" && !harnessTaskSettled(payload)) {
+        const actions = document.createElement("div");
+        actions.className = "message-error-actions";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "message-retry-button";
+        cancel.textContent = options.cancelling ? "Stopping…" : "Stop";
+        cancel.disabled = options.cancelling === true;
+        cancel.addEventListener("click", () => void options.onCancel().catch((error) => showToast(error?.message || "Could not stop Harness task")));
+        actions.appendChild(cancel);
+        body.appendChild(actions);
+      }
+      if (!options.conversationId || activeHistoryId === options.conversationId) {
+        setStatus(harnessTaskSettled(payload) ? (state === "failed" ? "error" : "ready") : "working", status[0]);
+      }
     }
 
     function requiresLocalProjectAction(message) {

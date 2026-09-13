@@ -187,6 +187,34 @@ test("Harness HTTP controller handles runner inventory as a feature boundary", a
   assert.deepEqual(rendered.payload.projects, ["alpha", "beta"]);
 });
 
+test("Harness HTTP controller exposes owner-scoped task cancellation", async () => {
+  let cancelled;
+  let rendered;
+  const controller = createHarnessHttpController({
+    authStore: {
+      async session() { return { id: "owner-user" }; },
+      requireCsrf() {},
+    },
+    harnessService: {
+      async cancelTask(taskId, options) {
+        cancelled = { taskId, options };
+        return { task_id: taskId, state: "cancelling" };
+      },
+    },
+    readJsonBody: async () => ({}),
+    sendJson: (_response, status, payload) => { rendered = { status, payload }; },
+  });
+  const handled = await controller({
+    request: { method: "POST" },
+    response: {},
+    url: new URL("https://chat.mundusx.ai/api/harness/tasks/htask_private/cancel"),
+  });
+  assert.equal(handled, true);
+  assert.equal(rendered.status, 200);
+  assert.equal(cancelled.taskId, "htask_private");
+  assert.equal(cancelled.options.session.id, "owner-user");
+});
+
 test("Harness HTTP controller exposes unauthenticated runner bootstrap start and status only", async () => {
   const calls = [];
   let rendered;

@@ -79,6 +79,14 @@ export function createHarnessHttpController({
       return true;
     }
 
+    const taskCancelMatch = url.pathname.match(/^\/api\/harness\/tasks\/(htask_[A-Za-z0-9_-]+)\/cancel$/);
+    if (request.method === "POST" && taskCancelMatch) {
+      const session = await requireSession(request, authStore);
+      authStore.requireCsrf(request, session);
+      sendJson(response, 200, await harnessService.cancelTask(taskCancelMatch[1], { session }));
+      return true;
+    }
+
     return false;
   };
 }
