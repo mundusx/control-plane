@@ -3033,6 +3033,11 @@ impl ControlPlaneState {
             let abandoned_ready_claim = ready_heartbeats
                 .get(&node_id)
                 .is_some_and(|heartbeat_at| *heartbeat_at > assigned_at_seconds)
+                && job
+                    .graph
+                    .nodes
+                    .first()
+                    .is_none_or(|node| node.started_at.is_none())
                 && assignment_age >= READY_CLAIM_GRACE_SECONDS;
             if assignment_age < lease_seconds && !abandoned_ready_claim {
                 continue;
@@ -3086,6 +3091,9 @@ impl ControlPlaneState {
                 JobGraphStatus::Failed
             };
             job.graph.merge_error = if retrying { None } else { Some(error.clone()) };
+            if let Some(direct_node) = job.graph.nodes.first_mut() {
+                direct_node.started_at = None;
+            }
             expired.push((
                 job.clone(),
                 node_id,
@@ -3308,6 +3316,19 @@ impl ControlPlaneState {
     pub fn heartbeat(&mut self, heartbeat: Heartbeat, updated_at: String) -> NodeRecord {
         if let Some(now_seconds) = parse_unix_seconds(&updated_at) {
             self.prune_expired_local_slot_leases(now_seconds);
+        }
+        if heartbeat.agent_state == AgentState::Busy {
+            for job in self.jobs.values_mut().filter(|job| {
+                !job.graph_execution_enabled
+                    && job.status == JobStatus::Assigned
+                    && job.assigned_node_id.as_deref() == Some(heartbeat.node_id.as_str())
+            }) {
+                if let Some(direct_node) = job.graph.nodes.first_mut() {
+                    direct_node
+                        .started_at
+                        .get_or_insert_with(|| updated_at.clone());
+                }
+            }
         }
         let (policy_allowed, policy_reason) = evaluate_policy(
             heartbeat.agent_state,
@@ -10283,6 +10304,32 @@ mod tests {
             .job
             .expect("retry claim");
         assert_eq!(state.jobs["job-1"].graph.nodes[0].attempt_count, 2);
+    }
+
+    #[test]
+    fn ready_heartbeat_does_not_cancel_a_direct_claim_that_reported_busy() {
+        let mut state = ready_state();
+        state.submit_job(
+            classification_request("Explain dependency injection."),
+            "2".to_string(),
+        );
+        state
+            .claim_job("node-1", "3".to_string())
+            .job
+            .expect("direct claim");
+
+        let mut busy = ready_heartbeat("node-1", "4");
+        busy.agent_state = AgentState::Busy;
+        state.heartbeat(busy, "4".to_string());
+        state.heartbeat(ready_heartbeat("node-1", "49"), "49".to_string());
+        let maintenance = state.run_maintenance_with_nodes("49");
+
+        assert!(maintenance.changed_jobs.is_empty());
+        assert!(maintenance.changed_events.is_empty());
+        let job = state.jobs.get("job-1").expect("active direct job");
+        assert_eq!(job.status, JobStatus::Assigned);
+        assert_eq!(job.graph.nodes[0].attempt_count, 1);
+        assert_eq!(job.graph.nodes[0].started_at.as_deref(), Some("4"));
     }
 
     #[test]
