@@ -4161,6 +4161,7 @@ test("native MundusX Chat streams complete projects as upstream deltas arrive", 
   assert.equal(submitted.max_tokens, 6144);
   assert.match(submitted.messages[0].content, /Project Structure/i);
   assert.match(submitted.messages[0].content, /You are Marie/);
+  assert.equal(submitted.messages.at(-1).content, `${prompt}\n/no_think`);
   assert.equal(requests[0].url.endsWith("/v1/chat/completions"), true);
   assert.equal(responseEvents[0].headers["X-MundusX-Stream-Mode"], "live-delta");
   assert.match(responseEvents[1].value, /"content":"## Project Structure\\n/);
@@ -4387,7 +4388,9 @@ test("live MundusX Chat stream preserves history and persists one user and assis
   assert.equal(result.content, "Streamed answer.");
   assert.equal(upstreamRequest.stream, true);
   assert.deepEqual(upstreamRequest.messages.map((entry) => entry.role), ["system", "user", "assistant", "user"]);
+  assert.equal(upstreamRequest.messages.at(-1).content, "Explain distributed systems briefly.\n/no_think");
   assert.deepEqual(writes.map((entry) => entry.role), ["user", "assistant"]);
+  assert.equal(writes[0].content, "Explain distributed systems briefly.");
   assert.equal(writes[1].jobId, "chatcmpl-browser");
 });
 
