@@ -224,10 +224,10 @@ test("renders a usable chat page", () => {
   assert.match(html, /shouldShowSourceSections\(payload, output\)/);
   assert.match(html, /function appendRetryAction/);
   assert.match(html, /pollRecoveryDeadline \|\|= Date\.now\(\) \+ 120000/);
-  assert.match(html, /const recoverCompletedJob = async/);
-  assert.match(html, /setStatus\("working", "Recovering"\)/);
-  assert.match(html, /chat recovery poll failed/);
-  assert.match(html, /return recoverCompletedJob\(streamError\)/);
+  assert.doesNotMatch(html, /async function runPolledChatTurn/);
+  assert.doesNotMatch(html, /const recoverCompletedJob = async/);
+  assert.doesNotMatch(html, /chat recovery poll failed/);
+  assert.doesNotMatch(html, /return recoverCompletedJob\(streamError\)/);
   assert.match(html, /message-retry-button/);
   assert.match(html, /function progressUnit/);
   assert.match(html, /\.message-body ol/);
@@ -278,7 +278,6 @@ test("renders a usable chat page", () => {
   assert.match(html, /unpaintedDeltaCharacters >= 24/);
   assert.match(html, /await yieldToStreamPaint\(\)/);
   assert.match(html, /MundusX did not produce a first token within 90 seconds/);
-  assert.match(html, /MundusX job did not complete during stream recovery/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
   assert.match(html, /\/api\/chat\/stream/);
@@ -4075,13 +4074,14 @@ test("OpenAI adapter correlates its stable id and OpenWebUI chat id", async () =
   assert.deepEqual(conversationWrites.map((entry) => entry.role), ["user", "assistant"]);
 });
 
-test("generative MundusX Chat requests stream while deterministic and tool routes fall back", () => {
+test("every non-empty normal Chat request uses the direct stream", () => {
   assert.equal(canLiveStreamChatTurn({ message: "Explain distributed systems.", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Create a complete Java program", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Return a JSON schema for a customer record", toolMode: false }), true);
-  assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), false);
-  assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), false);
-  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), false);
+  assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "   ", toolMode: true }), false);
 });
 
 test("native MundusX Chat streams complete projects as upstream deltas arrive", async () => {
@@ -4239,25 +4239,47 @@ test("streaming relay exposes the first upstream delta before completion", async
   assert.equal(events.at(-1).type, "end");
 });
 
-test("deterministic MundusX Chat requests return an explicit polling fallback without upstream work", async () => {
+test("normal Chat streams direct even when a prompt could use discovery", async () => {
   const events = [];
+  const encoder = new TextEncoder();
   const response = {
+    writableEnded: false,
     writeHead: (status, headers) => events.push({ status, headers }),
-    end: (value) => events.push({ value }),
+    flushHeaders: () => {},
+    write: (value) => events.push({ value }),
+    end(value) {
+      this.writableEnded = true;
+      events.push({ value });
+    },
   };
-  let fetchCalled = false;
-  await streamChatTurn(
+  const requests = [];
+  const result = await streamChatTurn(
     response,
     { message: "Weather in Warsaw?", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    async () => {
-      fetchCalled = true;
-      throw new Error("unexpected fetch");
+    async (url, init = {}) => {
+      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
+      if (url.endsWith("/v1/chat/completions")) {
+        requests.push(JSON.parse(init.body));
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              'data: {"id":"chatcmpl-weather","choices":[{"delta":{"content":"Direct answer."},"finish_reason":null}]}\n\n' +
+              'data: {"id":"chatcmpl-weather","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+              'data: [DONE]\n\n',
+            ));
+            controller.close();
+          },
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected URL ${url}`);
     },
   );
-  assert.equal(fetchCalled, false);
-  assert.equal(events[0].status, 409);
-  assert.deepEqual(JSON.parse(events[1].value), { fallback: true, reason: "deterministic_or_tool_routed" });
+  assert.equal(result.content, "Direct answer.");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].stream, true);
+  assert.equal(requests[0].mode, "chat");
+  assert.equal(response.writableEnded, true);
 });
 
 test("live MundusX Chat stream preserves history and persists one user and assistant turn", async () => {

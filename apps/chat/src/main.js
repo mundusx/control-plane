@@ -3535,10 +3535,7 @@ export function page(config = configFromEnv()) {
             allowMutations: false,
           },
         );
-        const streamed = handledLocally ? true : await tryLiveChatTurn(pending, chatMessage, conversationId);
-        if (!handledLocally && !streamed) {
-          await runPolledChatTurn(pending, chatMessage, conversationId);
-        }
+        if (!handledLocally) await tryLiveChatTurn(pending, chatMessage, conversationId);
         syncNetworkRuntimeStatus(true);
       } catch (error) {
         failConversationStream(conversationId, pending, message, error);
@@ -3768,55 +3765,6 @@ export function page(config = configFromEnv()) {
       return /\\b(create|make|add|write|edit|modify|update|delete|remove|rename|move|generate|scaffold|implement|fix|refactor|format|install|run|test|build|compile|lint|commit|checkout|merge|push|pull)\\b/i.test(value);
     }
 
-    async function runPolledChatTurn(pending, message, conversationId) {
-      const created = await fetch("/api/chat/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, executionMode: "auto", voicePersona: selectedAssistantPersona(), toolMode: true, conversationId }),
-      });
-      const submitted = await readApiPayload(created, "chat request failed");
-      if (!created.ok) {
-        throw new Error(submitted.error || "chat request failed");
-      }
-
-      renderPendingJob(pending, submitted);
-      let payload = submitted;
-      let pollRecoveryDeadline = 0;
-      while (!["completed", "failed"].includes(payload.status)) {
-        await sleep(1500);
-        const pollParams = new URLSearchParams({
-          conversationId,
-          prompt: message,
-        });
-        try {
-          const polled = await fetch(
-            "/api/chat/jobs/" + encodeURIComponent(submitted.job_id) + "?" + pollParams.toString(),
-          );
-          payload = await readApiPayload(polled, "chat poll failed");
-          if (!polled.ok) {
-            const error = new Error(payload.error || "chat poll failed");
-            error.status = polled.status;
-            throw error;
-          }
-          pollRecoveryDeadline = 0;
-        } catch (pollError) {
-          const status = Number(pollError?.status);
-          const retryable = !Number.isFinite(status) || [408, 425, 429, 500, 502, 503, 504].includes(status);
-          pollRecoveryDeadline ||= Date.now() + 120000;
-          if (!retryable || Date.now() >= pollRecoveryDeadline) throw pollError;
-          setStatus("working", "Recovering");
-          continue;
-        }
-        renderPendingJob(pending, payload);
-      }
-
-      if (payload.status === "failed") {
-        throw new Error(payload.error || "MundusX job failed");
-      }
-
-      renderCompletedJob(pending, payload, conversationId);
-    }
-
     async function tryLocalAgentTurn(pending, message, conversationId, options = {}) {
       const statusResponse = await fetch("/api/agent/status");
       if (statusResponse.status === 401) {
@@ -4038,10 +3986,6 @@ export function page(config = configFromEnv()) {
           conversationId,
         }),
       });
-      if (response.status === 409) {
-        conversationStreamStates.delete(conversationId);
-        return false;
-      }
       if (!response.ok) {
         const payload = await readApiPayload(response, "chat stream failed");
         throw new Error(payload.error || "chat stream failed");
@@ -4088,57 +4032,6 @@ export function page(config = configFromEnv()) {
           ]);
         } finally {
           window.clearTimeout(timeoutId);
-        }
-      };
-
-      const recoverCompletedJob = async (streamError) => {
-        if (!completionId) throw streamError;
-        try {
-          streamState.status = "recovering";
-          streamState.completionId = completionId;
-          if (activeHistoryId === conversationId) setStatus("working", "Recovering");
-          const pollParams = new URLSearchParams({
-            conversationId,
-            prompt: message,
-          });
-          let payload = { job_id: completionId, status: "assigned" };
-          const recoveryDeadline = Date.now() + 30 * 60 * 1000;
-          while (!["completed", "failed"].includes(payload.status)) {
-            try {
-              const polled = await fetch(
-                "/api/chat/jobs/" + encodeURIComponent(completionId) + "?" + pollParams.toString(),
-              );
-              payload = await readApiPayload(polled, "chat recovery poll failed");
-              if (!polled.ok) {
-                const error = new Error(payload.error || "chat recovery poll failed");
-                error.status = polled.status;
-                throw error;
-              }
-            } catch (pollError) {
-              const status = Number(pollError?.status);
-              const retryable = !Number.isFinite(status) || [408, 425, 429, 500, 502, 503, 504].includes(status);
-              if (!retryable || Date.now() >= recoveryDeadline) throw pollError;
-              await sleep(1500);
-              continue;
-            }
-            if (!["completed", "failed"].includes(payload.status)) {
-              streamState.payload = payload;
-              renderConversationStreamState(streamState);
-              if (Date.now() >= recoveryDeadline) {
-                throw new Error("MundusX job did not complete during stream recovery");
-              }
-              await sleep(1500);
-            }
-          }
-          if (payload.status === "failed") {
-            throw new Error(payload.error || "MundusX job failed");
-          }
-          completeConversationStream(streamState, payload);
-          return true;
-        } catch (recoveryError) {
-          throw new Error(
-            "Response connection was interrupted and recovery failed: " + recoveryError.message,
-          );
         }
       };
 
@@ -4201,7 +4094,7 @@ export function page(config = configFromEnv()) {
         if (unpaintedDeltaCharacters > 0) await yieldToStreamPaint();
       } catch (streamError) {
         await reader.cancel().catch(() => {});
-        return recoverCompletedJob(streamError);
+        throw streamError;
       }
 
       completeConversationStream(streamState, {
@@ -6585,24 +6478,7 @@ export function requiresValidatedStreaming(message, body = {}) {
 }
 
 export function canLiveStreamChatTurn(body = {}) {
-  const message = String(body?.message ?? "").trim();
-  if (!message || detectClientMetadataTask(message)) {
-    return false;
-  }
-  const toolMessage = message;
-  if (
-    isMultiIntentPlanningCandidate(toolMessage) ||
-    fetchMathJobForPrompt(toolMessage) ||
-    extractWeatherLocation(toolMessage) ||
-    looksLikeWeatherRequest(toolMessage.toLowerCase()) ||
-    extractAssistantIdentityTopic(toolMessage) ||
-    extractMundusXKnowledgeTopic(toolMessage) ||
-    extractCurrentOfficeQuery(toolMessage) ||
-    extractFactualSummaryTopic(toolMessage)
-  ) {
-    return false;
-  }
-  return !(isToolModeEnabled(body) && needsGrounding(toolMessage));
+  return Boolean(String(body?.message ?? "").trim());
 }
 
 function liveChatRuntimeMessage(message) {
@@ -6618,10 +6494,6 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   if (!rawMessage) {
     throw httpError(400, "message is required");
   }
-  if (!canLiveStreamChatTurn(body)) {
-    return sendJson(response, 409, { fallback: true, reason: "deterministic_or_tool_routed" });
-  }
-
   const message = redactSensitiveText(rawMessage);
   const conversationId = String(body?.conversationId ?? "").trim() || null;
   const historyMessages = Array.isArray(body?.historyMessages)
@@ -6645,6 +6517,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   }
   const requestBody = {
     stream: true,
+    mode: "chat",
     messages: [
       { role: "system", content: systemPrompt },
       ...historyMessages,
