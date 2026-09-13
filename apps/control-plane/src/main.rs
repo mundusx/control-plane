@@ -691,10 +691,8 @@ fn should_enable_live_stream(
     record: &JobRecord,
     streaming_node_available: bool,
 ) -> bool {
-    wants_stream
-        && mode.is_none()
-        && !record.graph_execution_enabled
-        && streaming_node_available
+    let direct_mode = mode.is_none_or(|value| value.eq_ignore_ascii_case("chat"));
+    wants_stream && direct_mode && !record.graph_execution_enabled && streaming_node_available
 }
 
 fn chat_job_execution_mode(
@@ -898,10 +896,13 @@ fn apply_chat_mode(
     let Some(mode) = mode.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok((None, system_prompt, max_tokens));
     };
-    if !mode.eq_ignore_ascii_case("speakai") {
-        return Err(format!("unsupported chat completion mode `{mode}`"));
+    if mode.eq_ignore_ascii_case("chat") {
+        return Ok((Some("chat".to_string()), system_prompt, max_tokens));
     }
-    Ok((Some("speakai".to_string()), None, max_tokens))
+    if mode.eq_ignore_ascii_case("speakai") {
+        return Ok((Some("speakai".to_string()), None, max_tokens));
+    }
+    Err(format!("unsupported chat completion mode `{mode}`"))
 }
 
 fn now_unix_seconds_u64() -> u64 {
@@ -8941,8 +8942,8 @@ fn handle_connection_with_streams(
                             sensitive_history,
                             native_tool_turn,
                         ),
-                        // Plan without forcing single execution; eligible direct jobs are
-                        // upgraded to live streaming after the graph decision is known.
+                        // The scheduler owns the job, while streamed chat remains a
+                        // single direct execution with no graph discovery.
                         stream: false,
                         model: None,
                         system_prompt,
@@ -9684,10 +9685,10 @@ mod tests {
     use super::{
         admission_policy_update_from_form, apply_chat_mode, auth_disabled_flag_enabled,
         authorize_harness_request_from_values, chat_messages_to_prompt, completion_event_type,
-        control_plane_bind_addr_from_env, control_plane_home, control_plane_operator_page,
-        database_health_from_values, deploy_fingerprint_from_env, handle_connection,
-        harness_policy_request_from_form, harness_task_request_from_form, job_async_payload,
-        json_response_with_retry_after, legacy_supabase_enabled_from_value,
+        control_plane_bind_addr_from_env, control_plane_home,
+        control_plane_operator_page, database_health_from_values, deploy_fingerprint_from_env,
+        handle_connection, harness_policy_request_from_form, harness_task_request_from_form,
+        job_async_payload, json_response_with_retry_after, legacy_supabase_enabled_from_value,
         migration_database_url_from_values, now_unix_seconds, operator_auth_mode_from_env,
         operator_auth_startup_config_error, operator_auth_token_from_env,
         parse_chat_completion_cancel_path, parse_chat_completion_status_path, parse_conversation_messages_path,
@@ -9772,11 +9773,13 @@ mod tests {
             "1".to_string(),
         );
         assert!(should_enable_live_stream(true, false, None, &direct, true));
+        assert!(should_enable_live_stream(
+            true, false, Some("chat"), &direct, true
+        ));
         assert!(!should_enable_live_stream(
             true, false, None, &direct, false
         ));
-        assert!(should_enable_live_stream(true, true, None, &direct, true));
-        assert!(!should_enable_live_stream(
+        assert!(should_enable_live_stream(true, true, None, &direct, true));        assert!(!should_enable_live_stream(
             true,
             false,
             Some("speakai"),
@@ -10442,6 +10445,19 @@ mod tests {
         let serialized = serde_json::to_string(&record).expect("serialize SpeakAI job");
         assert!(serialized.contains(r#""mode":"speakai""#));
         assert!(!serialized.contains("Return complete valid SpeakAI JSON"));
+    }
+
+    #[test]
+    fn direct_chat_mode_preserves_the_browser_prompt() {
+        let (mode, system_prompt, max_tokens) = apply_chat_mode(
+            Some("chat"),
+            Some("Answer clearly.".to_string()),
+            Some(2048),
+        )
+        .expect("supported mode");
+        assert_eq!(mode.as_deref(), Some("chat"));
+        assert_eq!(system_prompt.as_deref(), Some("Answer clearly."));
+        assert_eq!(max_tokens, Some(2048));
     }
 
     #[test]
