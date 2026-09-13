@@ -7219,6 +7219,41 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     });
   }
 
+  // Keep small, deterministic lookups on the fast Chat path. This does not
+  // invoke the planner, discovery, Hermes, or a recoverable background job.
+  // It simply answers a focused weather question from wttr.in and emits the
+  // result using the same SSE contract as an ordinary model response.
+  if (!isWeatherResourceRequest(message)) {
+    const weatherLocation = extractWeatherLocation(message);
+    if (weatherLocation) {
+      try {
+        const weatherResult = await fetchWeatherJob(message, weatherLocation, config, fetchImpl);
+        const content = String(weatherResult.output ?? "").trim();
+        const completionId = normalizeOpenAiCompletionId(body?.requestId);
+        const completion = {
+          id: completionId,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: PUBLIC_MODEL_ID,
+          choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+          usage: {
+            prompt_tokens: estimateDisplayTokens(message),
+            completion_tokens: estimateDisplayTokens(content),
+            total_tokens: estimateDisplayTokens(message) + estimateDisplayTokens(content),
+          },
+          mundusx: { job_id: weatherResult.job_id, tool: "weather", execution_mode: "tool" },
+        };
+        startOpenAiStream(response, "direct-tool", completionId);
+        for (const frame of openAiSseFrames(completion, { buffered: false })) response.write(frame);
+        response.end("data: [DONE]\n\n");
+        await recordAssistantTurn(conversationId, config, fetchImpl, weatherResult);
+        return { content, completionId, finishReason: "stop", tool: "weather" };
+      } catch (error) {
+        console.warn(`[weather] direct lookup failed; falling back to live Chat: ${error.message}`);
+      }
+    }
+  }
+
   const model = String(body?.model ?? config.modelOverride ?? "").trim();
   const capacityProfile = await fetchChatCapacityProfile(config, fetchImpl, model);
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona, body?.skillContext);
@@ -10103,6 +10138,7 @@ const WEATHER_WORD_TYPOS = [
   [/\bwheather\b/gi, "weather"],
   [/\bweahter\b/gi, "weather"],
   [/\bweater\b/gi, "weather"],
+  [/\bwea+ther\b/gi, "weather"],
   [/\bwether\b/gi, "weather"],
   [/\bweathe?r?r\b/gi, "weather"],
   [/\bforcast\b/gi, "forecast"],
