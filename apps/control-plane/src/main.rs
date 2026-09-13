@@ -9312,37 +9312,42 @@ fn handle_connection_with_streams(
                     eprintln!("failed to save control-plane state: {error}");
                 }
                 drop(guard);
-                if let Some(db) = supabase.as_ref() {
-                    if let Some(event) = completion_event.as_ref() {
-                        if let Err(error) = db.record_job_event(event) {
-                            eprintln!("database completion event skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
-                        }
-                    }
-                    if let Some(award) = credit_award.as_ref() {
-                        if let Err(error) = db.record_credit_award(award) {
-                            eprintln!("database credit sync skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
-                        }
-                    }
-                    if let Some(event) = credit_event.as_ref() {
-                        if let Err(error) = db.record_job_event(event) {
-                            eprintln!("database credit event skipped: {error}");
-                            note_supabase_failure(&sync_status, error);
-                        }
-                    }
-                    if let Some(job) = record.as_ref() {
-                        if matches!(
-                            job.status,
-                            crate::contracts::JobStatus::Completed
-                                | crate::contracts::JobStatus::Failed
-                        ) {
-                            if let Err(error) = db.record_job_completion(&completion_clone, job) {
-                                eprintln!("database completion sync skipped: {error}");
+                if let Some(db) = supabase.cloned() {
+                    let sync_status = Arc::clone(&sync_status);
+                    let completion = completion_clone.clone();
+                    let completed_job = record.clone();
+                    thread::spawn(move || {
+                        if let Some(event) = completion_event.as_ref() {
+                            if let Err(error) = db.record_job_event(event) {
+                                eprintln!("database completion event skipped: {error}");
                                 note_supabase_failure(&sync_status, error);
                             }
                         }
-                    }
+                        if let Some(award) = credit_award.as_ref() {
+                            if let Err(error) = db.record_credit_award(award) {
+                                eprintln!("database credit sync skipped: {error}");
+                                note_supabase_failure(&sync_status, error);
+                            }
+                        }
+                        if let Some(event) = credit_event.as_ref() {
+                            if let Err(error) = db.record_job_event(event) {
+                                eprintln!("database credit event skipped: {error}");
+                                note_supabase_failure(&sync_status, error);
+                            }
+                        }
+                        if let Some(job) = completed_job.as_ref() {
+                            if matches!(
+                                job.status,
+                                crate::contracts::JobStatus::Completed
+                                    | crate::contracts::JobStatus::Failed
+                            ) {
+                                if let Err(error) = db.record_job_completion(&completion, job) {
+                                    eprintln!("database completion sync skipped: {error}");
+                                    note_supabase_failure(&sync_status, error);
+                                }
+                            }
+                        }
+                    });
                 }
                 match record {
                     Some(record) => {
