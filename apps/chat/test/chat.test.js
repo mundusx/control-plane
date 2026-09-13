@@ -6,6 +6,7 @@ import {
   buildHistoryContext,
   buildCompressedHistoryContext,
   buildRelevantHistoryContext,
+  boundedHermesRouterContext,
   buildChatSystemPrompt,
   canLiveStreamChatTurn,
   cleanChatOutput,
@@ -30,7 +31,6 @@ import {
   fetchChatConversation,
   fetchNetworkSummary,
   needsGrounding,
-  requiresHermesWebResearch,
   normalizeAssistantDisplayText,
   protectMathSegments,
   normalizePublicOpenAiStreamEvent,
@@ -40,15 +40,12 @@ import {
   openAiSseStartFrame,
   parseFirstJsonObject,
   parseHermesToolDecision,
-  parseAgentModelProviders,
   page,
   pollChatJob,
   redactSensitiveText,
   selectChatSkills,
   requiresValidatedStreaming,
   relayControlPlaneOpenAiStream,
-  relayNativeHermesToolStream,
-  resetAgentProviderCircuits,
   submitChatJob,
   submitChatTurn,
   submitOpenAiChatCompletion,
@@ -81,10 +78,7 @@ test("renders a usable chat page", () => {
     }),
   );
 
-  assert.match(html, /<title>Ehda<\/title>/);
-  assert.match(html, /class="brand-ehda">Ehda<\/div>/);
-  assert.match(html, /Powered by Mercedes-Benz Tech Community/);
-  assert.match(html, /A BETTER TOMORROW/);
+  assert.match(html, /MundusX Chat/);
   assert.match(html, /id="auth-gate"[^>]*hidden/);
   assert.match(html, /id="auth-google"/);
   assert.match(html, /Continue your chat/);
@@ -241,8 +235,7 @@ test("renders a usable chat page", () => {
   assert.doesNotMatch(html, /raw\.includes\("\r?\n"\)/);
   assert.match(html, /aria-label", role === "user" \? "Your message" : "MundusX response"/);
   assert.doesNotMatch(html, /avatar\.textContent = role === "user" \? "You" : "M"/);
-  assert.match(html, /aria-label="Mercedes-Benz three-pointed star"/);
-  assert.match(html, /<\/aside>\s*<div class="history-context-menu"/);
+  assert.match(html, /\/assets\/mundusx-logo\.png/);
   assert.match(html, /uat\.mundusx\.ai/);
   assert.match(html, /\.header-actions \{\s*display: none;/);
   assert.match(html, /class="runtime-status-sentinel" id="runtime-status"/);
@@ -274,15 +267,10 @@ test("renders a usable chat page", () => {
   assert.match(html, /state\.node\?\.isConnected/);
   assert.match(html, /conversationStreamStates\.get\(state\.conversationId\) === state/);
   assert.match(html, /streamState\.status = "waiting"/);
-  assert.match(html, /Chat · Waiting for the first response token/);
+  assert.match(html, /Streaming - waiting for first token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 90000/);
-  assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
-  assert.match(html, /unpaintedDeltaCharacters >= 24/);
-  assert.match(html, /await yieldToStreamPaint\(\)/);
-  assert.match(html, /\[chat-stream-render\]/);
-  assert.match(html, /live\.textContent = output/);
-  assert.match(html, /MundusX did not produce a first token within 90 seconds/);
+  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 60000/);
+  assert.match(html, /MundusX did not produce a first token within 60 seconds/);
   assert.match(html, /MundusX job did not complete during stream recovery/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
@@ -423,50 +411,6 @@ test("preserves nested list indentation and inline bold-label separators", () =>
   ]);
 });
 
-test("normalization preserves operators inside comparison cells and code", () => {
-  const table = "| Dimension | A | B |\n| --- | --- | --- |\n| Transport | HTTP | NATS + WebRTC |\n| Scale | CDN + HTTP caching | Mesh - Custom |";
-  assert.equal(normalizeAssistantDisplayText(table), table);
-  const html = marked.parse(normalizeAssistantDisplayText(table), { gfm: true });
-  assert.equal((html.match(/<tr>/g) || []).length, 3);
-  assert.doesNotMatch(html, /<ul>/);
-  assert.match(html, /NATS \+ WebRTC/);
-  for (const code of ["```js\nconst value = A + B;\n\n\n// ### Heading\n```", "~~~js\nA - B\n~~~", "```js\nA + B", "Use `A + B` here."]) {
-    assert.equal(normalizeAssistantDisplayText(code), code);
-  }
-});
-
-test("normalization restores compact streamed comparison tables", () => {
-  const compact = "✅ MundusX.ai — Enterprise Security | Requirement | Compliance ||----------------|----------------|| No UDP | Uses HTTP/HTTPS only || Auditability | Full HTTP logs |";
-  const normalized = normalizeAssistantDisplayText(compact);
-  assert.equal(normalized, "✅ MundusX.ai — Enterprise Security\n\n| Requirement | Compliance |\n| ---------------- | ---------------- |\n| No UDP | Uses HTTP/HTTPS only |\n| Auditability | Full HTTP logs |");
-  const html = marked.parse(normalized, { gfm: true });
-  assert.match(html, /<p>✅ MundusX\.ai — Enterprise Security<\/p>/);
-  assert.equal((html.match(/<tr>/g) || []).length, 3);
-});
-
-test("normalization cleans headings preceding a compact table", () => {
-  const compact = "✅ About 914 users. --- ### 5. Cost context - 1TB = **$20** --- ### Sensitivity check | Token size | Bytes | Users ||---|---|---|| ASCII | 1 | 1,828 |";
-  const normalized = normalizeAssistantDisplayText(compact);
-  assert.match(normalized, /✅ About 914 users\.\n\n---\n\n### 5\. Cost context/);
-  assert.match(normalized, /\n\n---\n\n### Sensitivity check\n\n\| Token size \| Bytes \| Users \|/);
-  const html = marked.parse(normalized, { gfm: true });
-  assert.equal((html.match(/<h3>/g) || []).length, 2);
-  assert.equal((html.match(/<tr>/g) || []).length, 2);
-  assert.match(html, /\$20/);
-});
-
-test("chat page ships the compact-table helper used by its formatter", () => {
-  const html = page(configFromEnv({}));
-  assert.match(html, /function expandCompactMarkdownTable\(line\)/);
-  assert.ok(html.indexOf("function expandCompactMarkdownTable(line)") < html.indexOf("function normalizeAssistantDisplayText(text)"));
-});
-
-test("normalization leaves ordinary pipes and boolean operators alone", () => {
-  for (const text of ["Choose A || B", "Use alpha | beta in prose", "`left || right`", "```js\nleft || right\n```"]) {
-    assert.equal(normalizeAssistantDisplayText(text), text);
-  }
-});
-
 test("standard markdown engine renders nested lists and GFM tables", () => {
   const html = marked.parse(
     "- **Ethereum (L1)**\n  - Monolithic L1\n  - Supports rollups\n- **Solana**\n  - High throughput\n\n| Metric | Value |\n|---|---|\n| TPS | 30 |",
@@ -505,30 +449,21 @@ test("normalizes chat app environment", () => {
   assert.equal(config.mcpEnabled, false);
 });
 
-test("migrates the retired production control-plane origin", () => {
-  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://mundusx.ai/" });
-  assert.equal(config.controlPlaneUrl, "https://control.mundusx.ai");
-});
-
-test("keeps MCP access inside the user-scoped Developer settings section", () => {
+test("renders a user-scoped MCP connection manager only when enabled", () => {
   const html = page(configFromEnv({
     MUNDUSX_MCP_ENABLED: "true",
     MUNDUSX_PUBLIC_ORIGIN: "https://chat.mundusx.ai",
   }));
-  assert.match(html, /id="account-settings"[^>]*>[\s\S]*Settings/);
-  assert.match(html, /id="settings-dialog"[^>]*hidden/);
-  assert.match(html, /data-settings-tab="developer"/);
-  assert.match(html, /External client access/);
+  assert.match(html, /id="account-mcp"[^>]*>[\s\S]*MCP connections/);
+  assert.match(html, /id="mcp-dialog"[^>]*hidden/);
   assert.match(html, /https:\/\/chat\.mundusx\.ai\/mcp/);
   assert.match(html, /id="mcp-token-form"/);
   assert.match(html, /Copy this token now/);
   assert.match(html, /MundusX stores only its digest/);
-  assert.match(html, /Applying, merging, and deployment remain separately controlled/);
+  assert.match(html, /Apply, merge, and deployment still require separate approval/);
   assert.match(html, /fetch\("\/api\/mcp\/tokens"/);
   assert.match(html, /data-revoke-mcp-token/);
-  const withoutMcp = page(configFromEnv({}));
-  assert.match(withoutMcp, /id="settings-dialog"/);
-  assert.doesNotMatch(withoutMcp, /data-settings-tab="developer"|id="mcp-token-form"/);
+  assert.doesNotMatch(page(configFromEnv({})), /id="account-mcp"|id="mcp-dialog"/);
 });
 
 test("renders local-first Projects without a separate Computer surface", () => {
@@ -544,19 +479,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   const workspaceNav = html.match(/<nav class="workspace-nav" aria-label="Workspace">[\s\S]*?<\/nav>/)?.[0] || "";
   const mainHeader = html.match(/<header>[\s\S]*?<\/header>/)?.[0] || "";
   assert.match(html, /id="repository-open"[^>]*>[\s\S]*?<span>Projects<\/span>/);
-  assert.match(workspaceNav, /id="repository-open"[\s\S]*Projects/);
-  assert.doesNotMatch(html, /id="chats-open"|chatsOpenEl/);
-  assert.match(html, /id="account-settings"[\s\S]*>Settings<\/span>/);
-  assert.doesNotMatch(html, />My skills<\/span>|>Advanced<\/summary>/);
-  assert.match(html, /data-settings-tab="connections"/);
-  assert.match(html, /data-settings-tab="devices"/);
-  assert.match(html, /data-settings-tab="personalization"/);
-  assert.match(html, /Connect GitHub/);
-  assert.match(html, /Personal instructions/);
-  assert.match(html, /preferred language, answer length, tone, coding conventions, or accessibility needs/);
-  assert.match(html, /href="\/skills">Manage<\/a>/);
-  assert.match(html, /Administrators control Global Skills/);
-  assert.match(html, /Hermes selects available tools/);
+  assert.match(workspaceNav, /Chats[\s\S]*id="repository-open"[\s\S]*Projects/);
+  assert.match(html, /class="account-menu-item" href="\/skills"[\s\S]*>Skills<\/span>/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
   assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
   assert.match(html, /guestLoginEl\?\.addEventListener\("click", openAuthentication\)/);
@@ -566,15 +490,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(mainHeader, /id="repository-open-mobile"[^>]*aria-label="Open Projects"/);
   assert.match(projects, /role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby="project-dialog-title"/);
   assert.match(projects, /<h2 id="project-dialog-title">Create project<\/h2>/);
-  assert.match(projects, /id="repository-dialog-close"[^>]*type="button"[^>]*aria-label="Close"[^>]*data-overlay-close="projects"/);
-  assert.match(html, /id="settings-dialog-close"[^>]*data-overlay-close="settings"/);
-  assert.match(html, /document\.addEventListener\("click", \(event\) => \{[\s\S]*?\[data-overlay-close\][\s\S]*?closeSettings\(\)[\s\S]*?closeProjects\(\)[\s\S]*?\}, true\)/);
-  assert.match(html, /settingsDialogCloseEl\?\.addEventListener\("pointerdown",[\s\S]*?closeSettings\(\)/);
-  assert.match(html, /repositoryDialogCloseEl\?\.addEventListener\("pointerdown",[\s\S]*?closeProjects\(\)/);
-  assert.match(html, /\.settings-dialog \.dialog-close \{[^}]*z-index:20;[^}]*pointer-events:auto;[^}]*touch-action:manipulation/);
+  assert.match(projects, /id="repository-dialog-close"[^>]*type="button"[^>]*aria-label="Close"/);
   assert.match(projects, /id="project-create-fields"[\s\S]*name="project_slug"[^>]*pattern="\[a-z0-9\]/);
-  assert.match(projects, /name="initialize_git"[^>]*checked/);
-  assert.match(projects, /Initialize a local Git repository/);
   assert.match(projects, /This creates a folder inside the local workspace you approved/);
   assert.doesNotMatch(projects, /documents\\mundusx\\projects|Default memory|class="project-mark"/);
   assert.doesNotMatch(projects, /Project type|Java \(Maven\)|Project options|name="project_template"/);
@@ -585,21 +502,13 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(html, /id="web-search-toggle"/);
   assert.match(html, /id="active-project-name">Project<\/strong>/);
   assert.doesNotMatch(html, /id="runtime-select"|class="runtime-detail"/);
-  assert.match(html, /id="mutation-toggle"[^>]*aria-label="Project access"[^>]*hidden>[\s\S]*Ask before edits[\s\S]*Full access/);
+  assert.match(html, /id="mutation-toggle"[^>]*aria-pressed="false"[^>]*hidden>Allow edits once/);
   assert.match(html, /runtimePreference = "auto"/);
   assert.match(html, /runtime: options\.runtime \|\| "auto"/);
   assert.match(html, /function preferredProjectRuntime\(\)/);
   assert.match(html, /runtime: projectRuntime/);
   assert.match(html, /workspace_relative: options\.workspaceRelative \|\| null/);
-  assert.match(html, /projectPermissionsKey = "mundusx\.chat\.projectPermissions\.v1:" \+ namespace/);
-  assert.match(html, /localStorage\.setItem\(projectPermissionsKey, JSON\.stringify\(projectPermissions\)\)/);
-  assert.match(html, /mundusx\.chat\.activeAgentTask\.v1:/);
-  assert.match(html, /localStorage\.setItem\(activeAgentTaskKey, JSON\.stringify/);
-  assert.match(html, /resumePersistedLocalAgentTask\(\)/);
-  assert.match(html, /Reconnecting to the active/);
-  assert.match(html, /projectPermissionMode\(activeProject\.slug\) === "full"/);
-  assert.match(html, /window\.confirm\('Allow Hermes to edit files and run commands in project/);
-  assert.doesNotMatch(html, /Allow edits once|Edits allowed · once|mutationAllowed/);
+  assert.match(html, /mutationAllowed = false;[\s\S]*renderRuntimeControls\(\)/);
   assert.match(html, /id="project-context-menu"/);
   assert.match(html, /id="project-context-new"[^>]*>\+ New project/);
   assert.match(html, /id="project-context-list"/);
@@ -616,15 +525,16 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /activeProjectNameEl\.textContent = activeProject\?\.slug \|\| "Project"/);
   assert.match(html, /activeProjectOpenEl\.setAttribute\("aria-pressed"/);
   assert.match(html, /Ask Atlas to work on/);
-  assert.doesNotMatch(html, /Initialize the local.*project workspace|Queuing local project creation/);
+  assert.match(html, /async function initializeLocalProject\(projectSlug\)/);
+  assert.match(html, /prompt: "__mundusx_initialize_project__"/);
+  assert.match(html, /allow_mutations: true/);
+  assert.match(html, /Waiting for the local runner to create the project folder/);
+  assert.match(html, /Project folder could not be created|project folder could not be created/i);
   assert.match(html, /id="app-toast"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(html, /function showToast\(message\)/);
   assert.match(html, /closeProjects\(\);[\s\S]*showToast\('Project "/);
   assert.doesNotMatch(html, /repositoryDialogEl\?\.close\(\)/);
   assert.match(html, /requiresLocalProjectAction\(message\)/);
-  assert.match(html, /what\|which\|where\|when\|who\|why/);
-  assert.match(html, /\(\?:ask\|know\|understand\)/);
-  assert.match(html, /\(\?:changes\?\|files\?\|steps\?\|requirements\?\)/);
   assert.match(html, /const projectRuntime = preferredProjectRuntime\(\)/);
   assert.match(html, /openProjects\(\{ showRunnerSetup: true, project: activeProject \}\)/);
   assert.match(html, /existingProjectMode = Boolean\(showRunnerSetup && project\?\.slug\)/);
@@ -634,22 +544,11 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /projectActionsEl\.hidden = existingProjectMode/);
   assert.match(html, /Respond in planning\/chat mode and do not claim files were changed/);
   assert.match(html, /!activeProject \|\| runtimePreference === "cloud" \? false : await tryLocalAgentTurn/);
-  assert.match(html, /!activeProject && requiresHermesWebResearch\(message\)/);
-  assert.match(html, /runtime: "hermes"[\s\S]*optional: true[\s\S]*Research this request with your available browser and web-search tools/);
-  assert.match(html, /Reconnecting without losing progress/);
-  assert.match(html, /statusEl\.hidden = Boolean\(activeProject\)/);
-  assert.match(html, /\.runtime-status-sentinel\[hidden\] \{ display: none; \}/);
-  assert.match(html, /className = "agent-progress-orb"/);
-  assert.match(html, /className = "agent-progress-current"/);
-  assert.match(html, /Running a local command/);
-  assert.doesNotMatch(html, /row\.textContent = \(index === steps\.length - 1 \? "● " : "✓ "\)/);
-  assert.doesNotMatch(html, /const deadline = Date\.now\(\) \+ 10 \* 60 \* 1000/);
-  assert.doesNotMatch(html, /Local agent task timed out/);
-  assert.match(html, /Elapsed " \+ formatDuration/);
-  assert.match(html, /Last activity " \+ formatDuration/);
-  assert.match(html, /Context left " \+ remainingPercent/);
-  assert.match(html, /Number\(candidate\?\.context_used\) > 0/);
-  assert.match(html, /telemetry\.api_calls/);
+  assert.match(html, /Connection interrupted; reconnecting/);
+  assert.match(html, /Waiting for Hermes to report its first step/);
+  assert.match(html, /Elapsed " \+ duration\(elapsedSeconds\)/);
+  assert.match(html, /No new progress has arrived/);
+  assert.match(html, /Local agent task timed out/);
   assert.match(html, /\/api\/agent\/tasks\/" \+ encodeURIComponent\(submitted\.task_id\) \+ "\/cancel"/);
   assert.match(html, /inferProjectTemplate[\s\S]*java\|maven\|spring\|junit\|gradle/);
   assert.match(projects, /id="project-runner-setup" hidden/);
@@ -659,16 +558,20 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(projects, /Compute contribution remains off unless you enable it separately/);
   assert.doesNotMatch(projects, /I installed it|Connect browser|pairing code/);
   assert.match(html, /runnerPairingPollTimer = window\.setTimeout/);
+  assert.match(html, /if \(localRunnerReady\) \{/);
+  assert.match(html, /projectAgentUpdateEl\?\.addEventListener\("click"/);
+  assert.match(html, /window\.addEventListener\("focus", refreshRunnerAfterInstaller\)/);
+  assert.match(html, /document\.visibilityState === "visible"/);
   assert.match(html, /Waiting for installer approval and runner startup/);
   assert.match(html, /pendingRunnerAction = \{ pending, message, project: activeProject, conversationId \}/);
   assert.match(html, /Runner connected\. Resuming your request/);
   assert.match(html, /if \(localRunnerReady\) void resumePendingRunnerAction\(\)/);
-  assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady && !reconnectTimedOut\)/);
+  assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady\)/);
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
   assert.match(projects, /MundusX-Setup\.exe/);
-  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.57\/MundusX-Setup\.exe/);
-  assert.match(html, /const latestLocalAgentVersion = "0\.1\.57"/);
+  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.60\/MundusX-Setup\.exe/);
+  assert.match(html, /const latestLocalAgentVersion = "0\.1\.60"/);
   assert.match(html, /projectReadinessEl\.dataset\.state = updateAvailable \? "update"/);
   assert.match(html, /projectReadinessTitleEl\.textContent = updateAvailable \? "Update required"/);
   assert.match(html, /projectAgentUpdateEl\.textContent = updateAvailable[\s\S]*?"Update now"/);
@@ -683,12 +586,6 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(html, /id="harness-open"|id="harness-dialog"|>Computer<\/button>/);
   assert.match(projects, /class="harness-submit"[^>]*disabled[^>]*>Create project/);
   assert.match(html, /updateProjectCreateAvailability\(\)/);
-  assert.match(html, /operation: "git_init"/);
-  assert.match(html, /operation: "ensure_project"/);
-  assert.match(html, /connection\.capabilities\?\.project_git === true/);
-  assert.match(html, /Update MundusX on this computer to use project Git and remote actions/);
-  assert.match(html, /Git & Remote/);
-  assert.doesNotMatch(html, /action\("Project skills"|action\("Saved prompts"|Copy relative path/);
   assert.match(html, /repositoryDialogCloseEl\?\.addEventListener\("click", closeProjects\)/);
   assert.match(html, /function closeProjects\(\)[\s\S]*?repositoryDialogEl\.hidden = true/);
   assert.match(html, /event\.key !== "Escape"[\s\S]*?closeProjects\(\)/);
@@ -767,18 +664,6 @@ test("selects focused markdown skills by request type", () => {
   );
   assert.ok(
     selectChatSkills("Who is Sara Duterte from PH?").some((skill) => skill.name === "facts.md"),
-  );
-  assert.equal(
-    selectChatSkills("Initialize Git and push this repository").some((skill) => skill.name === "git-workflow.md"),
-    false,
-  );
-  assert.equal(
-    selectChatSkills("Initialize Git and push this repository", [{
-      skill_id: "git-workflow",
-      enabled: true,
-      content: "# Git workflow\nUse a feature branch and open a pull request.",
-    }]).some((skill) => skill.name === "git-workflow.md"),
-    true,
   );
 });
 
@@ -1426,70 +1311,6 @@ test("adapts token budgets to stronger node model and GPU capacity", async () =>
 
   assert.equal(calls[0].max_tokens, 1024);
   assert.equal(calls[1].max_tokens, 2048);
-});
-
-test("discovers nested contributed-cluster capacity for a full Solidity response", async () => {
-  const calls = [];
-  const fetchImpl = async (url, init = {}) => {
-    if (url.endsWith("/v1/nodes?page=1&page_size=25")) {
-      return jsonResponse({ items: [{
-        node_id: "node-gx10",
-        state: "ready",
-        reported_state: "ready",
-        backend: "vllm",
-        policy_allowed: true,
-        computed_policy_allowed: true,
-        on_battery: false,
-        available_memory_mb: 7533,
-        available_gpu_percent: 70,
-        capabilities: {
-          capacity_class: "server",
-          usable_memory_mb: 105864,
-          active_model: {
-            name: "qwen3-coder",
-            active: true,
-            capacity_class: "server",
-            context_tokens: 180000,
-            output_capacity_mode: "context_window",
-          },
-        },
-        worker_health: {
-          healthy: true,
-          runtime_ready: true,
-          model_name: "qwen3-coder",
-          cuda_device_available: true,
-          capabilities: {
-            capacity_class: "server",
-            max_context_tokens: 180000,
-            usable_memory_mb: 105864,
-            models: [{
-              name: "qwen3-coder",
-              active: true,
-              capacity_class: "server",
-              context_tokens: 180000,
-              output_capacity_mode: "context_window",
-            }],
-          },
-        },
-      }] });
-    }
-    calls.push(JSON.parse(init.body));
-    return jsonResponse({
-      job_id: "job-solidity",
-      job: { job_id: "job-solidity", status: "queued", graph: { nodes: [] } },
-    });
-  };
-
-  await submitChatJob(
-    { message: "give me a full solidity code to act as KYC we need 2 issuer signature here and 1 target" },
-    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    fetchImpl,
-  );
-
-  assert.equal(calls[0].execution_mode, "single");
-  assert.equal(calls[0].max_tokens, 12288);
-  assert.equal(calls[0].max_tokens_source, "auto");
-  assert.match(calls[0].system_prompt, /one fenced code block/i);
 });
 
 test("keeps conservative token budgets for low capability nodes", async () => {
@@ -3352,30 +3173,89 @@ test("gates web search on factual signals, not conversation or creative requests
   assert.equal(needsGrounding("What do you think about pineapple on pizza"), false);
 });
 
-test("routes current-web research to Hermes and keeps weather on the website tool", () => {
-  assert.equal(requiresHermesWebResearch("Search the web for the latest Rust release"), true);
-  assert.equal(requiresHermesWebResearch("What is the Bitcoin price right now?"), true);
-  assert.equal(requiresHermesWebResearch("Who is Ada Lovelace?"), false);
-  assert.equal(requiresHermesWebResearch("What is the weather in Berlin today?"), false);
-});
+test("routes tool-mode grounded requests through Brave Search and injects citable sources", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (String(url).includes("api.search.brave.com")) {
+      assert.match(String(url), /q=What\+is\+Elon\+Musk/);
+      return jsonResponse({
+        web: {
+          results: [
+            { title: "Elon Musk net worth", url: "https://example.com/elon", description: "Elon Musk's net worth is estimated at $200 billion." },
+          ],
+        },
+      });
+    }
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+    return jsonResponse({
+      job_id: "job-grounded-1",
+      job: {
+        job_id: "job-grounded-1",
+        status: "completed",
+        output: "Elon Musk's net worth is about $200 billion [1].",
+        execution_mode: "tool",
+      },
+    });
+  };
 
-test("fails honestly when a current-web request reaches Chat without a Hermes crawler", async () => {
   const result = await submitChatJob(
-    { message: "Search the web for the latest Rust release", toolMode: true },
-    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    async () => { throw new Error("current-web fallback must not call a search provider or model worker"); },
+    { message: "What is Elon Musk net worth right now?", toolMode: true },
+    configFromEnv({
+      MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai",
+      MUNDUSX_WEB_SEARCH_API_KEY: "test-key",
+    }),
+    fetchImpl,
   );
 
-  assert.equal(result.tool, "web_crawler");
+  assert.equal(result.tool, "web_search");
   assert.equal(result.status, "completed");
-  assert.match(result.output, /Hermes crawler on a connected computer/);
+  assert.equal(result.sources.length, 1);
+  assert.equal(result.sources[0].url, "https://example.com/elon");
+  assert.match(result.output, /\$200 billion/);
+
+  const jobsCall = calls.find((url) => url === "https://uat.mundusx.ai/v1/jobs");
+  assert.ok(jobsCall);
 });
 
-test("does not route ordinary model requests to the Hermes crawler", async () => {
+test("declines web search without an API key and falls through to a normal job", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (String(url).includes("api.search.brave.com")) {
+      throw new Error("should not call Brave Search without an API key");
+    }
+    if (String(url).includes("wikipedia.org") || String(url).includes("opensearch")) {
+      return jsonResponse({ error: "not found" }, { status: 404 });
+    }
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
+    return jsonResponse({
+      job_id: "job-no-key",
+      job: { job_id: "job-no-key", status: "queued", execution_mode: "auto", graph: { nodes: [] } },
+    });
+  };
+
   const result = await submitChatJob(
-    { message: "Write me a poem about the ocean", toolMode: true },
+    { message: "What is the current population of Japan?", toolMode: true },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.ok(!calls.some((url) => String(url).includes("api.search.brave.com")));
+  assert.equal(result.job_id, "job-no-key");
+});
+
+test("does not attempt web search when tool mode is off", async () => {
+  const result = await submitChatJob(
+    { message: "What year did the Berlin Wall fall?" },
+    configFromEnv({
+      MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai",
+      MUNDUSX_WEB_SEARCH_API_KEY: "test-key",
+    }),
     async (url) => {
+      if (String(url).includes("api.search.brave.com")) {
+        throw new Error("should not call web search when tool mode is off");
+      }
       assert.equal(url, "https://uat.mundusx.ai/v1/jobs");
       return jsonResponse({
         job_id: "job-plain",
@@ -3812,10 +3692,65 @@ test("Hermes routing accepts an allowed tool name used as the decision kind", ()
   );
 });
 
+test("Hermes routing accepts native top-level tool arguments from small models", () => {
+  assert.deepEqual(
+    parseHermesToolDecision(
+      '{"kind":"read_file","path":"index.js"}',
+      [{ name: "read_file" }],
+    ),
+    { kind: "tool", name: "read_file", arguments: { path: "index.js" } },
+  );
+  assert.deepEqual(
+    parseHermesToolDecision(
+      '{"kind":"tool","name":"terminal","command":"npm test"}',
+      [{ name: "terminal" }],
+    ),
+    { kind: "tool", name: "terminal", arguments: { command: "npm test" } },
+  );
+});
+
 test("Hermes model turns retry only transient gateway failures", () => {
   assert.equal(isRetryableHermesModelFailure("HTTP 502: Application failed to respond"), true);
   assert.equal(isRetryableHermesModelFailure("connection reset by peer"), true);
   assert.equal(isRetryableHermesModelFailure("invalid project-agent request"), false);
+});
+
+test("Hermes router context stays within the model gateway budget and preserves recent work", () => {
+  const tools = Array.from({ length: 40 }, (_, index) => ({
+    name: `tool_${index}`,
+    description: "d".repeat(1_000),
+    parameters: {
+      type: "object",
+      required: ["path", "content"],
+      properties: {
+        path: { type: "string", description: "p".repeat(1_000) },
+        content: { type: "string", description: "c".repeat(1_000) },
+      },
+    },
+  }));
+  const transcript = Array.from({ length: 20 }, (_, index) => ({
+    role: index % 2 ? "assistant" : "user",
+    content: `${index}:` + "x".repeat(2_000),
+  }));
+
+  const bounded = boundedHermesRouterContext("s".repeat(30_000), transcript, tools);
+
+  assert.ok(bounded.systemContext.length < 8_100);
+  assert.ok(JSON.stringify(bounded.transcript).length < 12_100);
+  assert.match(bounded.transcript.at(-1).content, /^19:/);
+  assert.ok(bounded.serializedTools.length <= 12_000);
+  assert.doesNotThrow(() => JSON.parse(bounded.serializedTools));
+  assert.ok(JSON.parse(bounded.serializedTools).length > 0);
+
+  const emergency = boundedHermesRouterContext("s".repeat(30_000), transcript, tools, {
+    systemLimit: 2_000,
+    transcriptLimit: 3_000,
+    toolLimit: 5_000,
+  });
+  assert.ok(emergency.systemContext.length < 2_100);
+  assert.ok(JSON.stringify(emergency.transcript).length < 3_100);
+  assert.ok(emergency.serializedTools.length <= 5_000);
+  assert.doesNotThrow(() => JSON.parse(emergency.serializedTools));
 });
 
 test("Open WebUI stream starts with a standard stable assistant identity chunk", () => {
@@ -4069,16 +4004,13 @@ test("OpenAI adapter correlates its stable id and OpenWebUI chat id", async () =
   assert.deepEqual(conversationWrites.map((entry) => entry.role), ["user", "assistant"]);
 });
 
-test("generative MundusX Chat requests stream while typed tool routes fall back", () => {
+test("generative MundusX Chat requests stream while deterministic and tool routes fall back", () => {
   assert.equal(canLiveStreamChatTurn({ message: "Explain distributed systems.", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Create a complete Java program", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Return a JSON schema for a customer record", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Weather in Warsaw?", toolMode: false }), false);
-  assert.equal(canLiveStreamChatTurn({ message: "berlin weather today", toolMode: true }), false);
   assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), false);
-  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
-  assert.equal(canLiveStreamChatTurn({ message: "can we ask you, for free account in chatgpt, how many messages can i keep?", toolMode: true }), true);
-  assert.equal(canLiveStreamChatTurn({ message: "If I have 1TB, how many users can store 1000 messages of 280k tokens each?", toolMode: true }), true);
+  assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), false);
 });
 
 test("native MundusX Chat streams complete projects as upstream deltas arrive", async () => {
@@ -4147,7 +4079,6 @@ test("native MundusX Chat streams complete projects as upstream deltas arrive", 
     { message: prompt, toolMode: false, executionMode: "auto", voicePersona: "marie" },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
-      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
       requests.push({ url, init });
       if (url.endsWith("/v1/chat/completions")) return new Response(upstreamBody, {
         status: 200,
@@ -4215,7 +4146,6 @@ test("streaming relay exposes the first upstream delta before completion", async
         "Content-Type": "text/event-stream",
         "X-MundusX-Stream-Mode": "live-delta",
         "X-MundusX-Completion-Id": "chatcmpl-live",
-        "X-MundusX-Resume-Token": "resume-live",
       },
     }),
   );
@@ -4223,7 +4153,6 @@ test("streaming relay exposes the first upstream delta before completion", async
   assert.equal(events[0].type, "headers");
   assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "live-delta");
   assert.equal(events[0].headers["X-MundusX-Completion-Id"], "chatcmpl-live");
-  assert.equal(events[0].headers["X-MundusX-Resume-Token"], "resume-live");
   assert.equal(events[0].headers["X-Accel-Buffering"], "no");
   assert.equal(events[1].type, "flush");
   assert.equal(events[2].type, "write");
@@ -4237,88 +4166,7 @@ test("streaming relay exposes the first upstream delta before completion", async
   assert.equal(events.at(-1).type, "end");
 });
 
-test("native Hermes providers preserve OpenAI tools and fail over before streaming", async () => {
-  resetAgentProviderCircuits();
-  const requests = [];
-  const encoder = new TextEncoder();
-  const events = [];
-  const response = {
-    writableEnded: false,
-    writeHead: (status, headers) => events.push({ type: "headers", status, headers }),
-    flushHeaders: () => events.push({ type: "flush" }),
-    write: (value) => { events.push({ type: "write", value: Buffer.from(value).toString("utf8") }); return true; },
-    end(value) { this.writableEnded = true; events.push({ type: "end", value }); },
-  };
-  const body = {
-    model: "mundusx-agnostic",
-    stream: true,
-    messages: [{ role: "user", content: "Inspect the repository" }],
-    tools: [{ type: "function", function: { name: "search_files", parameters: { type: "object" } } }],
-    tool_choice: "auto",
-    project_task_id: "private-task",
-  };
-  const config = configFromEnv({
-    MUNDUSX_AGENT_MODEL_BASE_URLS: "https://primary.example/v1,https://backup.example/v1",
-    MUNDUSX_AGENT_MODEL_API_KEYS: "primary-secret,backup-secret",
-    MUNDUSX_AGENT_MODEL_IDS: "tool-model-a,tool-model-b",
-  });
-  await relayNativeHermesToolStream(response, body, config, async (url, init) => {
-    requests.push({ url, init, body: JSON.parse(init.body) });
-    if (url.includes("primary.example")) return new Response("unavailable", { status: 502 });
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode(
-          'data: {"id":"chatcmpl-tools","choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_files","arguments":"{\\"pattern\\":\\"*.java\\"}"}}]},"finish_reason":null}]}\n\n' +
-          'data: {"id":"chatcmpl-tools","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n' +
-          'data: [DONE]\n\n',
-        ));
-        controller.close();
-      },
-    });
-    return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-  });
-  assert.equal(requests.length, 2);
-  assert.equal(requests[1].url, "https://backup.example/v1/chat/completions");
-  assert.equal(requests[1].init.headers.Authorization, "Bearer backup-secret");
-  assert.deepEqual(requests[1].body.tools, body.tools);
-  assert.deepEqual(requests[1].body.messages, body.messages);
-  assert.equal(requests[1].body.tool_choice, "auto");
-  assert.equal(requests[1].body.model, "tool-model-b");
-  assert.equal(requests[1].body.project_task_id, undefined);
-  assert.match(events.find((event) => event.type === "write")?.value || "", /tool_calls/);
-  assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "native-agent-tools");
-  assert.equal(response.writableEnded, true);
-});
-
-test("native Hermes tools fail fast when the MundusX model node is outdated", async () => {
-  resetAgentProviderCircuits();
-  const response = { writeHead() {}, write() {}, end() {} };
-  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://control.mundusx.ai" });
-  await assert.rejects(
-    relayNativeHermesToolStream(response, {
-      model: "mundusx-agnostic",
-      messages: [{ role: "user", content: "Inspect the project" }],
-      tools: [{ type: "function", function: { name: "search_files", parameters: { type: "object" } } }],
-    }, config, async (url) => {
-      assert.match(url, /\/v1\/nodes/);
-      return jsonResponse({ items: [{ state: "ready", capabilities: { supported_tools: ["tool_use"] } }] });
-    }),
-    /shared model node needs an agent upgrade/,
-  );
-});
-
-test("agent model provider configuration keeps aligned models and credentials", () => {
-  assert.deepEqual(parseAgentModelProviders({
-    MUNDUSX_AGENT_MODEL_BASE_URLS: "https://one.example, https://two.example/v1/",
-    MUNDUSX_AGENT_MODEL_API_KEYS: "key-one,key-two",
-    MUNDUSX_AGENT_MODEL_IDS: "model-one,model-two",
-  }), [
-    { baseUrl: "https://one.example", apiKey: "key-one", model: "model-one" },
-    { baseUrl: "https://two.example/v1", apiKey: "key-two", model: "model-two" },
-  ]);
-});
-
-test("weather requests return an explicit tool-routing fallback without upstream work", async () => {
+test("deterministic MundusX Chat requests return an explicit polling fallback without upstream work", async () => {
   const events = [];
   const response = {
     writeHead: (status, headers) => events.push({ status, headers }),
@@ -4327,7 +4175,7 @@ test("weather requests return an explicit tool-routing fallback without upstream
   let fetchCalled = false;
   await streamChatTurn(
     response,
-    { message: "berlin weather today", toolMode: true },
+    { message: "Weather in Warsaw?", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async () => {
       fetchCalled = true;
@@ -4355,7 +4203,6 @@ test("live MundusX Chat stream preserves history and persists one user and assis
       writes.push(JSON.parse(init.body));
       return jsonResponse({ stored: true });
     }
-    if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
     if (url.endsWith("/v1/chat/completions")) {
       upstreamRequest = JSON.parse(init.body);
       return new Response(new ReadableStream({
@@ -4399,8 +4246,6 @@ test("Hermes model discovery intentionally hides heterogeneous implementation de
     object: "model",
     created: 0,
     owned_by: "mundusx-router",
-    context_length: 131072,
-    max_model_len: 131072,
   }]);
 });
 
@@ -4574,10 +4419,52 @@ test("extracts current office-holder queries", () => {
   assert.equal(extractCurrentOfficeQuery("Write a president speech for USA"), null);
 });
 
-test("configuration no longer exposes a provider-specific web search path", () => {
-  const config = configFromEnv({});
-  assert.equal("webSearchBaseUrl" in config, false);
-  assert.equal("webSearchApiKey" in config, false);
+test("reattaches tracked citation sources when polling a grounded job to completion", async () => {
+  const config = configFromEnv({
+    MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai",
+    MUNDUSX_WEB_SEARCH_API_KEY: "test-key",
+  });
+
+  let jobStatus = "queued";
+  const fetchImpl = async (url) => {
+    if (String(url).includes("api.search.brave.com")) {
+      return jsonResponse({
+        web: {
+          results: [{ title: "Tokyo Population", url: "https://example.com/tokyo", description: "Tokyo has about 14 million residents." }],
+        },
+      });
+    }
+    if (url === "https://uat.mundusx.ai/v1/jobs") {
+      return jsonResponse({
+        job_id: "job-grounded-poll",
+        job: { job_id: "job-grounded-poll", status: "queued", execution_mode: "tool" },
+      });
+    }
+    assert.equal(url, "https://uat.mundusx.ai/v1/jobs/job-grounded-poll");
+    return jsonResponse({
+      job: {
+        job_id: "job-grounded-poll",
+        status: jobStatus,
+        output: "Tokyo has roughly 14 million residents [1].",
+        execution_mode: "tool",
+      },
+    });
+  };
+
+  const submitted = await submitChatJob(
+    { message: "How many people live in Tokyo right now?", toolMode: true },
+    config,
+    fetchImpl,
+  );
+  assert.equal(submitted.job_id, "job-grounded-poll");
+  assert.equal(submitted.status, "queued");
+
+  jobStatus = "completed";
+  const polled = await pollChatJob("job-grounded-poll", config, fetchImpl);
+
+  assert.equal(polled.tool, "web_search");
+  assert.equal(polled.sources.length, 1);
+  assert.equal(polled.sources[0].url, "https://example.com/tokyo");
 });
 
 test("polls chat job progress and final cleaned output", async () => {
