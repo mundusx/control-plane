@@ -669,8 +669,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
   assert.match(projects, /MundusX-Setup\.exe/);
-  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.66\/MundusX-Setup\.exe/);
-  assert.match(html, /const latestLocalAgentVersion = "0\.1\.66"/);
+  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.78\/MundusX-Setup\.exe/);
+  assert.match(html, /const latestLocalAgentVersion = "0\.1\.78"/);
   assert.match(html, /projectReadinessEl\.dataset\.state = updateAvailable \? "update"/);
   assert.match(html, /projectReadinessTitleEl\.textContent = updateAvailable \? "Update required"/);
   assert.match(html, /projectAgentUpdateEl\.textContent = updateAvailable[\s\S]*?"Update now"/);
