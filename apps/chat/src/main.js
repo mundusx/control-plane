@@ -3007,6 +3007,17 @@ export function page(config = configFromEnv()) {
       renderActiveProject();
     }
 
+    function projectSelectedForSubmission() {
+      let project = activeProject;
+      if (!project) {
+        try { project = JSON.parse(localStorage.getItem(activeProjectKey) || "null"); }
+        catch { project = null; }
+      }
+      const slug = String(project?.slug || "");
+      if (!projectsAvailableOnDevice() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return null;
+      return { ...project, slug };
+    }
+
     activeProjectOpenEl?.addEventListener("click", (event) => {
       event.stopPropagation();
       if (projectContextMenuEl) projectContextMenuEl.hidden = !projectContextMenuEl.hidden;
@@ -3520,6 +3531,10 @@ export function page(config = configFromEnv()) {
         openAuthentication();
         return;
       }
+      // Freeze the selected workspace for this submission. Account refreshes,
+      // runner polling, and responsive UI updates may all refresh activeProject
+      // while an async request is being dispatched.
+      const submittedProject = projectSelectedForSubmission();
 
       activeHistoryLoadToken += 1;
       followLatestMessage = true;
@@ -3533,7 +3548,7 @@ export function page(config = configFromEnv()) {
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
-        if (activeProject && requiresLocalProjectAction(message)) {
+        if (submittedProject && requiresLocalProjectAction(message)) {
           await loadHarnessRunners().catch(() => []);
           const projectRuntime = preferredProjectRuntime();
           if (projectRuntime) {
@@ -3544,7 +3559,7 @@ export function page(config = configFromEnv()) {
             renderRuntimeControls();
             const handledBySelectedRuntime = await tryLocalAgentTurn(pending, message, conversationId, {
               runtime: projectRuntime,
-              workspaceRelative: activeProject.slug,
+              workspaceRelative: submittedProject.slug,
               allowMutations: true,
             });
             if (!handledBySelectedRuntime) throw new Error("The selected local runtime is not connected.");
@@ -3559,28 +3574,28 @@ export function page(config = configFromEnv()) {
           }
           if (!localRunnerReady) {
             const body = pending.querySelector(".message-body");
-            if (body) body.textContent = "Connect your local runner to create files, run builds, or execute tests for " + activeProject.slug + ". Your project and chat are already saved.";
-            pendingRunnerAction = { pending, message, project: activeProject, conversationId };
+            if (body) body.textContent = "Connect your local runner to create files, run builds, or execute tests for " + submittedProject.slug + ". Your project and chat are already saved.";
+            pendingRunnerAction = { pending, message, project: submittedProject, conversationId };
             setStatus("ready", "Runner needed");
-            await openProjects({ showRunnerSetup: true, project: activeProject });
+            await openProjects({ showRunnerSetup: true, project: submittedProject });
             return;
           }
-          await runActiveProjectTask(pending, message, activeProject, conversationId);
+          await runActiveProjectTask(pending, message, submittedProject, conversationId);
           syncNetworkRuntimeStatus(true);
           return;
         }
-        const chatMessage = activeProject
-          ? "Active local project: " + activeProject.slug + ". Respond in planning/chat mode and do not claim files were changed.\\n\\n" + message
+        const chatMessage = submittedProject
+          ? "Active local project: " + submittedProject.slug + ". Respond in planning/chat mode and do not claim files were changed.\\n\\n" + message
           : message;
         // A normal conversation never invokes a local harness. Local execution
         // is activated only by an explicitly attached project.
-        const handledLocally = !activeProject || runtimePreference === "cloud" ? false : await tryLocalAgentTurn(
+        const handledLocally = !submittedProject || runtimePreference === "cloud" ? false : await tryLocalAgentTurn(
           pending,
           chatMessage,
           conversationId,
           {
             runtime: runtimePreference === "auto" ? "auto" : runtimePreference,
-            workspaceRelative: activeProject?.slug || null,
+            workspaceRelative: submittedProject?.slug || null,
             allowMutations: false,
           },
         );

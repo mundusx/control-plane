@@ -516,6 +516,10 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /runtime: projectRuntime/);
   assert.match(html, /workspace_relative: options\.workspaceRelative \|\| null/);
   assert.match(html, /mutationAllowed = false;[\s\S]*renderRuntimeControls\(\)/);
+  assert.match(html, /function projectSelectedForSubmission\(\)/);
+  assert.match(html, /localStorage\.getItem\(activeProjectKey\)/);
+  assert.match(html, /const submittedProject = projectSelectedForSubmission\(\)/);
+  assert.match(html, /workspaceRelative: submittedProject\.slug/);
   assert.match(html, /id="project-context-menu"/);
   assert.match(html, /id="project-context-new"[^>]*>\+ New project/);
   assert.match(html, /id="project-context-list"/);
@@ -543,14 +547,14 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(html, /repositoryDialogEl\?\.close\(\)/);
   assert.match(html, /requiresLocalProjectAction\(message\)/);
   assert.match(html, /const projectRuntime = preferredProjectRuntime\(\)/);
-  assert.match(html, /openProjects\(\{ showRunnerSetup: true, project: activeProject \}\)/);
+  assert.match(html, /openProjects\(\{ showRunnerSetup: true, project: submittedProject \}\)/);
   assert.match(html, /existingProjectMode = Boolean\(showRunnerSetup && project\?\.slug\)/);
   assert.match(html, /repositoryDialogTitleEl\.textContent = existingProjectMode \? "Connect local runner" : localRunnerReady \? "Create project" : "Connect this computer"/);
   assert.match(html, /projectCreateFieldsEl\.hidden = existingProjectMode/);
   assert.match(html, /projectRunnerContextNameEl\.textContent = existingProjectMode \? project\.slug : "Project"/);
   assert.match(html, /projectActionsEl\.hidden = existingProjectMode/);
   assert.match(html, /Respond in planning\/chat mode and do not claim files were changed/);
-  assert.match(html, /!activeProject \|\| runtimePreference === "cloud" \? false : await tryLocalAgentTurn/);
+  assert.match(html, /!submittedProject \|\| runtimePreference === "cloud" \? false : await tryLocalAgentTurn/);
   assert.match(html, /Connection interrupted; reconnecting/);
   assert.match(html, /Waiting for Hermes to report its first step/);
   assert.match(html, /Elapsed " \+ duration\(elapsedSeconds\)/);
@@ -570,7 +574,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /window\.addEventListener\("focus", refreshRunnerAfterInstaller\)/);
   assert.match(html, /document\.visibilityState === "visible"/);
   assert.match(html, /Waiting for installer approval and runner startup/);
-  assert.match(html, /pendingRunnerAction = \{ pending, message, project: activeProject, conversationId \}/);
+  assert.match(html, /pendingRunnerAction = \{ pending, message, project: submittedProject, conversationId \}/);
   assert.match(html, /Runner connected\. Resuming your request/);
   assert.match(html, /if \(localRunnerReady\) void resumePendingRunnerAction\(\)/);
   assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady && !reconnectTimedOut\)/);
