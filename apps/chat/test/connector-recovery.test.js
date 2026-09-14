@@ -12,7 +12,7 @@ const configure = source.slice(
 
 test("the default local-agent installer is a published Windows release", () => {
   const config = configFromEnv({});
-  assert.equal(config.latestLocalAgentVersion, "0.1.78");
+  assert.equal(config.latestLocalAgentVersion, "0.1.79");
   assert.match(config.harnessRunnerDownloadUrl, /cli-windows-v0\.1\.78\/MundusX-Setup\.exe$/);
 });
 
