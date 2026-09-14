@@ -2,7 +2,7 @@ import { httpError } from "../../shared/http-error.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 
-export function createLocalAgentHttpController({ authStore, readJsonBody, sendJson }) {
+export function createLocalAgentHttpController({ authStore, readJsonBody, sendJson, waitFor = delay }) {
   if (!authStore || !readJsonBody || !sendJson) {
     throw new TypeError("Local agent HTTP controller dependencies are incomplete");
   }
@@ -41,8 +41,14 @@ export function createLocalAgentHttpController({ authStore, readJsonBody, sendJs
     if (request.method === "POST" && url.pathname === "/api/agent/connector/tasks/next") {
       const connector = await requireConnector(request, authStore);
       const body = await readJsonBody(request);
-      const task = await authStore.claimLocalAgentTask(connector.id, body?.connection_id);
-      sendJson(response, 200, { task });
+      const waitMs = Math.min(25_000, Math.max(0, Number(body?.wait_ms) || 0));
+      const deadline = Date.now() + waitMs;
+      let task = await authStore.claimLocalAgentTask(connector.id, body?.connection_id);
+      while (!task && waitMs > 0 && Date.now() < deadline && !request.destroyed) {
+        await waitFor(Math.min(1_000, Math.max(1, deadline - Date.now())));
+        task = await authStore.claimLocalAgentTask(connector.id, body?.connection_id, false);
+      }
+      sendJson(response, 200, { task, ...(waitMs > 0 ? { wait_supported: true } : {}) });
       return true;
     }
     const connectorTask = url.pathname.match(new RegExp(`^/api/agent/connector/tasks/(${UUID})/(events|complete|heartbeat)$`, "i"));
@@ -88,6 +94,13 @@ export function createLocalAgentHttpController({ authStore, readJsonBody, sendJs
     }
     return false;
   };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 async function requireConnector(request, authStore) {
