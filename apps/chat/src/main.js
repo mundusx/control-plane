@@ -30,7 +30,7 @@ import {
 
 export { localProjectAuthority };
 
-const DEFAULT_CONTROL_PLANE_URL = "https://uat.mundusx.ai";
+const DEFAULT_CONTROL_PLANE_URL = "https://control.mundusx.ai";
 const DEFAULT_TIMEOUT_SECONDS = 90;
 const DEFAULT_TOOL_PLANNER_TIMEOUT_SECONDS = 12;
 const DEFAULT_WEATHER_TTL_SECONDS = 7200;

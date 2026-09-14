@@ -441,6 +441,7 @@ test("standard markdown engine renders headings after fenced code", () => {
 });
 
 test("normalizes chat app environment", () => {
+  assert.equal(configFromEnv({}).controlPlaneUrl, "https://control.mundusx.ai");
   const config = configFromEnv({
     PORT: "3010",
     MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai///",
