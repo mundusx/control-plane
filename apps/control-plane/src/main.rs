@@ -9395,14 +9395,21 @@ fn handle_connection_with_streams(
                             |delta| {
                                 let event = match delta {
                                     Some(delta) if native_tool_turn => {
-                                        let delta: serde_json::Value = serde_json::from_str(delta)
-                                            .map_err(|e| format!("invalid native stream delta: {e}"))?;
-                                        native_stream.push(&delta)?;
-                                        chat_gateway::sse_frame(&format!("data: {}\n\n", serde_json::json!({
-                                            "id": completion_id, "object":"chat.completion.chunk",
-                                            "created":created, "model":public_model,
-                                            "choices":[{"index":0,"delta":delta,"finish_reason":null}]
-                                        })))
+                                        let deltas = native_stream::parse_deltas(delta)?;
+                                        if deltas.is_empty() {
+                                            chat_gateway::sse_keep_alive().to_string()
+                                        } else {
+                                            let mut events = String::new();
+                                            for delta in deltas {
+                                                native_stream.push(&delta)?;
+                                                events.push_str(&format!("data: {}\n\n", serde_json::json!({
+                                                    "id": completion_id, "object":"chat.completion.chunk",
+                                                    "created":created, "model":public_model,
+                                                    "choices":[{"index":0,"delta":delta,"finish_reason":null}]
+                                                })));
+                                            }
+                                            chat_gateway::sse_frame(&events)
+                                        }
                                     }
                                     Some(delta) => {
                                         streamed_content.push_str(delta);

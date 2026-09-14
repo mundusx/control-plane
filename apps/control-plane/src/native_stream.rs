@@ -1,6 +1,37 @@
 //! OpenAI message deltas, kept separate from ordinary assistant text.
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+
+/// Decode one relay payload into its original OpenAI message deltas.
+///
+/// Current node agents preserve one JSON object per relay request. Older
+/// agents batched adjacent objects without a delimiter, and some adapters may
+/// forward SSE `data:` lines. Accept all three forms during rolling upgrades.
+pub fn parse_deltas(raw: &str) -> Result<Vec<Value>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return Ok(Vec::new()); }
+
+    if trimmed.lines().any(|line| line.trim_start().starts_with("data:")) {
+        let mut values = Vec::new();
+        for line in trimmed.lines() {
+            let Some(data) = line.trim_start().strip_prefix("data:") else { continue; };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" { continue; }
+            values.extend(parse_json_sequence(data)?);
+        }
+        return Ok(values);
+    }
+
+    parse_json_sequence(trimmed)
+}
+
+fn parse_json_sequence(raw: &str) -> Result<Vec<Value>, String> {
+    serde_json::Deserializer::from_str(raw)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("invalid native stream delta: {error}"))
+}
+
 #[derive(Default)]
 pub struct NativeStream {
     content: String,
@@ -65,6 +96,19 @@ impl NativeStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parses_single_batched_and_sse_native_deltas() {
+        let first = json!({"role":"assistant"});
+        let second = json!({"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]});
+        assert_eq!(parse_deltas(&first.to_string()).unwrap(), vec![first.clone()]);
+        assert_eq!(parse_deltas(&format!("{}{}", first, second)).unwrap(), vec![first.clone(), second.clone()]);
+        assert_eq!(
+            parse_deltas(&format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n\n")).unwrap(),
+            vec![first, second]
+        );
+        assert!(parse_deltas("not-json").is_err());
+        assert!(parse_deltas("  \n ").unwrap().is_empty());
+    }
     #[test]
     fn fragments_reconcile_without_duplicate_arguments() {
         let mut stream = NativeStream::default();
