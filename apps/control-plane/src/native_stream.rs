@@ -8,28 +8,54 @@ use std::collections::BTreeMap;
 /// agents batched adjacent objects without a delimiter, and some adapters may
 /// forward SSE `data:` lines. Accept all three forms during rolling upgrades.
 pub fn parse_deltas(raw: &str) -> Result<Vec<Value>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() { return Ok(Vec::new()); }
-
-    if trimmed.lines().any(|line| line.trim_start().starts_with("data:")) {
-        let mut values = Vec::new();
-        for line in trimmed.lines() {
-            let Some(data) = line.trim_start().strip_prefix("data:") else { continue; };
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" { continue; }
-            values.extend(parse_json_sequence(data)?);
-        }
-        return Ok(values);
+    let mut decoder = DeltaDecoder::default();
+    let values = decoder.push(raw)?;
+    if decoder.pending.trim().is_empty() { Ok(values) } else {
+        Err("invalid native stream delta: EOF while parsing a JSON value".into())
     }
-
-    parse_json_sequence(trimmed)
 }
 
-fn parse_json_sequence(raw: &str) -> Result<Vec<Value>, String> {
-    serde_json::Deserializer::from_str(raw)
-        .into_iter::<Value>()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("invalid native stream delta: {error}"))
+fn payload_content(raw: &str) -> String {
+    if raw.lines().any(|line| line.trim_start().starts_with("data:")) {
+        raw.lines().filter_map(|line| {
+            let data = line.trim_start().strip_prefix("data:")?;
+            let data = data.trim();
+            (!data.is_empty() && data != "[DONE]").then_some(data)
+        }).collect::<String>()
+    } else {
+        raw.to_string()
+    }
+}
+
+#[derive(Default)]
+pub struct DeltaDecoder {
+    pending: String,
+}
+
+impl DeltaDecoder {
+    pub fn push(&mut self, raw: &str) -> Result<Vec<Value>, String> {
+        self.pending.push_str(&payload_content(raw));
+        if self.pending.trim().is_empty() {
+            self.pending.clear();
+            return Ok(Vec::new());
+        }
+
+        let mut values = Vec::new();
+        let consumed = {
+            let mut stream = serde_json::Deserializer::from_str(&self.pending).into_iter::<Value>();
+            while let Some(value) = stream.next() {
+                match value {
+                    Ok(value) => values.push(value),
+                    Err(error) if error.is_eof() => break,
+                    Err(error) => return Err(format!("invalid native stream delta: {error}")),
+                }
+            }
+            stream.byte_offset()
+        };
+        self.pending.drain(..consumed);
+        if self.pending.trim().is_empty() { self.pending.clear(); }
+        Ok(values)
+    }
 }
 
 #[derive(Default)]
@@ -108,6 +134,17 @@ mod tests {
         );
         assert!(parse_deltas("not-json").is_err());
         assert!(parse_deltas("  \n ").unwrap().is_empty());
+    }
+    #[test]
+    fn buffers_json_fragments_until_the_value_is_complete() {
+        let mut decoder = DeltaDecoder::default();
+        assert!(decoder.push("{\"role\":").unwrap().is_empty());
+        assert_eq!(
+            decoder.push("\"assistant\"}{\"content\":\"Hi\"}").unwrap(),
+            vec![json!({"role":"assistant"}), json!({"content":"Hi"})]
+        );
+        assert!(decoder.pending.is_empty());
+        assert!(decoder.push("not-json").is_err());
     }
     #[test]
     fn fragments_reconcile_without_duplicate_arguments() {

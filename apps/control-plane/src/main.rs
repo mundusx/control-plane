@@ -9386,6 +9386,7 @@ fn handle_connection_with_streams(
 
                     let mut streamed_content = String::new();
                     let mut native_stream = native_stream::NativeStream::default();
+                    let mut native_delta_decoder = native_stream::DeltaDecoder::default();
                     let completed_result = if live_stream_job {
                         chat_gateway::wait_for_job_with_stream(
                             &state,
@@ -9395,7 +9396,7 @@ fn handle_connection_with_streams(
                             |delta| {
                                 let event = match delta {
                                     Some(delta) if native_tool_turn => {
-                                        let deltas = native_stream::parse_deltas(delta)?;
+                                        let deltas = native_delta_decoder.push(delta)?;
                                         if deltas.is_empty() {
                                             chat_gateway::sse_keep_alive().to_string()
                                         } else {
