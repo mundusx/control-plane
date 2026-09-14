@@ -1000,6 +1000,10 @@ export function page(config = configFromEnv()) {
     .message.error .message-body {
       color: #b3231f;
     }
+    .stream-failure-note {
+      margin: 12px 0 0;
+      color: #b3231f;
+    }
     .agent-progress-timeline {
       display: grid;
       gap: 6px;
@@ -4131,7 +4135,7 @@ export function page(config = configFromEnv()) {
         }
         if (finishReason === "length") {
           streamState.status = "failed";
-          streamState.error = "The model reached its output limit before the response was complete. Retry will use the larger project budget.";
+          streamState.error = "MundusX could not finish this project response after automatic continuation. The completed portion is preserved below.";
           renderConversationStreamState(streamState);
           return true;
         }
@@ -4183,9 +4187,19 @@ export function page(config = configFromEnv()) {
         return;
       }
       if (state.status === "failed") {
-        node.className = "message error";
+        node.className = state.output ? "message assistant" : "message error";
         const body = node.querySelector(".message-body");
-        body.textContent = state.error || "MundusX stream failed";
+        body.textContent = "";
+        if (state.output) {
+          const partial = document.createElement("section");
+          partial.className = "streaming-response";
+          appendRichMessage(partial, state.output);
+          body.appendChild(partial);
+        }
+        const errorNote = document.createElement("p");
+        errorNote.className = "stream-failure-note";
+        errorNote.textContent = state.error || "MundusX stream failed";
+        body.appendChild(errorNote);
         appendRetryAction(body, state.message);
         setStatus("error", "Error");
         return;
@@ -6614,6 +6628,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   if (model) requestBody.model = model;
 
   return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
+    continueOnLength: codeProjectContinuation,
     onComplete: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
       await appendConversationMessage(conversationId, "assistant", content, config, fetchImpl, {
@@ -6675,31 +6690,13 @@ export async function relayControlPlaneOpenAiStream(
     "Content-Type": "application/json",
     ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
   };
-  const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ...body, stream: true }),
-  });
-  if (!upstream.ok) {
-    const text = await upstream.text();
-    throw httpError(upstream.status, text.trim().slice(0, 240) || `control plane returned ${upstream.status}`);
-  }
-  if (!upstream.body?.getReader) {
-    throw httpError(502, "control plane did not return a readable event stream");
-  }
-
-  const upstreamMode = upstream.headers?.get?.("x-mundusx-stream-mode") || "live-delta";
-  const upstreamCompletionId = upstream.headers?.get?.("x-mundusx-completion-id") || null;
-  startOpenAiStream(response, upstreamMode, upstreamCompletionId);
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
-  let parseBuffer = "";
   let content = "";
   let completionId = null;
   let finishReason = null;
-  let sawDone = false;
+  let responseStarted = false;
+  const maxContinuationAttempts = hooks.continueOnLength === true ? 2 : 0;
 
-  const inspectEvent = (eventText) => {
+  const inspectEvent = (eventText, state) => {
     const data = eventText
       .split(/\r?\n/)
       .filter((line) => line.startsWith("data:"))
@@ -6708,7 +6705,7 @@ export async function relayControlPlaneOpenAiStream(
       .trim();
     if (!data) return;
     if (data === "[DONE]") {
-      sawDone = true;
+      state.sawDone = true;
       return;
     }
     try {
@@ -6717,46 +6714,116 @@ export async function relayControlPlaneOpenAiStream(
       completionId ||= String(chunk?.id ?? "").trim() || null;
       const choice = chunk?.choices?.[0];
       const delta = String(choice?.delta?.content ?? "");
-      if (delta) content += delta;
-      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      if (delta) {
+        content += delta;
+        state.content += delta;
+      }
+      if (choice?.finish_reason) {
+        finishReason = choice.finish_reason;
+        state.finishReason = choice.finish_reason;
+      }
     } catch {
       // Preserve and relay unknown upstream events without treating them as content.
     }
   };
-  const relayEvent = (eventText) => {
-    inspectEvent(eventText);
+  const relayEvent = (eventText, state, deferTerminal) => {
+    inspectEvent(eventText, state);
+    const isDone = eventText.split(/\r?\n/).some((line) => line.trim() === "data: [DONE]");
+    if (deferTerminal && (isDone || state.finishReason === "length")) return;
     if (hooks.publicOpenAi === true) {
       const normalized = normalizePublicOpenAiStreamEvent(eventText);
       if (normalized) response.write(`${normalized}\n\n`);
-    }
+    } else response.write(`${eventText}\n\n`);
   };
 
   try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const text = decoder.decode(value, { stream: true });
-      if (!text) continue;
-      parseBuffer += text;
-      const events = parseBuffer.split(/\r?\n\r?\n/);
-      parseBuffer = events.pop() ?? "";
-      if (hooks.publicOpenAi === true) events.forEach(relayEvent);
-      else {
-        response.write(text);
-        events.forEach(inspectEvent);
+    let requestBody = { ...body, stream: true };
+    for (let attempt = 0; ; attempt += 1) {
+      const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+      if (!upstream.ok) {
+        const text = await upstream.text();
+        throw httpError(upstream.status, text.trim().slice(0, 240) || `control plane returned ${upstream.status}`);
       }
-    }
-    const tail = decoder.decode();
-    if (tail) {
-      parseBuffer += tail;
-      if (hooks.publicOpenAi !== true) response.write(tail);
-    }
-    if (parseBuffer.trim()) {
-      if (hooks.publicOpenAi === true) relayEvent(parseBuffer);
-      else inspectEvent(parseBuffer);
-    }
-    if (!sawDone) {
-      throw new Error("control-plane stream ended before [DONE]");
+      if (!upstream.body?.getReader) {
+        throw httpError(502, "control plane did not return a readable event stream");
+      }
+      if (!responseStarted) {
+        const upstreamMode = upstream.headers?.get?.("x-mundusx-stream-mode") || "live-delta";
+        const upstreamCompletionId = upstream.headers?.get?.("x-mundusx-completion-id") || null;
+        startOpenAiStream(response, upstreamMode, upstreamCompletionId);
+        responseStarted = true;
+      }
+
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      const state = { content: "", finishReason: null, sawDone: false };
+      let parseBuffer = "";
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, { stream: true });
+          if (!text) continue;
+          parseBuffer += text;
+          const events = parseBuffer.split(/\r?\n\r?\n/);
+          parseBuffer = events.pop() ?? "";
+          if (hooks.continueOnLength === true || hooks.publicOpenAi === true) {
+            events.forEach((eventText) => relayEvent(eventText, state, hooks.continueOnLength === true));
+          } else {
+            response.write(text);
+            events.forEach((eventText) => inspectEvent(eventText, state));
+          }
+        }
+        const decoderTail = decoder.decode();
+        parseBuffer += decoderTail;
+        if (decoderTail && hooks.continueOnLength !== true && hooks.publicOpenAi !== true) {
+          response.write(decoderTail);
+        }
+        if (parseBuffer.trim()) {
+          if (hooks.continueOnLength === true || hooks.publicOpenAi === true) {
+            relayEvent(parseBuffer, state, hooks.continueOnLength === true);
+          } else {
+            inspectEvent(parseBuffer, state);
+          }
+        }
+      } finally {
+        reader.releaseLock?.();
+      }
+      if (!state.sawDone) throw new Error("control-plane stream ended before [DONE]");
+
+      if (state.finishReason !== "length" || attempt >= maxContinuationAttempts) {
+        if (hooks.continueOnLength === true) {
+          if (state.finishReason === "length") {
+            response.write(`data: ${JSON.stringify({
+              id: completionId,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: PUBLIC_MODEL_ID,
+              choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+            })}\n\n`);
+          }
+          response.write("data: [DONE]\n\n");
+        }
+        break;
+      }
+
+      const previousBudget = Number(requestBody.max_tokens) || 6144;
+      requestBody = {
+        ...requestBody,
+        max_tokens: Math.min(24_576, Math.max(previousBudget + 2048, previousBudget * 2)),
+        messages: [
+          ...(Array.isArray(body.messages) ? body.messages : []),
+          { role: "assistant", content },
+          {
+            role: "user",
+            content: "Continue exactly where the previous response stopped. Do not repeat earlier content. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
+          },
+        ],
+      };
     }
     response.end();
     await hooks.onComplete?.({ content, completionId, finishReason });
@@ -6767,8 +6834,6 @@ export async function relayControlPlaneOpenAiStream(
       response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
     }
     return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
-  } finally {
-    reader.releaseLock?.();
   }
 }
 
