@@ -51,6 +51,36 @@ test("connector claims work with the MCP token identity", async () => {
   assert.deepEqual(fixture.rendered(), { status: 200, payload: { task: null } });
 });
 
+test("connector long polling returns newly queued work without reconnect delay", async () => {
+  let claims = 0;
+  const calls = [];
+  let result;
+  const controller = createLocalAgentHttpController({
+    authStore: {
+      async mcpSession() { return { id: "connector-user" }; },
+      async claimLocalAgentTask(...args) {
+        calls.push(["claim", ...args]);
+        claims += 1;
+        return claims === 1 ? null : { task_id: TASK_ID };
+      },
+    },
+    readJsonBody: async (request) => request.body || {},
+    sendJson: (_response, status, payload) => { result = { status, payload }; },
+    waitFor: async () => {},
+  });
+  await controller({
+    request: { method: "POST", body: { connection_id: TASK_ID, wait_ms: 25_000 } },
+    response: {},
+    url: new URL("https://chat.mundusx.ai/api/agent/connector/tasks/next"),
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1][4], false);
+  assert.deepEqual(result, {
+    status: 200,
+    payload: { task: { task_id: TASK_ID }, wait_supported: true },
+  });
+});
+
 test("connector heartbeat exposes cancellation state", async () => {
   const fixture = controllerFixture();
   await fixture.controller({

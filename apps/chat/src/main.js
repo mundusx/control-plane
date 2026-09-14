@@ -6920,12 +6920,19 @@ export function isRetryableHermesModelFailure(value) {
 }
 
 const agentProviderCircuits = new Map();
+const agentProviderAffinity = new Map();
+const nativeToolCapabilityCache = new Map();
 const AGENT_PROVIDER_FAILURE_THRESHOLD = 2;
 const AGENT_PROVIDER_COOLDOWN_MS = 30_000;
 const AGENT_PROVIDER_FIRST_EVENT_TIMEOUT_MS = 60_000;
+const AGENT_PROVIDER_AFFINITY_TTL_MS = 10 * 60_000;
+const NATIVE_TOOL_CAPABILITY_TTL_MS = 60_000;
+const NATIVE_TOOL_UNAVAILABLE_TTL_MS = 5_000;
 
 export function resetAgentProviderCircuits() {
   agentProviderCircuits.clear();
+  agentProviderAffinity.clear();
+  nativeToolCapabilityCache.clear();
 }
 
 function agentProviderAvailable(provider, now = Date.now()) {
@@ -6973,6 +6980,14 @@ async function requireNativeToolNode(provider, config, fetchImpl) {
   const providerBase = String(provider?.baseUrl || "").replace(/\/+$/, "");
   const controlPlaneBase = String(config?.controlPlaneUrl || "").replace(/\/+$/, "");
   if (!providerBase || providerBase !== controlPlaneBase) return;
+  const cached = nativeToolCapabilityCache.get(providerBase);
+  if (cached && cached.expiresAt > Date.now()) {
+    if (cached.capable) return;
+    throw httpError(
+      503,
+      'Hermes native tools are unavailable because the shared model node needs an agent upgrade. The local project runner is healthy; ordinary users do not need to reinstall it.',
+    );
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
@@ -6992,6 +7007,10 @@ async function requireNativeToolNode(provider, config, fetchImpl) {
         ...(node?.worker_health?.capabilities?.supported_tools || []),
       ];
       return tools.includes('native_tool_calls_v1');
+    });
+    nativeToolCapabilityCache.set(providerBase, {
+      capable,
+      expiresAt: Date.now() + (capable ? NATIVE_TOOL_CAPABILITY_TTL_MS : NATIVE_TOOL_UNAVAILABLE_TTL_MS),
     });
     if (!capable) {
       throw httpError(
@@ -7021,7 +7040,13 @@ export async function relayNativeHermesToolStream(
         model: config.modelOverride || PUBLIC_MODEL_ID,
       }];
   const available = configured.filter((provider) => agentProviderAvailable(provider));
-  const providers = available.length ? available : configured;
+  const projectTaskId = String(body?.project_task_id || "");
+  const affinity = agentProviderAffinity.get(projectTaskId);
+  if (affinity && affinity.expiresAt <= Date.now()) agentProviderAffinity.delete(projectTaskId);
+  const providers = [...(available.length ? available : configured)].sort((left, right) => {
+    if (!affinity || affinity.expiresAt <= Date.now()) return 0;
+    return Number(right.baseUrl === affinity.baseUrl) - Number(left.baseUrl === affinity.baseUrl);
+  });
   let lastError = "No native agent model provider is configured";
 
   for (const provider of providers) {
@@ -7093,6 +7118,12 @@ export async function relayNativeHermesToolStream(
 
       clearTimeout(timeout);
       noteAgentProviderSuccess(provider);
+      if (projectTaskId) {
+        agentProviderAffinity.set(projectTaskId, {
+          baseUrl: provider.baseUrl,
+          expiresAt: Date.now() + AGENT_PROVIDER_AFFINITY_TTL_MS,
+        });
+      }
       startOpenAiStream(response, "native-agent-tools");
       for (const chunk of buffered) response.write(chunk);
       while (true) {
@@ -7102,6 +7133,12 @@ export async function relayNativeHermesToolStream(
       }
       return response.end();
     } catch (error) {
+      if (projectTaskId && agentProviderAffinity.get(projectTaskId)?.baseUrl === provider.baseUrl) {
+        agentProviderAffinity.delete(projectTaskId);
+      }
+      // Context and payload errors require a smaller request, not retries or
+      // another provider. Preserve their status for the desktop connector.
+      if ([400, 413, 422].includes(error?.statusCode)) throw error;
       lastError = error?.name === "AbortError"
         ? "native agent provider timed out before its first OpenAI event"
         : String(error?.message || error);

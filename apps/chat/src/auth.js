@@ -503,7 +503,7 @@ export class PostgresAuthStore {
     return result.rows[0];
   }
 
-  async claimLocalAgentTask(userId, connectionId, projectRequestsOnly = false) {
+  async claimLocalAgentTask(userId, connectionId, projectRequestsOnly = false, touchConnection = true) {
     this.ensureReady();
     if (!UUID_PATTERN.test(String(connectionId || ""))) {
       throw Object.assign(new Error("connection_id must be a UUID"), { statusCode: 400 });
@@ -547,9 +547,11 @@ export class PostgresAuthStore {
     returning task.task_id, task.conversation_id, task.session_id, task.prompt,
       task.allow_mutations, task.runtime_requested, task.runtime_selected,
       task.workspace_relative, task.state`, [userId, connectionId, projectRequestsOnly === true]);
-    await this.pool.query(`update public.local_agent_connections set last_seen_at = now()
-      where connection_id = $1::uuid and user_id = $2::uuid and revoked_at is null`,
-    [connectionId, userId]);
+    if (touchConnection) {
+      await this.pool.query(`update public.local_agent_connections set last_seen_at = now()
+        where connection_id = $1::uuid and user_id = $2::uuid and revoked_at is null`,
+      [connectionId, userId]);
+    }
     return result.rows[0] ?? null;
   }
 
@@ -577,18 +579,24 @@ export class PostgresAuthStore {
     if (!UUID_PATTERN.test(String(taskId || "")) || !Array.isArray(events) || events.length > 200) {
       throw Object.assign(new Error("Local agent events are invalid"), { statusCode: 400 });
     }
+    const accepted = [];
     for (const item of events) {
       const sequence = Number(item?.sequence);
       if (!Number.isSafeInteger(sequence) || sequence < 0 || !item?.event || typeof item.event !== "object") {
         throw Object.assign(new Error("Local agent event is invalid"), { statusCode: 400 });
       }
-      await this.pool.query(`insert into public.local_agent_task_events (task_id, sequence, event)
-        select task_id, $3, $4::jsonb from public.local_agent_tasks
-        where task_id = $1::uuid and user_id = $2::uuid
-        on conflict (task_id, sequence) do nothing`,
-      [taskId, userId, sequence, JSON.stringify(item.event)]);
+      accepted.push({ sequence, event: item.event });
     }
-    return { accepted: events.length };
+    if (accepted.length) {
+      await this.pool.query(`insert into public.local_agent_task_events (task_id, sequence, event)
+        select task.task_id, item.sequence, item.event
+        from public.local_agent_tasks task
+        cross join jsonb_to_recordset($3::jsonb) as item(sequence bigint, event jsonb)
+        where task.task_id = $1::uuid and task.user_id = $2::uuid
+        on conflict (task_id, sequence) do nothing`,
+      [taskId, userId, JSON.stringify(accepted)]);
+    }
+    return { accepted: accepted.length };
   }
 
   async completeLocalAgentTask(userId, taskId, input = {}) {

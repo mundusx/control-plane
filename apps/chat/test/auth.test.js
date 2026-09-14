@@ -585,6 +585,30 @@ test("local agent auto claims select Hermes only when advertised and preferred",
   assert.match(queries[0].sql, /order by created_at desc/);
 });
 
+test("local agent progress events are persisted in one database batch", async () => {
+  const queries = [];
+  const store = new PostgresAuthStore({}, {
+    pool: {
+      async query(sql, values) {
+        queries.push({ sql, values });
+        return { rows: [], rowCount: 0 };
+      },
+    },
+  });
+  const result = await store.appendLocalAgentEvents(
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    [
+      { sequence: 1, event: { type: "tool_started" } },
+      { sequence: 2, event: { type: "tool_completed" } },
+    ],
+  );
+  assert.deepEqual(result, { accepted: 2 });
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /jsonb_to_recordset/);
+  assert.equal(JSON.parse(queries[0].values[2]).length, 2);
+});
+
 test("project model jobs safely requeue retryable failures with the same idempotency key", async () => {
   let insert;
   const store = new PostgresAuthStore({}, { pool: {

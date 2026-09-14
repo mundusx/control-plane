@@ -4308,6 +4308,85 @@ test("native Hermes tools fail fast when the MundusX model node is outdated", as
   );
 });
 
+test("native Hermes capability discovery is reused across project model turns", async () => {
+  resetAgentProviderCircuits();
+  let discoveryRequests = 0;
+  let completionRequests = 0;
+  const encoder = new TextEncoder();
+  const response = () => ({
+    writableEnded: false,
+    writeHead() {},
+    flushHeaders() {},
+    write() { return true; },
+    end() { this.writableEnded = true; },
+  });
+  const config = configFromEnv({
+    MUNDUSX_CONTROL_PLANE_URL: "https://control.mundusx.ai",
+    MUNDUSX_AGENT_MODEL_BASE_URLS: "https://control.mundusx.ai",
+    MUNDUSX_OPERATOR_TOKEN: "operator-secret",
+  });
+  const body = {
+    project_task_id: "123e4567-e89b-42d3-a456-426614174000",
+    messages: [{ role: "user", content: "Inspect the project" }],
+    tools: [{ type: "function", function: { name: "search_files", parameters: { type: "object" } } }],
+  };
+  const fetchImpl = async (url) => {
+    if (url.includes("/v1/nodes")) {
+      discoveryRequests += 1;
+      return jsonResponse({ items: [{ state: "ready", capabilities: { supported_tools: ["native_tool_calls_v1"] } }] });
+    }
+    completionRequests += 1;
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"tool-turn","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
+        controller.close();
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+  await relayNativeHermesToolStream(response(), body, config, fetchImpl);
+  await relayNativeHermesToolStream(response(), body, config, fetchImpl);
+  assert.equal(discoveryRequests, 1);
+  assert.equal(completionRequests, 2);
+});
+
+test("native Hermes keeps a project on the provider that accepted its previous turn", async () => {
+  resetAgentProviderCircuits();
+  const requestedHosts = [];
+  const encoder = new TextEncoder();
+  const response = () => ({
+    writableEnded: false,
+    writeHead() {},
+    flushHeaders() {},
+    write() { return true; },
+    end() { this.writableEnded = true; },
+  });
+  const config = configFromEnv({
+    MUNDUSX_AGENT_MODEL_BASE_URLS: "https://primary.example/v1,https://backup.example/v1",
+    MUNDUSX_AGENT_MODEL_IDS: "tool-model-a,tool-model-b",
+  });
+  const body = {
+    project_task_id: "123e4567-e89b-42d3-a456-426614174000",
+    messages: [{ role: "user", content: "Inspect the project" }],
+    tools: [{ type: "function", function: { name: "search_files", parameters: { type: "object" } } }],
+  };
+  let primaryFailures = 0;
+  const fetchImpl = async (url) => {
+    requestedHosts.push(new URL(url).host);
+    if (url.includes("primary.example") && primaryFailures++ === 0) {
+      return new Response("unavailable", { status: 502 });
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"tool-turn","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
+        controller.close();
+      },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  };
+  await relayNativeHermesToolStream(response(), body, config, fetchImpl);
+  await relayNativeHermesToolStream(response(), body, config, fetchImpl);
+  assert.deepEqual(requestedHosts, ["primary.example", "backup.example", "backup.example"]);
+});
+
 test("agent model provider configuration keeps aligned models and credentials", () => {
   assert.deepEqual(parseAgentModelProviders({
     MUNDUSX_AGENT_MODEL_BASE_URLS: "https://one.example, https://two.example/v1/",
