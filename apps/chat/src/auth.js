@@ -375,7 +375,9 @@ export class PostgresAuthStore {
     const workspaceRelative = input.workspace_relative == null
       ? null
       : String(input.workspace_relative).trim().toLowerCase();
-    if (!prompt || prompt.length > 16000 || !UUID_PATTERN.test(sessionId)) {
+    const projectIoRequest = prompt.startsWith("MUNDUSX_PROJECT_IO_V1:");
+    const promptLimit = projectIoRequest ? 60_000 : 16_000;
+    if (!prompt || prompt.length > promptLimit || !UUID_PATTERN.test(sessionId)) {
       throw Object.assign(new Error("Local agent task is invalid"), { statusCode: 400 });
     }
     if (conversationId && !UUID_PATTERN.test(String(conversationId))) {
@@ -386,6 +388,25 @@ export class PostgresAuthStore {
     }
     if (workspaceRelative && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(workspaceRelative)) {
       throw Object.assign(new Error("workspace_relative must be a project slug"), { statusCode: 400 });
+    }
+    let browserConnection = null;
+    if (projectIoRequest) {
+      let operation;
+      try {
+        operation = JSON.parse(prompt.slice("MUNDUSX_PROJECT_IO_V1:".length));
+      } catch {
+        throw Object.assign(new Error("Invalid project operation"), { statusCode: 400 });
+      }
+      browserConnection = operation?.connection_id;
+      if (!workspaceRelative || !UUID_PATTERN.test(String(browserConnection || ""))) {
+        throw Object.assign(new Error("Project file access requires a project and connected device"), { statusCode: 400 });
+      }
+      const connection = await this.pool.query(`select connection_id from public.local_agent_connections
+        where connection_id = $1::uuid and user_id = $2::uuid and revoked_at is null
+          and capabilities->>'project_browser' = 'true'`, [browserConnection, userId]);
+      if (!connection.rows.length) {
+        throw Object.assign(new Error("Project device is unavailable"), { statusCode: 403 });
+      }
     }
     const taskId = randomUUID();
     const result = await this.pool.query(`with superseded as (
@@ -398,13 +419,15 @@ export class PostgresAuthStore {
         and state = 'queued'
         and $8::text is not null
         and workspace_relative = $8
+        and left(prompt, 22) <> 'MUNDUSX_PROJECT_IO_V1:'
+        and left($5::text, 22) <> 'MUNDUSX_PROJECT_IO_V1:'
       returning task_id
     )
     insert into public.local_agent_tasks
-      (task_id, user_id, conversation_id, session_id, prompt, allow_mutations, runtime_requested, workspace_relative)
-      values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8)
+      (task_id, user_id, conversation_id, session_id, prompt, allow_mutations, runtime_requested, workspace_relative, connection_id)
+      values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9::uuid)
       returning task_id, conversation_id, session_id, runtime_requested, workspace_relative, state, created_at`,
-    [taskId, userId, conversationId, sessionId, prompt, input.allow_mutations === true, runtimeRequested, workspaceRelative]);
+    [taskId, userId, conversationId, sessionId, prompt, input.allow_mutations === true, runtimeRequested, workspaceRelative, browserConnection]);
     return result.rows[0];
   }
 
@@ -422,6 +445,7 @@ export class PostgresAuthStore {
         and (
         state = 'queued' or (state = 'running' and lease_expires_at < now())
       )
+        and (connection_id is null or connection_id = $2::uuid)
         and (runtime_requested <> 'hermes' or exists (
           select 1 from public.local_agent_connections runtime_connection
           where runtime_connection.connection_id = $2::uuid
