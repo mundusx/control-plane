@@ -147,8 +147,8 @@ export function configFromEnv(env = process.env) {
     harnessAllowedPathPrefixes: (env.MUNDUSX_HARNESS_ALLOWED_PATH_PREFIXES ?? "").trim(),
     harnessValidationProfiles: (env.MUNDUSX_HARNESS_VALIDATION_PROFILES ?? "").trim(),
     harnessRunnerDownloadUrl: (env.MUNDUSX_HARNESS_RUNNER_DOWNLOAD_URL ?? "").trim()
-      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.66/MundusX-Setup.exe",
-    latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.66",
+      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.67/MundusX-Setup.exe",
+    latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.67",
     modelOverride: (env.MUNDUSX_CHAT_MODEL ?? env.MUNDUSX_CHAT_DEFAULT_MODEL ?? "").trim(),
     weatherCacheUrl: (
       env.MUNDUSX_WEATHER_CACHE_URL ??
@@ -279,6 +279,31 @@ export function page(config = configFromEnv()) {
       </form>` : ""}
     </section>
   </div>`;
+  const codeProjectDialog = config.harnessUiEnabled ? `<div class="projects-overlay" id="code-project-dialog" hidden>
+    <section class="harness-dialog projects-dialog code-project-dialog" role="dialog" aria-modal="true" aria-labelledby="code-project-dialog-title">
+      <button class="dialog-close" id="code-project-dialog-close" type="button" aria-label="Close">&times;</button>
+      <header class="project-heading">
+        <h2 id="code-project-dialog-title">Add code to project</h2>
+        <p>Review the destination and exact code before it is written on your computer.</p>
+      </header>
+      <form id="code-project-form" class="harness-form">
+        <div class="code-project-fields">
+          <label>Project<select name="project_slug" required></select></label>
+          <label>File path<input name="file_path" type="text" maxlength="500" autocomplete="off" required></label>
+        </div>
+        <section class="code-project-review" aria-live="polite">
+          <div class="code-project-review-heading"><strong id="code-project-review-title">Proposed code</strong><span id="code-project-language"></span></div>
+          <pre id="code-project-current" hidden></pre>
+          <pre id="code-project-proposed"></pre>
+        </section>
+        <p class="code-project-status" id="code-project-status" role="status">Choose a project and review the destination.</p>
+        <footer class="project-actions code-project-actions">
+          <button class="code-project-secondary" id="code-project-review" type="button">Review destination</button>
+          <button class="harness-submit" id="code-project-submit" type="submit" disabled>Add to project</button>
+        </footer>
+      </form>
+    </section>
+  </div>` : "";
   const mcpDialog = config.mcpEnabled ? `<div class="projects-overlay" id="mcp-dialog" hidden>
     <section class="harness-dialog mcp-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-dialog-title">
       <button class="dialog-close" id="mcp-dialog-close" type="button" aria-label="Close">&times;</button>
@@ -1675,6 +1700,19 @@ export function page(config = configFromEnv()) {
     .projects-dialog .harness-form textarea,.projects-dialog .harness-form select,.projects-dialog .harness-form input[type="text"],.projects-dialog .harness-form input:not([type]) { min-height:42px; color:var(--text); background:color-mix(in srgb,var(--panel) 92%,var(--bg)); }
     .projects-dialog .harness-form input:focus { border-color:color-mix(in srgb,var(--purple) 56%,var(--line-strong)); outline:3px solid color-mix(in srgb,var(--purple) 12%,transparent); }
     .projects-dialog .project-browser { margin-top: 16px; padding: 13px 2px 0; }
+    .code-project-dialog { width:min(760px,calc(100vw - 20px)); }
+    .code-project-dialog .project-heading p { margin:6px 0 0; color:var(--muted); font-size:13px; }
+    .code-project-fields { display:grid; grid-template-columns:minmax(150px,.7fr) minmax(220px,1.3fr); gap:12px; }
+    .code-project-review { overflow:hidden; border:1px solid var(--line); border-radius:12px; background:color-mix(in srgb,var(--panel) 88%,var(--bg)); }
+    .code-project-review-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border-bottom:1px solid var(--line); }
+    .code-project-review-heading span { color:var(--muted-2); font:700 10px/1 ui-monospace,monospace; text-transform:uppercase; }
+    .code-project-review pre { max-height:260px; margin:0; overflow:auto; padding:14px; color:var(--text); background:transparent; font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre; }
+    .code-project-review pre + pre { border-top:1px solid var(--line); }
+    .code-project-current::before { content:"CURRENT FILE"; display:block; margin-bottom:10px; color:var(--red); font:700 10px/1 ui-monospace,monospace; }
+    .code-project-proposed::before { content:"PROPOSED CODE"; display:block; margin-bottom:10px; color:var(--green); font:700 10px/1 ui-monospace,monospace; }
+    .code-project-status { min-height:20px; margin:0; color:var(--muted); font-size:13px; }
+    .code-project-actions { padding-top:0; }
+    .code-project-secondary { border:1px solid var(--line-strong); border-radius:9px; padding:10px 14px; color:var(--text); background:var(--panel); }
     .auth-gate { position:fixed; inset:0; z-index:1000; display:grid; place-items:center; padding:20px; background:rgba(12,15,31,.28); backdrop-filter:blur(8px); }
     .auth-gate[hidden] { display: none; }
     .auth-card { position:relative; width:min(410px,calc(100vw - 32px)); padding:32px; border:1px solid var(--line); border-radius:22px; color:var(--text); background:color-mix(in srgb,var(--panel) 96%,var(--bg)); box-shadow:0 28px 80px rgba(19,20,50,.28); display:grid; gap:18px; }
@@ -1880,7 +1918,7 @@ export function page(config = configFromEnv()) {
     @media (max-width:1050px) { .capability-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
     @media (max-width:860px) { .welcome h1 { font-size:clamp(30px,8vw,42px); } }
     @media (max-width:560px) { .capability-grid{grid-template-columns:1fr 1fr;gap:8px}.capability-card{grid-template-columns:28px 1fr;padding:10px}.capability-icon{width:28px;height:28px}.welcome-heading{gap:4px}.active-project-context strong{max-width:90px}#web-search-label{display:none} }
-    @media (max-width:720px) { .projects-dialog{width:calc(100vw - 18px);max-height:calc(100vh - 18px)}.projects-dialog .dialog-close{top:10px;right:10px}.project-heading{padding:18px 52px 10px 16px}.projects-dialog .harness-form{padding:8px 16px 16px}.project-field-wide{grid-column:auto}.project-actions{align-items:stretch;flex-direction:column}.project-actions .harness-submit{width:100%}.mcp-token-form{grid-template-columns:1fr}.mcp-token-form button{width:100%} }
+    @media (max-width:720px) { .projects-dialog{width:calc(100vw - 18px);max-height:calc(100vh - 18px)}.projects-dialog .dialog-close{top:10px;right:10px}.project-heading{padding:18px 52px 10px 16px}.projects-dialog .harness-form{padding:8px 16px 16px}.project-field-wide{grid-column:auto}.project-actions{align-items:stretch;flex-direction:column}.project-actions .harness-submit{width:100%}.mcp-token-form{grid-template-columns:1fr}.mcp-token-form button{width:100%}.code-project-fields{grid-template-columns:1fr} }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; animation-duration:.001ms!important; animation-iteration-count:1!important; transition-duration:.001ms!important; } }
   </style>
 </head>
@@ -1955,6 +1993,7 @@ export function page(config = configFromEnv()) {
       </div>
     </aside>
     ${repositoryDialog}
+    ${codeProjectDialog}
     ${mcpDialog}
     <div class="app-toast" id="app-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <main id="chat-main" class="is-empty-chat">
@@ -2056,6 +2095,18 @@ export function page(config = configFromEnv()) {
     const repositoryDialogEl = document.getElementById("repository-dialog");
     const repositoryDialogCloseEl = document.getElementById("repository-dialog-close");
     const repositoryDialogTitleEl = document.getElementById("project-dialog-title");
+    const codeProjectDialogEl = document.getElementById("code-project-dialog");
+    const codeProjectDialogCloseEl = document.getElementById("code-project-dialog-close");
+    const codeProjectFormEl = document.getElementById("code-project-form");
+    const codeProjectSelectEl = codeProjectFormEl?.elements.namedItem("project_slug");
+    const codeProjectPathEl = codeProjectFormEl?.elements.namedItem("file_path");
+    const codeProjectReviewEl = document.getElementById("code-project-review");
+    const codeProjectSubmitEl = document.getElementById("code-project-submit");
+    const codeProjectCurrentEl = document.getElementById("code-project-current");
+    const codeProjectProposedEl = document.getElementById("code-project-proposed");
+    const codeProjectReviewTitleEl = document.getElementById("code-project-review-title");
+    const codeProjectLanguageEl = document.getElementById("code-project-language");
+    const codeProjectStatusEl = document.getElementById("code-project-status");
     const projectCreateFieldsEl = document.getElementById("project-create-fields");
     const projectPurposeNoteEl = document.getElementById("project-purpose-note");
     const projectRunnerContextEl = document.getElementById("project-runner-context");
@@ -2095,6 +2146,9 @@ export function page(config = configFromEnv()) {
     let mutationAllowed = false;
     let lastLocalAgentStatus = null;
     let appToastTimer = null;
+    let codeProjectDraft = null;
+    let codeProjectReviewed = null;
+    let codeProjectBusy = false;
     function loadStoredProjectContext(namespace) {
       activeProjectKey = "mundusx.chat.activeProject.v1:" + namespace;
       recentProjectsKey = "mundusx.chat.localProjects.v1:" + namespace;
@@ -2441,6 +2495,205 @@ export function page(config = configFromEnv()) {
       setWorkspaceDestination("chats");
     }
 
+    function closeCodeProjectDialog() {
+      if (!codeProjectDialogEl || codeProjectBusy) return;
+      codeProjectDialogEl.hidden = true;
+      codeProjectReviewed = null;
+      codeProjectDraft = null;
+      promptEl?.focus();
+    }
+
+    function populateCodeProjectChoices(preferredSlug = "") {
+      if (!codeProjectSelectEl) return;
+      const slugs = [...new Set([
+        activeProject?.slug,
+        ...availableProjectSlugs,
+      ].filter(Boolean))];
+      codeProjectSelectEl.replaceChildren();
+      if (!slugs.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "Create a project first";
+        codeProjectSelectEl.appendChild(option);
+        return;
+      }
+      for (const slug of slugs) {
+        const option = document.createElement("option");
+        option.value = slug;
+        option.textContent = slug;
+        option.selected = slug === (preferredSlug || activeProject?.slug || slugs[0]);
+        codeProjectSelectEl.appendChild(option);
+      }
+    }
+
+    async function openCodeProjectDialog(draft) {
+      if (!codeProjectDialogEl || !codeProjectFormEl) return;
+      if (!currentUser) {
+        showToast("Sign in before adding code to a local project");
+        openAuthentication();
+        return;
+      }
+      codeProjectDraft = draft;
+      codeProjectReviewed = null;
+      codeProjectBusy = false;
+      codeProjectDialogEl.hidden = false;
+      populateCodeProjectChoices(activeProject?.slug || "");
+      codeProjectPathEl.value = draft.path;
+      codeProjectProposedEl.textContent = draft.code;
+      codeProjectCurrentEl.hidden = true;
+      codeProjectCurrentEl.textContent = "";
+      codeProjectReviewTitleEl.textContent = "Proposed code";
+      codeProjectLanguageEl.textContent = draft.language;
+      codeProjectSubmitEl.disabled = true;
+      codeProjectReviewEl.disabled = false;
+      codeProjectStatusEl.textContent = codeProjectSelectEl.value
+        ? "Review the destination before writing the file."
+        : "Create a project before adding this code.";
+      try {
+        await loadHarnessRunners();
+        populateCodeProjectChoices(activeProject?.slug || codeProjectSelectEl.value);
+        if (!localRunnerReady) codeProjectStatusEl.textContent = "Connect the local MundusX agent before adding code.";
+      } catch (error) {
+        codeProjectStatusEl.textContent = error?.message || "Local project status is unavailable.";
+      }
+      codeProjectPathEl?.focus();
+    }
+
+    function validProjectFilePath(value) {
+      const path = String(value || "").trim();
+      if (!path || path.length > 500 || path.startsWith("/") || path.includes("\\\\") || path.includes(":")) return false;
+      return path.split("/").every((part) => part && part !== "." && part !== ".." && !part.endsWith(".") && !part.endsWith(" "));
+    }
+
+    async function runCodeProjectOperation(slug, request, write = false) {
+      const statusResponse = await fetch("/api/agent/status", { cache: "no-store" });
+      const status = await readApiPayload(statusResponse, "Could not check the local connection");
+      if (!statusResponse.ok) throw new Error(status.error || "Could not check the local connection");
+      const capable = (Array.isArray(status.connections) ? status.connections : [])
+        .filter((connection) => connection.online && connection.capabilities?.project_browser === true);
+      const device = capable[0];
+      if (!device) {
+        const anyOnline = (status.connections || []).some((connection) => connection.online);
+        throw new Error(anyOnline
+          ? "Update the MundusX desktop app to add reviewed project-file support."
+          : "Open MundusX on the project computer, then reconnect it.");
+      }
+      const operation = { ...request, connection_id: device.connection_id };
+      const created = await fetch("/api/agent/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: "MUNDUSX_PROJECT_IO_V1:" + JSON.stringify(operation),
+          session_id: crypto.randomUUID(),
+          allow_mutations: write,
+          runtime: "native",
+          workspace_relative: slug,
+        }),
+      });
+      let task = await readApiPayload(created, "Could not send the project file request");
+      if (!created.ok) throw new Error(task.error || "Could not send the project file request");
+      const deadline = Date.now() + 90000;
+      while (!["completed", "failed", "cancelled"].includes(task.state)) {
+        if (Date.now() >= deadline) throw new Error("The local connector is still busy. Check the project before trying again.");
+        await sleep(750);
+        const response = await fetch("/api/agent/tasks/" + encodeURIComponent(task.task_id));
+        task = await readApiPayload(response, "Could not check the project file request");
+        if (!response.ok) throw new Error(task.error || "Could not check the project file request");
+      }
+      if (task.state !== "completed") throw new Error(task.error || "The project file request did not complete");
+      return task.result || {};
+    }
+
+    function resetCodeProjectReview() {
+      codeProjectReviewed = null;
+      if (codeProjectSubmitEl) codeProjectSubmitEl.disabled = true;
+      if (codeProjectCurrentEl) {
+        codeProjectCurrentEl.hidden = true;
+        codeProjectCurrentEl.textContent = "";
+      }
+      if (codeProjectReviewTitleEl) codeProjectReviewTitleEl.textContent = "Proposed code";
+      if (codeProjectStatusEl && codeProjectDraft) codeProjectStatusEl.textContent = "Review the destination before writing the file.";
+    }
+
+    codeProjectSelectEl?.addEventListener("change", resetCodeProjectReview);
+    codeProjectPathEl?.addEventListener("input", resetCodeProjectReview);
+    codeProjectReviewEl?.addEventListener("click", async () => {
+      if (!codeProjectDraft || codeProjectBusy) return;
+      const slug = String(codeProjectSelectEl.value || "");
+      const path = String(codeProjectPathEl.value || "").trim();
+      if (!slug) {
+        codeProjectDialogEl.hidden = true;
+        await openProjects();
+        return;
+      }
+      if (!validProjectFilePath(path)) {
+        codeProjectStatusEl.textContent = "Enter a relative file path inside the project, such as src/main.js.";
+        return;
+      }
+      codeProjectBusy = true;
+      codeProjectReviewEl.disabled = true;
+      codeProjectStatusEl.textContent = "Checking the destination on your computer…";
+      try {
+        const current = await runCodeProjectOperation(slug, { operation: "inspect_file", path });
+        codeProjectReviewed = { slug, path, exists: current.exists === true, content: current.content || "" };
+        codeProjectCurrentEl.hidden = !codeProjectReviewed.exists;
+        codeProjectCurrentEl.textContent = codeProjectReviewed.content;
+        codeProjectReviewTitleEl.textContent = codeProjectReviewed.exists ? "Review replacement" : "Review new file";
+        if (codeProjectReviewed.exists && codeProjectReviewed.content === codeProjectDraft.code) {
+          codeProjectStatusEl.textContent = "This project file already matches the code block.";
+          codeProjectSubmitEl.disabled = true;
+        } else {
+          codeProjectStatusEl.textContent = codeProjectReviewed.exists
+            ? "The current file and proposed code are shown below. Add to project will replace this file only."
+            : "This is a new file. Add to project will create its parent folders when needed.";
+          codeProjectSubmitEl.disabled = false;
+        }
+      } catch (error) {
+        codeProjectStatusEl.textContent = error?.message || "The destination could not be reviewed.";
+      } finally {
+        codeProjectBusy = false;
+        codeProjectReviewEl.disabled = false;
+      }
+    });
+
+    codeProjectFormEl?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!codeProjectDraft || !codeProjectReviewed || codeProjectBusy) return;
+      const slug = String(codeProjectSelectEl.value || "");
+      const path = String(codeProjectPathEl.value || "").trim();
+      if (slug !== codeProjectReviewed.slug || path !== codeProjectReviewed.path) {
+        resetCodeProjectReview();
+        return;
+      }
+      codeProjectBusy = true;
+      codeProjectReviewEl.disabled = true;
+      codeProjectSubmitEl.disabled = true;
+      codeProjectSubmitEl.textContent = "Adding…";
+      codeProjectStatusEl.textContent = "Writing the reviewed code on your computer…";
+      try {
+        const request = {
+          operation: "write_file",
+          path,
+          content: codeProjectDraft.code,
+          ...(codeProjectReviewed.exists
+            ? { expected_content: codeProjectReviewed.content }
+            : { expected_missing: true }),
+        };
+        await runCodeProjectOperation(slug, request, true);
+        codeProjectBusy = false;
+        closeCodeProjectDialog();
+        setActiveProject({ slug });
+        showToast("Added code to " + slug + "/" + path);
+      } catch (error) {
+        codeProjectStatusEl.textContent = error?.message || "The code could not be added to the project.";
+        resetCodeProjectReview();
+      } finally {
+        codeProjectBusy = false;
+        codeProjectReviewEl.disabled = false;
+        codeProjectSubmitEl.textContent = "Add to project";
+      }
+    });
+
     function showToast(message) {
       if (!appToastEl) return;
       if (appToastTimer) window.clearTimeout(appToastTimer);
@@ -2554,8 +2807,14 @@ export function page(config = configFromEnv()) {
     repositoryOpenEl?.addEventListener("click", () => openProjects());
     repositoryOpenMobileEl?.addEventListener("click", () => openProjects());
     repositoryDialogCloseEl?.addEventListener("click", closeProjects);
+    codeProjectDialogCloseEl?.addEventListener("click", closeCodeProjectDialog);
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      if (codeProjectDialogEl && !codeProjectDialogEl.hidden) {
+        event.preventDefault();
+        closeCodeProjectDialog();
+        return;
+      }
       if (repositoryDialogEl && !repositoryDialogEl.hidden) {
         event.preventDefault();
         closeProjects();
@@ -3178,6 +3437,7 @@ export function page(config = configFromEnv()) {
         harnessFormEl.reset();
         closeProjects();
         showToast('Project "' + projectSlug + '" created on this computer');
+        if (codeProjectDraft) void openCodeProjectDialog(codeProjectDraft);
         promptEl?.focus();
       } catch (error) {
         harnessResultEl.textContent = error?.message || "The project folder could not be created";
@@ -4899,6 +5159,7 @@ export function page(config = configFromEnv()) {
       wrapper.className = "code-block";
       const normalizedLanguage = normalizeCodeLanguage(language);
       const safeDisplayName = sanitizeCodeFilename(displayName);
+      const suggestedProjectPath = suggestProjectFilePath(displayName, normalizedLanguage);
       wrapper.setAttribute("aria-label", safeDisplayName ? "Code file " + safeDisplayName : normalizedLanguage + " code");
       const header = document.createElement("div");
       header.className = "code-header";
@@ -4934,6 +5195,12 @@ export function page(config = configFromEnv()) {
           delete saveButton.dataset.state;
         }, 1600);
       });
+      const addToProjectButton = codeProjectDialogEl
+        ? createCodeAction("Add to project", "Add code to a local project")
+        : null;
+      addToProjectButton?.addEventListener("click", () => {
+        openCodeProjectDialog({ code: String(code || ""), language: normalizedLanguage, path: suggestedProjectPath });
+      });
       const copyButton = createCodeAction("Copy", "Copy code");
       copyButton.addEventListener("click", async () => {
         const copied = await copyCodeToClipboard(code);
@@ -4945,7 +5212,9 @@ export function page(config = configFromEnv()) {
           delete copyButton.dataset.state;
         }, 1600);
       });
-      actions.append(collapseButton, saveButton, copyButton);
+      actions.append(collapseButton);
+      if (addToProjectButton) actions.append(addToProjectButton);
+      actions.append(saveButton, copyButton);
       header.append(title, actions);
       const pre = document.createElement("pre");
       const codeNode = document.createElement("code");
@@ -5065,13 +5334,7 @@ export function page(config = configFromEnv()) {
     }
 
     function saveCodeFile(code, language, displayName = "") {
-      const extensions = {
-        bash: "sh", "c#": "cs", "c++": "cpp", css: "css", go: "go", html: "html",
-        java: "java", javascript: "js", json: "json", kotlin: "kt", php: "php",
-        python: "py", ruby: "rb", rust: "rs", sql: "sql", swift: "swift",
-        typescript: "ts", xml: "xml", yaml: "yaml",
-      };
-      const extension = extensions[language] || "txt";
+      const extension = codeFileExtension(language);
       const blob = new Blob([String(code || "")], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -5085,6 +5348,28 @@ export function page(config = configFromEnv()) {
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+
+    function codeFileExtension(language) {
+      const extensions = {
+        bash: "sh", "c#": "cs", "c++": "cpp", css: "css", go: "go", html: "html",
+        java: "java", javascript: "js", json: "json", kotlin: "kt", php: "php",
+        python: "py", ruby: "rb", rust: "rs", sql: "sql", swift: "swift",
+        typescript: "ts", xml: "xml", yaml: "yaml",
+      };
+      return extensions[language] || "txt";
+    }
+
+    function suggestProjectFilePath(displayName, language) {
+      const raw = String(displayName || "").trim().replace(/\\\\/g, "/").replace(/^\\/+/, "");
+      const safeParts = raw.split("/")
+        .filter((part) => part && part !== "." && part !== "..")
+        .map((part) => sanitizeCodeFilename(part))
+        .filter(Boolean);
+      const path = safeParts.join("/");
+      if (path && /\\.[a-z0-9]{1,10}$/i.test(path)) return path.slice(0, 500);
+      if (path) return (path + "." + codeFileExtension(language)).slice(0, 500);
+      return "src/mundusx-code." + codeFileExtension(language);
     }
 
     function looksLikeCode(text) {

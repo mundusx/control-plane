@@ -576,8 +576,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
   assert.match(projects, /MundusX-Setup\.exe/);
-  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.66\/MundusX-Setup\.exe/);
-  assert.match(html, /const latestLocalAgentVersion = "0\.1\.66"/);
+  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.67\/MundusX-Setup\.exe/);
+  assert.match(html, /const latestLocalAgentVersion = "0\.1\.67"/);
   assert.match(html, /projectReadinessEl\.dataset\.state = updateAvailable \? "update"/);
   assert.match(html, /projectReadinessTitleEl\.textContent = updateAvailable \? "Update required"/);
   assert.match(html, /projectAgentUpdateEl\.textContent = updateAvailable[\s\S]*?"Update now"/);
@@ -4082,6 +4082,20 @@ test("every non-empty normal Chat request uses the direct stream", () => {
   assert.equal(canLiveStreamChatTurn({ message: "Who is Ada Lovelace?", toolMode: false }), true);
   assert.equal(canLiveStreamChatTurn({ message: "Latest NVIDIA news", toolMode: true }), true);
   assert.equal(canLiveStreamChatTurn({ message: "   ", toolMode: true }), false);
+});
+
+test("code blocks can be reviewed and added to a selected local project", () => {
+  const html = page(configFromEnv({ MUNDUSX_HARNESS_UI_ENABLED: "true" }));
+  assert.match(html, /id="code-project-dialog"[^>]*hidden/);
+  assert.match(html, /id="code-project-form"/);
+  assert.match(html, /createCodeAction\("Add to project", "Add code to a local project"\)/);
+  assert.match(html, /operation: "inspect_file"/);
+  assert.match(html, /operation: "write_file"/);
+  assert.match(html, /expected_content: codeProjectReviewed\.content/);
+  assert.match(html, /expected_missing: true/);
+  assert.match(html, /connection_id: device\.connection_id/);
+  assert.match(html, /allow_mutations: write/);
+  assert.match(html, /The file changed after review|Review the destination before writing the file/);
 });
 
 test("native MundusX Chat streams complete projects as upstream deltas arrive", async () => {

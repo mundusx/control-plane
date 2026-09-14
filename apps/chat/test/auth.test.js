@@ -485,6 +485,31 @@ test("local agent auto claims select Hermes only when advertised and preferred",
   assert.match(queries[0].sql, /capabilities->'agent_runtimes' \? 'hermes'/);
   assert.match(queries[0].sql, /capabilities->>'preferred_agent' = 'hermes'/);
   assert.match(queries[0].sql, /order by created_at desc/);
+  assert.match(queries[0].sql, /connection_id is null or connection_id = \$2::uuid/);
+});
+
+test("project file tasks are bound to the selected capable device", async () => {
+  const connectionId = "11111111-1111-4111-8111-111111111111";
+  const userId = "22222222-2222-4222-8222-222222222222";
+  const queries = [];
+  const store = new PostgresAuthStore({}, { pool: {
+    async query(sql, values) {
+      queries.push({ sql, values });
+      if (sql.includes("from public.local_agent_connections")) return { rows: [{ connection_id: connectionId }] };
+      return { rows: [{ task_id: values[0], workspace_relative: values[7] }] };
+    },
+  } });
+  const operation = { operation: "inspect_file", path: "src/main.js", connection_id: connectionId };
+  const task = await store.createLocalAgentTask(userId, {
+    prompt: "MUNDUSX_PROJECT_IO_V1:" + JSON.stringify(operation),
+    session_id: "33333333-3333-4333-8333-333333333333",
+    workspace_relative: "my-project",
+  });
+  assert.equal(task.workspace_relative, "my-project");
+  assert.deepEqual(queries[0].values, [connectionId, userId]);
+  assert.equal(queries[1].values[8], connectionId);
+  assert.match(queries[1].sql, /connection_id\)\s+values/);
+  assert.match(queries[1].sql, /left\(prompt, 22\) <> 'MUNDUSX_PROJECT_IO_V1:'/);
 });
 
 test("project model jobs safely requeue retryable failures with the same idempotency key", async () => {
