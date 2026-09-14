@@ -3316,6 +3316,17 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       renderActiveProject();
     }
 
+    function projectSelectedForSubmission() {
+      let project = activeProject;
+      if (!project) {
+        try { project = JSON.parse(localStorage.getItem(activeProjectKey) || "null"); }
+        catch { project = null; }
+      }
+      const slug = String(project?.slug || "");
+      if (!projectsAvailableOnDevice() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return null;
+      return { ...project, slug };
+    }
+
     activeProjectOpenEl?.addEventListener("click", (event) => {
       if (!projectsAvailableOnDevice()) return;
       event.stopPropagation();
@@ -3801,10 +3812,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         openAuthentication();
         return;
       }
-      const mutatingProjectRequest = Boolean(activeProject && requiresLocalProjectAction(message));
+      // Freeze the selected workspace for this submission. Account refreshes,
+      // runner polling, and responsive UI updates may all refresh activeProject
+      // while an async request is being dispatched.
+      const submittedProject = projectSelectedForSubmission();
+      const mutatingProjectRequest = Boolean(submittedProject && requiresLocalProjectAction(message));
       const allowProjectMutation = mutatingProjectRequest && (
-        projectPermissionMode(activeProject.slug) === "full"
-        || window.confirm('Allow Hermes to edit files and run commands in project "' + activeProject.slug + '" for this task?')
+        projectPermissionMode(submittedProject.slug) === "full"
+        || window.confirm('Allow Hermes to edit files and run commands in project "' + submittedProject.slug + '" for this task?')
       );
       if (mutatingProjectRequest && !allowProjectMutation) return;
 
@@ -3820,13 +3835,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
-        if (activeProject && requiresLocalProjectAction(message)) {
+        if (submittedProject && requiresLocalProjectAction(message)) {
           await loadHarnessRunners().catch(() => []);
           const projectRuntime = preferredProjectRuntime();
           if (projectRuntime) {
             const handledBySelectedRuntime = await tryLocalAgentTurn(pending, message, conversationId, {
               runtime: projectRuntime,
-              workspaceRelative: activeProject.slug,
+              workspaceRelative: submittedProject.slug,
               allowMutations: allowProjectMutation,
             });
             if (!handledBySelectedRuntime) throw new Error("The selected local runtime is not connected.");
@@ -3841,28 +3856,28 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           }
           if (!localRunnerReady) {
             const body = pending.querySelector(".message-body");
-            if (body) body.textContent = "Connect your local runner to create files, run builds, or execute tests for " + activeProject.slug + ". Your project and chat are already saved.";
-            pendingRunnerAction = { pending, message, project: activeProject, conversationId };
+            if (body) body.textContent = "Connect your local runner to create files, run builds, or execute tests for " + submittedProject.slug + ". Your project and chat are already saved.";
+            pendingRunnerAction = { pending, message, project: submittedProject, conversationId };
             setStatus("ready", "Runner needed");
-            await openProjects({ showRunnerSetup: true, project: activeProject });
+            await openProjects({ showRunnerSetup: true, project: submittedProject });
             return;
           }
-          await runActiveProjectTask(pending, message, activeProject, conversationId);
+          await runActiveProjectTask(pending, message, submittedProject, conversationId);
           syncNetworkRuntimeStatus(true);
           return;
         }
-        const chatMessage = activeProject
-          ? "Active local project: " + activeProject.slug + ". Respond in planning/chat mode and do not claim files were changed.\\n\\n" + message
+        const chatMessage = submittedProject
+          ? "Active local project: " + submittedProject.slug + ". Respond in planning/chat mode and do not claim files were changed.\\n\\n" + message
           : message;
         // Ordinary model requests stay on the direct Chat API. Local execution
         // and discovery are available only inside an attached project.
-        const handledLocally = !activeProject || runtimePreference === "cloud" ? false : await tryLocalAgentTurn(
+        const handledLocally = !submittedProject || runtimePreference === "cloud" ? false : await tryLocalAgentTurn(
           pending,
           chatMessage,
           conversationId,
           {
             runtime: runtimePreference === "auto" ? "auto" : runtimePreference,
-            workspaceRelative: activeProject?.slug || null,
+            workspaceRelative: submittedProject?.slug || null,
             allowMutations: false,
           },
         );

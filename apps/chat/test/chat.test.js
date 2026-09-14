@@ -596,7 +596,11 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /localStorage\.setItem\(activeAgentTaskKey, JSON\.stringify/);
   assert.match(html, /resumePersistedLocalAgentTask\(\)/);
   assert.match(html, /Reconnecting to the active/);
-  assert.match(html, /projectPermissionMode\(activeProject\.slug\) === "full"/);
+  assert.match(html, /function projectSelectedForSubmission\(\)/);
+  assert.match(html, /localStorage\.getItem\(activeProjectKey\)/);
+  assert.match(html, /const submittedProject = projectSelectedForSubmission\(\)/);
+  assert.match(html, /projectPermissionMode\(submittedProject\.slug\) === "full"/);
+  assert.match(html, /workspaceRelative: submittedProject\.slug/);
   assert.match(html, /window\.confirm\('Allow Hermes to edit files and run commands in project/);
   assert.doesNotMatch(html, /Allow edits once|Edits allowed · once|mutationAllowed/);
   assert.match(html, /id="project-context-menu"/);
@@ -624,14 +628,14 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /\(\?:ask\|know\|understand\)/);
   assert.match(html, /\(\?:changes\?\|files\?\|steps\?\|requirements\?\)/);
   assert.match(html, /const projectRuntime = preferredProjectRuntime\(\)/);
-  assert.match(html, /openProjects\(\{ showRunnerSetup: true, project: activeProject \}\)/);
+  assert.match(html, /openProjects\(\{ showRunnerSetup: true, project: submittedProject \}\)/);
   assert.match(html, /existingProjectMode = Boolean\(showRunnerSetup && project\?\.slug\)/);
   assert.match(html, /repositoryDialogTitleEl\.textContent = existingProjectMode \? "Connect local runner" : localRunnerReady \? "Create project" : "Connect this computer"/);
   assert.match(html, /projectCreateFieldsEl\.hidden = existingProjectMode/);
   assert.match(html, /projectRunnerContextNameEl\.textContent = existingProjectMode \? project\.slug : "Project"/);
   assert.match(html, /projectActionsEl\.hidden = existingProjectMode/);
   assert.match(html, /Respond in planning\/chat mode and do not claim files were changed/);
-  assert.match(html, /!activeProject \|\| runtimePreference === "cloud" \? false : await tryLocalAgentTurn/);
+  assert.match(html, /!submittedProject \|\| runtimePreference === "cloud" \? false : await tryLocalAgentTurn/);
   assert.doesNotMatch(html, /!activeProject && requiresHermesWebResearch\(message\)/);
   assert.doesNotMatch(html, /Research this request with your available browser and web-search tools/);
   assert.match(html, /Reconnecting without losing progress/);
@@ -658,7 +662,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.doesNotMatch(projects, /I installed it|Connect browser|pairing code/);
   assert.match(html, /runnerPairingPollTimer = window\.setTimeout/);
   assert.match(html, /Waiting for installer approval and runner startup/);
-  assert.match(html, /pendingRunnerAction = \{ pending, message, project: activeProject, conversationId \}/);
+  assert.match(html, /pendingRunnerAction = \{ pending, message, project: submittedProject, conversationId \}/);
   assert.match(html, /Runner connected\. Resuming your request/);
   assert.match(html, /if \(localRunnerReady\) void resumePendingRunnerAction\(\)/);
   assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady && !reconnectTimedOut\)/);
