@@ -64,7 +64,7 @@ function renderLocalAgentAnswer(pending, payload) {
   const label = document.createElement("div");
   label.className = "meta";
   label.textContent = payload.answer.event.metadata.truncated
-    ? "Hermes · Latest answer preview (earlier text omitted)" : "Hermes · Answer in progress";
+    ? "Hermes · Current step preview (earlier text omitted)" : "Hermes · Current step";
   section.appendChild(label);
   appendRichMessage(section, text);
   scrollChatToLatest();
