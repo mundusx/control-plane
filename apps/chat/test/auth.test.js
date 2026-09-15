@@ -609,6 +609,20 @@ test("local agent progress events are persisted in one database batch", async ()
   assert.equal(JSON.parse(queries[0].values[2]).length, 2);
 });
 
+test("local agent completion rejects missing required browser acceptance evidence", async () => {
+  const store = new PostgresAuthStore({}, { pool: {
+    async query() { throw new Error("database must not be reached"); },
+  } });
+  await assert.rejects(
+    store.completeLocalAgentTask(
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      { status: "completed", result: { browser_verification_required: true, browser_verified: false } },
+    ),
+    (error) => error.statusCode === 422 && /browser acceptance evidence/.test(error.message),
+  );
+});
+
 test("project model jobs safely requeue retryable failures with the same idempotency key", async () => {
   let insert;
   const store = new PostgresAuthStore({}, { pool: {

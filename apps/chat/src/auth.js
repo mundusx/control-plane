@@ -649,6 +649,10 @@ export class PostgresAuthStore {
       throw Object.assign(new Error("task_id must be a UUID"), { statusCode: 400 });
     }
     const success = input.status !== "failed" && !input.error;
+    if (success && input.result?.browser_verification_required === true
+      && input.result?.browser_verified !== true) {
+      throw Object.assign(new Error("Frontend browser acceptance evidence is required"), { statusCode: 422 });
+    }
     const result = await this.pool.query(`update public.local_agent_tasks set
       state = case when state = 'cancelled' then 'cancelled' else $3 end,
       result = case when state = 'cancelled' then coalesce(result, $4::jsonb) else $4::jsonb end,
