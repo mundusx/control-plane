@@ -7691,15 +7691,17 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       const uniqueSegment = attempt === 0
         ? attemptContent
         : uniqueContinuationSuffix(content, attemptContent);
-      if (attempt > 0 && uniqueSegment) {
-        content += uniqueSegment;
-        writeContinuationContent(response, uniqueSegment, completionId);
+      const joinedSegment = attempt === 0
+        ? uniqueSegment
+        : normalizeContinuationBoundary(content, uniqueSegment);
+      if (attempt > 0 && joinedSegment) {
+        content += joinedSegment;
+        writeContinuationContent(response, joinedSegment, completionId);
       }
       const segmentMadeProgress = content.length > segmentStartLength;
       const reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
       if (
         attempt > 0 &&
-        attemptFinishReason === "length" &&
         !segmentMadeProgress &&
         !reachedContinuationLimit &&
         stalledContinuationAttempts < 2
@@ -7713,6 +7715,12 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           stalledContinuationAttempts,
         );
         continue;
+      }
+      if (attempt > 0 && !segmentMadeProgress) {
+        // A stopped response that only restarted the file is not a successful
+        // continuation. Surface it as incomplete after bounded recovery.
+        attemptFinishReason = "length";
+        finishReason = "length";
       }
       if (attemptFinishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (attemptFinishReason === "length") {
@@ -7789,6 +7797,34 @@ function uniqueContinuationSuffix(existingContent, candidateContent) {
   return candidate;
 }
 
+function normalizeContinuationBoundary(existingContent, candidateContent) {
+  const existing = String(existingContent ?? "");
+  const candidate = String(candidateContent ?? "");
+  if (!existing || !candidate) return candidate;
+
+  const fenceCount = (existing.match(/(?:^|\n)[ \t]{0,3}```/g) || []).length;
+  const insideFence = fenceCount % 2 === 1;
+  const openingFence = candidate.match(/^[ \t]*```[^\r\n`]*\r?\n/);
+  if (!insideFence || !openingFence) return candidate;
+
+  const suffix = candidate.slice(openingFence[0].length);
+  const firstLine = suffix
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || "";
+  const repeatedHeader = firstLine && (
+    /^(?:\/\/\s*SPDX-License-Identifier:|pragma\s+solidity\b)/i.test(firstLine) ||
+    (firstLine.length >= 12 && existing.includes(firstLine))
+  );
+  if (repeatedHeader) return "";
+
+  if (existing.endsWith("\n")) return suffix;
+  if (/^[ \t]*(?:[)\]};,.?:+\-*/%<>=&|!])/.test(suffix)) {
+    return suffix.replace(/^[ \t]+/, "");
+  }
+  return `\n${suffix}`;
+}
+
 function writeContinuationContent(response, content, completionId) {
   for (let offset = 0; offset < content.length; offset += 4096) {
     response.write(`data: ${JSON.stringify({
@@ -7830,7 +7866,7 @@ function buildContinuationRequestBody(currentBody, originalMessages, content, st
       { role: "assistant", content: continuationTail },
       {
         role: "user",
-        content: `The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.${retryInstruction}\n/no_think`,
+        content: `The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not begin with a Markdown fence or language label. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.${retryInstruction}\n/no_think`,
       },
     ],
   };
