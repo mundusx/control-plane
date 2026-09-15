@@ -1981,7 +1981,7 @@ export function page(config = configFromEnv()) {
           <textarea id="prompt" name="prompt" rows="1" placeholder="Ask everyone..." autocomplete="off" required></textarea>
           <div class="composer-actions">
             <span class="composer-left-actions">
-              ${config.harnessUiEnabled ? `<span class="active-project-context" id="active-project-context"><button class="tool-toggle project-context-open" id="active-project-open" type="button" aria-pressed="false" title="Choose a project"><span class="kbd" aria-hidden="true">⌁</span><strong id="active-project-name">Project</strong></button><button class="project-context-clear" id="active-project-clear" type="button" aria-label="Leave active project" title="Leave active project" hidden>&times;</button></span>` : ""}
+              ${config.harnessUiEnabled ? `<span class="active-project-context" id="active-project-context"><button class="tool-toggle project-context-open" id="active-project-open" type="button" aria-pressed="false" title="Choose a project"><span class="kbd" aria-hidden="true">⌁</span><strong id="active-project-name">Choose project</strong></button><button class="project-context-clear" id="active-project-clear" type="button" aria-label="Leave active project" title="Leave active project" hidden>&times;</button></span>` : ""}
               <button class="tool-toggle mutation-toggle" id="mutation-toggle" type="button" aria-pressed="false" hidden>Allow edits once</button>
             </span>
             <button class="tool-toggle" id="enter-to-send-toggle" type="button" aria-pressed="false" title="Toggle sending messages with Enter"><span class="kbd">&#8629;</span><span id="enter-to-send-label">Enter to Send</span></button>
@@ -2897,7 +2897,7 @@ export function page(config = configFromEnv()) {
         && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(activeProject.slug || "");
       if (!valid) activeProject = null;
       if (activeProjectContextEl) activeProjectContextEl.hidden = false;
-      if (activeProjectNameEl) activeProjectNameEl.textContent = activeProject?.slug || "Project";
+      if (activeProjectNameEl) activeProjectNameEl.textContent = activeProject?.slug || "Choose project";
       if (activeProjectOpenEl) activeProjectOpenEl.setAttribute("aria-pressed", String(Boolean(activeProject)));
       if (activeProjectOpenEl) activeProjectOpenEl.title = activeProject ? "Change active project" : "Choose a project";
       if (activeProjectClearEl) activeProjectClearEl.hidden = !activeProject;
