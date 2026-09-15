@@ -4441,7 +4441,7 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
 });
 
-test("project Chat can finish after more than three streamed response segments", async () => {
+test("a new full-code Chat request can finish after more than three streamed response segments", async () => {
   const encoder = new TextEncoder();
   const requests = [];
   const writes = [];
@@ -4468,8 +4468,8 @@ test("project Chat can finish after more than three streamed response segments",
   const result = await streamChatTurn(
     response,
     {
-      message: "Extend this existing Solidity project with the complete exchange contract.",
-      historyMessages: [{ role: "assistant", content: "```solidity\ncontract Exchange {\n```" }],
+      message: "create a solidity program for decentralized exchange",
+      historyMessages: [],
       toolMode: false,
     },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
