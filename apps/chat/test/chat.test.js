@@ -4340,7 +4340,7 @@ test("live MundusX Chat stream preserves history and persists one user and assis
   assert.equal(writes[1].jobId, "chatcmpl-browser");
 });
 
-test("normal Chat uses a fixed code budget without node-capacity discovery", async () => {
+test("normal Chat uses a context-safe code budget without node-capacity discovery", async () => {
   const encoder = new TextEncoder();
   let upstreamRequest = null;
   const response = {
@@ -4380,7 +4380,7 @@ test("normal Chat uses a fixed code budget without node-capacity discovery", asy
     fetchImpl,
   );
 
-  assert.equal(upstreamRequest.max_tokens, 6144);
+  assert.equal(upstreamRequest.max_tokens, 4096);
   assert.match(upstreamRequest.messages[0].content, /finish every requested route/i);
   assert.match(upstreamRequest.messages.at(-1).content, /\/no_think$/);
 });
@@ -4430,8 +4430,8 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   );
 
   assert.equal(requests.length, 2);
-  assert.equal(requests[0].max_tokens, 6144);
-  assert.equal(requests[1].max_tokens, 12288);
+  assert.equal(requests[0].max_tokens, 4096);
+  assert.equal(requests[1].max_tokens, 4096);
   assert.equal(requests[1].messages.at(-2).role, "assistant");
   assert.equal(requests[1].messages.at(-2).content, "const enrollment = {");
   assert.match(requests[1].messages.at(-1).content, /Continue exactly where/);
@@ -4441,7 +4441,7 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
 });
 
-test("a new full-code Chat request can finish after more than three streamed response segments", async () => {
+test("a new full-code Chat request with long history finishes across bounded response segments", async () => {
   const encoder = new TextEncoder();
   const requests = [];
   const writes = [];
@@ -4469,19 +4469,31 @@ test("a new full-code Chat request can finish after more than three streamed res
     response,
     {
       message: "create a solidity program for decentralized exchange",
-      historyMessages: [],
+      historyMessages: Array.from({ length: 20 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `${index % 2 === 0 ? "Earlier request" : "Earlier code"} ${index}: ${"x".repeat(5000)}`,
+      })),
       toolMode: false,
     },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (_url, init = {}) => {
       requests.push(JSON.parse(init.body));
       const segment = requests.length;
-      return streamResponse(`segment-${segment}\n`, segment < 6 ? "length" : "stop", `chatcmpl-part-${segment}`);
+      return streamResponse(
+        `segment-${segment}:${"y".repeat(1990)}\n`,
+        segment < 6 ? "length" : "stop",
+        `chatcmpl-part-${segment}`,
+      );
     },
   );
 
   assert.equal(requests.length, 6);
-  assert.equal(result.content, "segment-1\nsegment-2\nsegment-3\nsegment-4\nsegment-5\nsegment-6\n");
+  assert.match(requests[0].messages[1].content, /Earlier conversation compressed/);
+  assert.ok(requests[0].messages.reduce((total, entry) => total + entry.content.length, 0) < 16_000);
+  assert.equal(requests[1].max_tokens, 4096);
+  assert.ok(requests.at(-1).messages.at(-2).content.length <= 6000);
+  assert.ok(result.content.startsWith("segment-1:"));
+  assert.ok(result.content.endsWith(`${"y".repeat(1990)}\n`));
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
   assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
