@@ -7019,7 +7019,11 @@ async function requireNativeToolNode(provider, config, fetchImpl) {
     const payload = await upstream.json();
     const nodes = Array.isArray(payload) ? payload : payload?.items || payload?.nodes || [];
     const capable = nodes.some((node) => {
-      if (!['ready', 'online'].includes(String(node?.state || node?.status || '').toLowerCase())) return false;
+      // Busy and saturated nodes are still tool-capable. The control plane
+      // owns admission and will queue until a slot is available; treating
+      // those states as an outdated node creates a false Hermes outage while
+      // the only contributor is actively serving another turn.
+      if (!['ready', 'online', 'busy', 'saturated'].includes(String(node?.state || node?.status || '').toLowerCase())) return false;
       const tools = [
         ...(node?.capabilities?.supported_tools || []),
         ...(node?.worker_health?.capabilities?.supported_tools || []),

@@ -4333,7 +4333,7 @@ test("native Hermes capability discovery is reused across project model turns", 
   const fetchImpl = async (url) => {
     if (url.includes("/v1/nodes")) {
       discoveryRequests += 1;
-      return jsonResponse({ items: [{ state: "ready", capabilities: { supported_tools: ["native_tool_calls_v1"] } }] });
+      return jsonResponse({ items: [{ state: "busy", capabilities: { supported_tools: ["native_tool_calls_v1"] } }] });
     }
     completionRequests += 1;
     return new Response(new ReadableStream({
