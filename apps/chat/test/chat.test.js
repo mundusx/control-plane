@@ -4541,6 +4541,108 @@ test("normal Chat uses a fixed code budget without node-capacity discovery", asy
   assert.match(upstreamRequest.messages.at(-1).content, /\/no_think$/);
 });
 
+test("project Chat continues automatically when a streamed answer reaches its output limit", async () => {
+  const encoder = new TextEncoder();
+  const requests = [];
+  const writes = [];
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) {
+      this.writableEnded = true;
+      if (value) writes.push(String(value));
+    },
+  };
+  const streamResponse = (content, finishReason, id) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id, choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id, choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "Add enrollment, courses, and subjects to this college project.",
+      historyMessages: [
+        { role: "user", content: "Create a complete Node.js student API." },
+        { role: "assistant", content: "```javascript\nconst app = express();\n```" },
+      ],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (url, init = {}) => {
+      assert.equal(url.endsWith("/v1/chat/completions"), true);
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? streamResponse("const enrollment = {", "length", "chatcmpl-part-1")
+        : streamResponse("};", "stop", "chatcmpl-part-2");
+    },
+  );
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].max_tokens, 6144);
+  assert.equal(requests[1].max_tokens, 12288);
+  assert.equal(requests[1].messages.at(-2).role, "assistant");
+  assert.equal(requests[1].messages.at(-2).content, "const enrollment = {");
+  assert.match(requests[1].messages.at(-1).content, /Continue exactly where/);
+  assert.equal(result.content, "const enrollment = {};");
+  assert.equal(result.finishReason, "stop");
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
+  assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
+});
+
+test("project Chat can finish after more than three streamed response segments", async () => {
+  const encoder = new TextEncoder();
+  const requests = [];
+  const writes = [];
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) {
+      this.writableEnded = true;
+      if (value) writes.push(String(value));
+    },
+  };
+  const streamResponse = (content, finishReason, id) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id, choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id, choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "Extend this existing Solidity project with the complete exchange contract.",
+      historyMessages: [{ role: "assistant", content: "```solidity\ncontract Exchange {\n```" }],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (_url, init = {}) => {
+      requests.push(JSON.parse(init.body));
+      const segment = requests.length;
+      return streamResponse(`segment-${segment}\n`, segment < 6 ? "length" : "stop", `chatcmpl-part-${segment}`);
+    },
+  );
+
+  assert.equal(requests.length, 6);
+  assert.equal(result.content, "segment-1\nsegment-2\nsegment-3\nsegment-4\nsegment-5\nsegment-6\n");
+  assert.equal(result.finishReason, "stop");
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
+  assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
+});
+
 test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {
   const encoder = new TextEncoder();
   let upstreamRequest = null;

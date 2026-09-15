@@ -1104,6 +1104,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .message.error .message-body {
       color: #b3231f;
     }
+    .stream-failure-note {
+      margin: 12px 0 0;
+      color: #b3231f;
+    }
     .agent-progress-timeline {
       display: grid;
       gap: 8px;
@@ -4635,7 +4639,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         }
         if (finishReason === "length") {
           streamState.status = "failed";
-          streamState.error = "The model reached its output limit before the response was complete. Retry will use the larger project budget.";
+          streamState.error = "MundusX could not finish this project response after automatic continuation. The completed portion is preserved below.";
           renderConversationStreamState(streamState);
           return true;
         }
@@ -4697,9 +4701,19 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         return;
       }
       if (state.status === "failed") {
-        node.className = "message error";
+        node.className = state.output ? "message assistant" : "message error";
         const body = node.querySelector(".message-body");
-        body.textContent = state.error || "MundusX stream failed";
+        body.textContent = "";
+        if (state.output) {
+          const partial = document.createElement("section");
+          partial.className = "streaming-response";
+          appendRichMessage(partial, state.output);
+          body.appendChild(partial);
+        }
+        const errorNote = document.createElement("p");
+        errorNote.className = "stream-failure-note";
+        errorNote.textContent = state.error || "MundusX stream failed";
+        body.appendChild(errorNote);
         appendRetryAction(body, state.message);
         setStatus("error", "Error");
         return;
@@ -7331,6 +7345,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   if (model) requestBody.model = model;
 
   return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
+    continueOnLength: codeProjectContinuation,
     onComplete: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
       await appendConversationMessage(conversationId, "assistant", content, config, fetchImpl, {
@@ -7385,6 +7400,9 @@ export async function relayControlPlaneOpenAiStream(
   fetchImpl = fetch,
   hooks = {},
 ) {
+  if (hooks.continueOnLength === true && hooks.publicOpenAi !== true) {
+    return relayProjectContinuationStream(response, body, config, fetchImpl, hooks);
+  }
   const headers = {
     Accept: "text/event-stream",
     "Content-Type": "application/json",
@@ -7523,6 +7541,170 @@ export async function relayControlPlaneOpenAiStream(
     response.off?.("close", disconnect);
     await reader.cancel().catch(() => {});
     reader.releaseLock?.();
+  }
+}
+
+async function relayProjectContinuationStream(response, body, config, fetchImpl, hooks) {
+  // A long code answer can legitimately need several provider-sized segments.
+  // Keep continuation bounded by the complete accumulated answer instead of a
+  // fixed three-request ceiling, which cut otherwise healthy generations off.
+  const maxSegments = 8;
+  const maxOutputCharacters = 262_144;
+  const headers = {
+    Accept: "text/event-stream",
+    "Content-Type": "application/json",
+    ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
+  };
+  const controller = new AbortController();
+  let reader = null;
+  const disconnect = () => {
+    controller.abort();
+    reader?.cancel().catch(() => {});
+  };
+  response.once?.("close", disconnect);
+  let content = "";
+  let completionId = null;
+  let finishReason = null;
+  let responseStarted = false;
+  let requestBody = { ...body, stream: true };
+
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      const segmentStartLength = content.length;
+      const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
+        signal: controller.signal,
+        method: "POST",
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+      if (!upstream.ok) {
+        const text = await upstream.text();
+        throw httpError(upstream.status, text.trim().slice(0, 240) || `control plane returned ${upstream.status}`);
+      }
+      if (!upstream.body?.getReader) throw httpError(502, "control plane did not return a readable event stream");
+      if (!responseStarted) {
+        startOpenAiStream(
+          response,
+          upstream.headers?.get?.("x-mundusx-stream-mode") || "live-delta",
+          upstream.headers?.get?.("x-mundusx-completion-id") || null,
+          upstream.headers?.get?.("x-mundusx-resume-token") || null,
+        );
+        responseStarted = true;
+      }
+
+      reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      let parseBuffer = "";
+      let attemptFinishReason = null;
+      let sawDone = false;
+      const consumeEvent = (eventText) => {
+        const data = eventText
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n")
+          .trim();
+        if (data === "[DONE]") {
+          sawDone = true;
+          return;
+        }
+        if (!data) {
+          response.write(`${eventText}\n\n`);
+          return;
+        }
+        try {
+          const chunk = JSON.parse(data);
+          if (chunk?.error) {
+            response.write(`${eventText}\n\n`);
+            return;
+          }
+          completionId ||= String(chunk?.id ?? "").trim() || null;
+          const choice = chunk?.choices?.[0];
+          const delta = String(choice?.delta?.content ?? "");
+          if (delta) content += delta;
+          if (choice?.finish_reason) {
+            attemptFinishReason = choice.finish_reason;
+            finishReason = choice.finish_reason;
+          }
+          if (choice?.finish_reason === "length") {
+            if (delta) {
+              response.write(`data: ${JSON.stringify({
+                ...chunk,
+                choices: [{ ...choice, finish_reason: null }],
+              })}\n\n`);
+            }
+            return;
+          }
+        } catch {
+          // Relay unknown upstream events as-is.
+        }
+        response.write(`${eventText}\n\n`);
+      };
+
+      while (!sawDone) {
+        const { value, done } = await reader.read();
+        if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+        if (done) break;
+        parseBuffer += decoder.decode(value, { stream: true });
+        const events = parseBuffer.split(/\r?\n\r?\n/);
+        parseBuffer = events.pop() ?? "";
+        events.forEach(consumeEvent);
+      }
+      parseBuffer += decoder.decode();
+      if (!sawDone && parseBuffer.trim()) consumeEvent(parseBuffer);
+      await reader.cancel().catch(() => {});
+      reader.releaseLock?.();
+      reader = null;
+      if (!sawDone) throw new Error("control-plane stream ended before [DONE]");
+
+      const segmentMadeProgress = content.length > segmentStartLength;
+      const reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
+      if (attemptFinishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
+        if (attemptFinishReason === "length") {
+          response.write(`data: ${JSON.stringify({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: PUBLIC_MODEL_ID,
+            choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+          })}\n\n`);
+        }
+        response.write("data: [DONE]\n\n");
+        break;
+      }
+
+      response.write(": continuing project response\n\n");
+      const previousBudget = Number(requestBody.max_tokens) || 6144;
+      requestBody = {
+        ...requestBody,
+        max_tokens: Math.min(24_576, Math.max(previousBudget + 2048, previousBudget * 2)),
+        messages: [
+          ...(Array.isArray(body.messages) ? body.messages : []),
+          { role: "assistant", content },
+          {
+            role: "user",
+            content: "Continue exactly where the previous response stopped. Do not repeat earlier content. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
+          },
+        ],
+      };
+    }
+    response.end();
+    await hooks.onComplete?.({ content, completionId, finishReason });
+    return { content, completionId, finishReason };
+  } catch (error) {
+    if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+    const message = `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
+    console.error("[openai-stream]", JSON.stringify({ completionId, message,
+      cause: error.cause?.code ?? error.code ?? null, finishReason }));
+    if (!response.writableEnded) {
+      const payload = { error: { message, type: "mundusx_stream_error" } };
+      response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
+    }
+    return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
+  } finally {
+    response.off?.("close", disconnect);
+    await reader?.cancel().catch(() => {});
+    reader?.releaseLock?.();
   }
 }
 
