@@ -7284,6 +7284,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     : [];
   const codeProjectContinuation = isCodeProjectContinuation(message, historyMessages);
   const completeCodeResponse = codeProjectContinuation || looksLikeCompleteProgramRequest(message.toLowerCase());
+  const codeGenerationResponse = completeCodeResponse || looksLikeCodeGenerationRequest(message.toLowerCase());
   if (conversationId) {
     await appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
       console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
@@ -7327,15 +7328,18 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
 
   const model = String(body?.model ?? config.modelOverride ?? "").trim();
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona, body?.skillContext);
-  if (completeCodeResponse) {
+  if (codeGenerationResponse) {
     systemPrompt += codeProjectContinuation
       ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
       : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
+  const inferredMaxTokens = inferMaxTokens(message, body?.maxTokens);
   const initialMaxTokens = codeProjectContinuation
     ? STREAMING_CONTINUATION_MAX_TOKENS
-    : inferMaxTokens(message, body?.maxTokens);
-  const boundedHistory = completeCodeResponse
+    : codeGenerationResponse
+      ? Math.max(STREAMING_CONTINUATION_MAX_TOKENS, inferredMaxTokens)
+      : inferredMaxTokens;
+  const boundedHistory = codeGenerationResponse
     ? buildCompressedHistoryContext(historyMessages, {
         currentMessage: message,
         maxTokens: STREAMING_CODE_HISTORY_TOKENS,
@@ -7623,7 +7627,20 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       let parseBuffer = "";
       let attemptFinishReason = null;
       let attemptContent = "";
+      let streamedContinuationContent = "";
       let sawDone = false;
+      const streamContinuationProgress = (force = false) => {
+        if (attempt === 0 || (!force && attemptContent.length < 128)) return;
+        const candidate = normalizeContinuationBoundary(
+          content,
+          uniqueContinuationSuffix(content, attemptContent),
+        );
+        if (!candidate || !candidate.startsWith(streamedContinuationContent)) return;
+        const delta = candidate.slice(streamedContinuationContent.length);
+        if (!delta) return;
+        streamedContinuationContent = candidate;
+        writeContinuationContent(response, delta, completionId);
+      };
       const consumeEvent = (eventText) => {
         const data = eventText
           .split(/\r?\n/)
@@ -7651,6 +7668,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           if (delta) {
             attemptContent += delta;
             if (attempt === 0) content += delta;
+            else streamContinuationProgress();
           }
           if (choice?.finish_reason) {
             attemptFinishReason = choice.finish_reason;
@@ -7695,8 +7713,19 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         ? uniqueSegment
         : normalizeContinuationBoundary(content, uniqueSegment);
       if (attempt > 0 && joinedSegment) {
+        streamContinuationProgress(true);
+        if (
+          streamedContinuationContent &&
+          !joinedSegment.startsWith(streamedContinuationContent)
+        ) {
+          throw new Error("continuation changed after its streamed prefix");
+        }
         content += joinedSegment;
-        writeContinuationContent(response, joinedSegment, completionId);
+        writeContinuationContent(
+          response,
+          joinedSegment.slice(streamedContinuationContent.length),
+          completionId,
+        );
       }
       const segmentMadeProgress = content.length > segmentStartLength;
       const reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
@@ -12783,6 +12812,14 @@ function looksLikeCodeExplanationRequest(lower) {
     "describe the code",
     "detailed explanation",
   ]);
+}
+
+function looksLikeCodeGenerationRequest(lower) {
+  const text = String(lower ?? "");
+  const asksToGenerate = /\b(?:build|create|generate|give|implement|make|provide|show|write)\b/.test(text);
+  const namesCodeArtifact = /\b(?:api|app|application|backend|class|code|contract|function|method|program|script|server|smart contract)\b/.test(text);
+  const namesLanguage = /\b(?:c\+\+|c#|css|go|golang|html|java|javascript|node(?:\.?js)?|php|python|react(?:js)?|rust|solidity|sql|swift|typescript)\b/.test(text);
+  return asksToGenerate && (namesCodeArtifact || namesLanguage);
 }
 
 function looksLikeCompleteProgramRequest(lower) {
