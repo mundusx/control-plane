@@ -494,11 +494,31 @@ export class PostgresAuthStore {
         and left(prompt, 22) <> 'MUNDUSX_PROJECT_IO_V1:'
         and left($5::text, 22) <> 'MUNDUSX_PROJECT_IO_V1:'
       returning task_id
+    ), blocking_task as (
+      select exists (
+        select 1 from public.local_agent_tasks active_task
+        where active_task.user_id = $2::uuid
+          and $8::text is not null
+          and active_task.workspace_relative = $8
+          and active_task.prompt not like 'MUNDUSX_PROJECT_IO_V1:%'
+          and left($5::text, 22) <> 'MUNDUSX_PROJECT_IO_V1:'
+          and (
+            active_task.state = 'running'
+            or (
+              active_task.state = 'cancelled'
+              and active_task.completed_at is null
+              and active_task.cancelled_at > now() - interval '60 seconds'
+            )
+          )
+      ) as waiting_for_previous_task
+    ), inserted as (
+      insert into public.local_agent_tasks
+        (task_id, user_id, conversation_id, session_id, prompt, allow_mutations, runtime_requested, workspace_relative, connection_id)
+        values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9::uuid)
+        returning task_id, conversation_id, session_id, runtime_requested, workspace_relative, state, created_at
     )
-    insert into public.local_agent_tasks
-      (task_id, user_id, conversation_id, session_id, prompt, allow_mutations, runtime_requested, workspace_relative, connection_id)
-      values ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9::uuid)
-      returning task_id, conversation_id, session_id, runtime_requested, workspace_relative, state, created_at`,
+    select inserted.*, blocking_task.waiting_for_previous_task
+    from inserted cross join blocking_task`,
     [taskId, userId, conversationId, sessionId, prompt, input.allow_mutations === true, runtimeRequested, workspaceRelative, browserConnection]);
     return result.rows[0];
   }
@@ -528,7 +548,31 @@ export class PostgresAuthStore {
           where browser_connection.connection_id = $2::uuid
             and browser_connection.capabilities->>'project_browser' = 'true'
         )))
+        and (
+          workspace_relative is null
+          or prompt like 'MUNDUSX_PROJECT_IO_V1:%'
+          or not exists (
+            select 1 from public.local_agent_tasks active_task
+            where active_task.user_id = $1::uuid
+              and active_task.task_id <> public.local_agent_tasks.task_id
+              and active_task.workspace_relative = public.local_agent_tasks.workspace_relative
+              and active_task.prompt not like 'MUNDUSX_PROJECT_IO_V1:%'
+              and (
+                active_task.state = 'running'
+                or (
+                  active_task.state = 'cancelled'
+                  and active_task.completed_at is null
+                  and active_task.cancelled_at > now() - interval '60 seconds'
+                )
+              )
+          )
+        )
       order by created_at desc for update skip locked limit 1
+    ), settled_cancellations as (
+      update public.local_agent_tasks set completed_at = now(), lease_expires_at = null
+      where state = 'cancelled' and completed_at is null
+        and cancelled_at <= now() - interval '60 seconds'
+      returning task_id
     )
     update public.local_agent_tasks task set
       state = 'running', connection_id = $2::uuid,
@@ -606,8 +650,12 @@ export class PostgresAuthStore {
     }
     const success = input.status !== "failed" && !input.error;
     const result = await this.pool.query(`update public.local_agent_tasks set
-      state = $3, result = $4::jsonb, error = $5, completed_at = now(), lease_expires_at = null
-      where task_id = $1::uuid and user_id = $2::uuid and state = 'running'
+      state = case when state = 'cancelled' then 'cancelled' else $3 end,
+      result = case when state = 'cancelled' then coalesce(result, $4::jsonb) else $4::jsonb end,
+      error = case when state = 'cancelled' then coalesce(error, $5) else $5 end,
+      completed_at = now(), lease_expires_at = null
+      where task_id = $1::uuid and user_id = $2::uuid
+        and (state = 'running' or (state = 'cancelled' and completed_at is null))
       returning task_id, conversation_id, session_id, state, result, error, completed_at`,
     [taskId, userId, success ? "completed" : "failed", JSON.stringify(input.result ?? null), input.error ? String(input.error).slice(0, 4000) : null]);
     if (result.rowCount !== 1) throw Object.assign(new Error("Local agent task is not running"), { statusCode: 409 });
@@ -643,9 +691,11 @@ export class PostgresAuthStore {
       throw Object.assign(new Error("task_id must be a UUID"), { statusCode: 400 });
     }
     const result = await this.pool.query(`update public.local_agent_tasks set
-      state = 'cancelled', cancelled_at = now(), lease_expires_at = null
+      state = 'cancelled', cancelled_at = now(),
+      completed_at = case when state = 'queued' then now() else null end,
+      lease_expires_at = case when state = 'queued' then null else lease_expires_at end
       where task_id = $1::uuid and user_id = $2::uuid and state in ('queued', 'running')
-      returning task_id, session_id, state`, [taskId, userId]);
+      returning task_id, session_id, state, completed_at`, [taskId, userId]);
     if (result.rowCount !== 1) throw Object.assign(new Error("Local agent task cannot be cancelled"), { statusCode: 409 });
     return result.rows[0];
   }

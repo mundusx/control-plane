@@ -4169,7 +4169,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
       const body = pending.querySelector(".message-body");
       const runtimeLabel = options.runtime === "hermes" ? "Hermes" : options.runtime === "native" ? "MundusX Local" : "local agent";
-      if (body) body.textContent = "Request accepted. Waiting for " + runtimeLabel + " progress…";
+      if (body) body.textContent = submitted.waiting_for_previous_task
+        ? "Request queued. Waiting for the previous " + runtimeLabel + " task to stop safely…"
+        : "Request accepted. Waiting for " + runtimeLabel + " progress…";
       if (activeHistoryId === conversationId) setStatus("working", runtimeLabel);
       let payload = submitted;
       const progressStartedAt = Date.now();

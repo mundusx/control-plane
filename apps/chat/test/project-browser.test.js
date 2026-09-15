@@ -55,3 +55,33 @@ test("file operations preserve coding tasks and are only claimed by capable conn
     await assert.rejects(store.localAgentTask(randomUUID(),pending.task_id),/not found/);
   } finally { await db.close(); }
 });
+
+test("a stopped project task holds the next writer until the connector acknowledges shutdown", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec("create table users (id uuid primary key)");
+    for (const name of ["0026_local_agent_bridge.sql", "0030_hermes_agent_runtime.sql", "0031_local_agent_workspace_boundary.sql"]) {
+      await db.exec(readFileSync(new URL("../../../db/migrations/" + name, import.meta.url), "utf8"));
+    }
+    const user = randomUUID(), connection = randomUUID();
+    await db.query("insert into users values ($1)", [user]);
+    await db.query("insert into local_agent_connections (connection_id,user_id,device_name,capabilities) values ($1,$2,'Hermes','{\"agent_runtimes\":[\"hermes\"],\"preferred_agent\":\"hermes\"}')", [connection,user]);
+    const query = async (sql,args) => { const result = await db.query(sql,args); return {...result,rowCount:result.rows.length || result.affectedRows || 0}; };
+    const store = new PostgresAuthStore({}, {pool:{query}});
+
+    const first = await store.createLocalAgentTask(user, {prompt:"Fix the API",runtime:"hermes",workspace_relative:"marketapp"});
+    assert.equal((await store.claimLocalAgentTask(user,connection)).task_id,first.task_id);
+    const stopped = await store.cancelLocalAgentTask(user,first.task_id);
+    assert.equal(stopped.state,"cancelled");
+    assert.equal(stopped.completed_at,null,"a running cancellation waits for connector shutdown");
+
+    const next = await store.createLocalAgentTask(user, {prompt:"Fix the lint errors",runtime:"hermes",workspace_relative:"marketapp"});
+    assert.equal(next.waiting_for_previous_task,true);
+    assert.equal(await store.claimLocalAgentTask(user,connection),null,"the next writer cannot overlap the stopping task");
+
+    const acknowledged = await store.completeLocalAgentTask(user,first.task_id,{status:"failed",error:"cancelled by user"});
+    assert.equal(acknowledged.state,"cancelled");
+    assert.ok(acknowledged.completed_at);
+    assert.equal((await store.claimLocalAgentTask(user,connection)).task_id,next.task_id);
+  } finally { await db.close(); }
+});
