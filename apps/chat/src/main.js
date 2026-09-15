@@ -7366,7 +7366,11 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   if (model) requestBody.model = model;
 
   return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
-    continueOnLength: completeCodeResponse,
+    // A provider length stop is authoritative and must never depend on the
+    // wording classifier. The continuation relay adds no request when the
+    // first segment finishes normally, while preventing any unrecognized
+    // code phrasing from surfacing a truncated answer to the browser.
+    continueOnLength: true,
     onComplete: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
       await appendConversationMessage(conversationId, "assistant", content, config, fetchImpl, {
