@@ -582,7 +582,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /id="active-project-context"/);
   assert.match(html, /composer-left-actions[\s\S]*id="active-project-open"/);
   assert.doesNotMatch(html, /id="web-search-toggle"/);
-  assert.match(html, /id="active-project-name">Project<\/strong>/);
+  assert.match(html, /id="active-project-name">Choose project<\/strong>/);
   assert.doesNotMatch(html, /id="runtime-select"|class="runtime-detail"/);
   assert.match(html, /id="mutation-toggle"[^>]*aria-label="Project access"[^>]*hidden>[\s\S]*Ask before edits[\s\S]*Full access/);
   assert.match(html, /runtimePreference = "auto"/);
@@ -616,7 +616,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /Project .* removed\. Local files were kept/);
   assert.match(html, /removedProjectsKey = "mundusx\.chat\.removedProjects\.v1:" \+ namespace/);
   assert.match(html, /if \(activeProject\?\.slug === slug\) setActiveProject\(null\)/);
-  assert.match(html, /activeProjectNameEl\.textContent = activeProject\?\.slug \|\| "Project"/);
+  assert.match(html, /activeProjectNameEl\.textContent = activeProject\?\.slug \|\| "Choose project"/);
   assert.match(html, /activeProjectOpenEl\.setAttribute\("aria-pressed"/);
   assert.match(html, /Ask Atlas to work on/);
   assert.doesNotMatch(html, /Initialize the local.*project workspace|Queuing local project creation/);
