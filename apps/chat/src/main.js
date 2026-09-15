@@ -7279,6 +7279,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       .slice(-20)
     : [];
   const codeProjectContinuation = isCodeProjectContinuation(message, historyMessages);
+  const completeCodeResponse = codeProjectContinuation || looksLikeCompleteProgramRequest(message.toLowerCase());
   if (conversationId) {
     await appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
       console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
@@ -7322,8 +7323,10 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
 
   const model = String(body?.model ?? config.modelOverride ?? "").trim();
   let systemPrompt = buildChatSystemPrompt(message, body?.voicePersona, body?.skillContext);
-  if (codeProjectContinuation) {
-    systemPrompt += " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections.";
+  if (completeCodeResponse) {
+    systemPrompt += codeProjectContinuation
+      ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
+      : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
   const requestBody = {
     stream: true,
@@ -7345,7 +7348,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   if (model) requestBody.model = model;
 
   return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
-    continueOnLength: codeProjectContinuation,
+    continueOnLength: completeCodeResponse,
     onComplete: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
       await appendConversationMessage(conversationId, "assistant", content, config, fetchImpl, {
@@ -12635,7 +12638,8 @@ function looksLikeCompleteProgramRequest(lower) {
     "detailed program",
     "deatailed program",
     "turbo c program",
-  ]) || /\b(?:full|complete|working)\s+(?:[a-z0-9.+#-]+\s+){0,3}(?:code|program|contract)\b/i.test(lower) || (
+  ]) || /\b(?:full|complete|working)\s+(?:[a-z0-9.+#-]+\s+){0,3}(?:code|program|contract)\b/i.test(lower) ||
+    /\b(?:build|create|generate|implement|make|write)\s+(?:me\s+)?(?:a|an)\s+(?:[a-z0-9.+#-]+\s+){0,3}(?:api|app|application|contract|program)\b/i.test(lower) || (
     containsAny(lower, [
       "convert this code",
       "convert the code",
