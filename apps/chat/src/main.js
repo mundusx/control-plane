@@ -7588,6 +7588,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let finishReason = null;
   let responseStarted = false;
   let requestBody = { ...body, stream: true };
+  let stalledContinuationAttempts = 0;
 
   try {
     for (let attempt = 0; ; attempt += 1) {
@@ -7692,6 +7693,23 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
       const segmentMadeProgress = content.length > segmentStartLength;
       const reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
+      if (
+        attempt > 0 &&
+        attemptFinishReason === "length" &&
+        !segmentMadeProgress &&
+        !reachedContinuationLimit &&
+        stalledContinuationAttempts < 2
+      ) {
+        stalledContinuationAttempts += 1;
+        response.write(": retrying stalled project continuation\n\n");
+        requestBody = buildContinuationRequestBody(
+          requestBody,
+          body.messages,
+          content,
+          stalledContinuationAttempts,
+        );
+        continue;
+      }
       if (attemptFinishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (attemptFinishReason === "length") {
           response.write(`data: ${JSON.stringify({
@@ -7714,27 +7732,9 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         break;
       }
 
+      stalledContinuationAttempts = 0;
       response.write(": continuing project response\n\n");
-      const previousBudget = Number(requestBody.max_tokens) || STREAMING_CONTINUATION_MAX_TOKENS;
-      const continuationTail = content.slice(-STREAMING_CONTINUATION_TAIL_CHARS);
-      requestBody = {
-        ...requestBody,
-        // Keep enough room for the prompt and a recent code tail inside the
-        // worker context window. Increasing this budget while also resending
-        // the entire growing answer caused every retry to terminate at length.
-        max_tokens: Math.min(
-          STREAMING_CONTINUATION_MAX_TOKENS,
-          Math.max(2048, previousBudget),
-        ),
-        messages: [
-          ...(Array.isArray(body.messages) ? body.messages : []),
-          { role: "assistant", content: continuationTail },
-          {
-            role: "user",
-            content: "The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
-          },
-        ],
-      };
+      requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
     }
     response.end();
     await hooks.onComplete?.({ content, completionId, finishReason });
@@ -7795,6 +7795,41 @@ function writeContinuationContent(response, content, completionId) {
       choices: [{ index: 0, delta: { content: content.slice(offset, offset + 4096) }, finish_reason: null }],
     })}\n\n`);
   }
+}
+
+function buildContinuationRequestBody(currentBody, originalMessages, content, stalledAttempt = 0) {
+  const previousBudget = Number(currentBody?.max_tokens) || STREAMING_CONTINUATION_MAX_TOKENS;
+  const continuationTail = String(content ?? "").slice(-STREAMING_CONTINUATION_TAIL_CHARS);
+  const baseMessages = (Array.isArray(originalMessages) ? originalMessages : []).map((entry) =>
+    entry?.role === "system"
+      ? {
+          ...entry,
+          content: `${entry.content} Continuation override: for the latest continuation request, output only the missing suffix after the supplied assistant tail. Do not restart or reproduce the complete file from its beginning.`,
+        }
+      : entry,
+  );
+  const retryInstruction = stalledAttempt > 0
+    ? ` A previous continuation restarted the answer and was discarded. This is recovery attempt ${stalledAttempt + 1}; begin with the next missing code line only.`
+    : "";
+  return {
+    ...currentBody,
+    temperature: 0,
+    // Keep enough room for the prompt and a recent code tail inside the
+    // worker context window. Increasing this budget while also resending the
+    // entire growing answer caused every retry to terminate at length.
+    max_tokens: Math.min(
+      STREAMING_CONTINUATION_MAX_TOKENS,
+      Math.max(2048, previousBudget),
+    ),
+    messages: [
+      ...baseMessages,
+      { role: "assistant", content: continuationTail },
+      {
+        role: "user",
+        content: `The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.${retryInstruction}\n/no_think`,
+      },
+    ],
+  };
 }
 
 export function normalizePublicOpenAiStreamEvent(eventText) {
