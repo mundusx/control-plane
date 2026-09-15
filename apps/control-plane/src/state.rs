@@ -2372,6 +2372,14 @@ impl ControlPlaneState {
             .jobs
             .iter()
             .filter_map(|(job_id, job)| {
+                // Historical terminal jobs dominate this map in a long-running
+                // control plane. Reject them before model, graph, and node
+                // scoring; evaluating thousands of completed jobs on every
+                // worker poll made otherwise idle nodes take tens of seconds
+                // to claim a new chat request.
+                if !self.job_can_be_claimed(job) {
+                    return None;
+                }
                 let ready_graph_node_id = job
                     .graph_execution_enabled
                     .then(|| next_ready_graph_node_id(&job.graph))
@@ -2470,8 +2478,7 @@ impl ControlPlaneState {
                                     )
                             })
                         });
-                if self.job_can_be_claimed(job)
-                    && self.node_has_available_slot_for_job(node, job)
+                if self.node_has_available_slot_for_job(node, job)
                     && (!job.graph_execution_enabled || active_graph_node_id.is_some())
                     && Self::node_backend_matches(
                         job,
