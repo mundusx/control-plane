@@ -4548,7 +4548,7 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
 
 test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {
   const encoder = new TextEncoder();
-  let upstreamRequest = null;
+  const upstreamRequests = [];
   const response = {
     writableEnded: false,
     writeHead() {}, flushHeaders() {}, write() { return true; },
@@ -4560,11 +4560,12 @@ test("normal Chat keeps a simple Solidity example on the compact legacy budget",
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
       assert.equal(url.endsWith("/v1/chat/completions"), true);
-      upstreamRequest = JSON.parse(init.body);
+      upstreamRequests.push(JSON.parse(init.body));
+      const firstSegment = upstreamRequests.length === 1;
       return new Response(new ReadableStream({
         start(controller) {
           controller.enqueue(encoder.encode(
-            'data: {"id":"chatcmpl-solidity","choices":[{"delta":{"content":"contract DEX {}"},"finish_reason":"stop"}]}\n\n' +
+            `data: ${JSON.stringify({ id: "chatcmpl-solidity", choices: [{ delta: { content: firstSegment ? "contract DEX {" : "}" }, finish_reason: firstSegment ? "length" : "stop" }] })}\n\n` +
             'data: [DONE]\n\n',
           ));
           controller.close();
@@ -4572,8 +4573,10 @@ test("normal Chat keeps a simple Solidity example on the compact legacy budget",
       }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
     },
   );
-  assert.equal(upstreamRequest.max_tokens, 512);
-  assert.equal(upstreamRequest.mode, "chat");
+  assert.equal(upstreamRequests.length, 2);
+  assert.equal(upstreamRequests[0].max_tokens, 512);
+  assert.equal(upstreamRequests[0].mode, "chat");
+  assert.equal(upstreamRequests[1].max_tokens, 2048);
 });
 
 test("Hermes model discovery intentionally hides heterogeneous implementation details", () => {
