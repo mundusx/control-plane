@@ -4546,6 +4546,89 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
 });
 
+test("automatic continuation repairs a repeated Markdown fence at a split code line", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const first = "```solidity\ncontract DEX {\n  function check(uint256 reserveIn) external {\n    require(reserveIn";
+  const second = "```solidity\n> 0, \"empty\");\n  }\n}\n```";
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  let requestCount = 0;
+  const streamResponse = (content, finishReason) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-fence", choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id: "chatcmpl-fence", choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    { message: "show me Solidity for a decentralized exchange", historyMessages: [], toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      requestCount += 1;
+      return requestCount === 1
+        ? streamResponse(first, "length")
+        : streamResponse(second, "stop");
+    },
+  );
+
+  assert.equal(requestCount, 2);
+  assert.equal(result.content, `${first}> 0, \"empty\");\n  }\n}\n\`\`\``);
+  assert.equal((result.content.match(/```solidity/g) || []).length, 1);
+  assert.doesNotMatch(result.content, /reserveIn```/);
+  assert.equal(result.finishReason, "stop");
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
+});
+
+test("automatic continuation retries a regenerated fenced source header", async () => {
+  const encoder = new TextEncoder();
+  const first = "```solidity\n// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\ncontract DEX {\n";
+  const restarted = "```solidity\n// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\ncontract DifferentDEX {\n}\n```";
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {}, write() { return true; },
+    end() { this.writableEnded = true; },
+  };
+  let requestCount = 0;
+  const streamResponse = (content, finishReason) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-header", choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id: "chatcmpl-header", choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    { message: "show me Solidity for a decentralized exchange", historyMessages: [], toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      requestCount += 1;
+      if (requestCount === 1) return streamResponse(first, "length");
+      if (requestCount === 2) return streamResponse(restarted, "stop");
+      return streamResponse("  function swap() external {}\n}\n```", "stop");
+    },
+  );
+
+  assert.equal(requestCount, 3);
+  assert.doesNotMatch(result.content, /DifferentDEX/);
+  assert.equal((result.content.match(/SPDX-License-Identifier/g) || []).length, 1);
+  assert.match(result.content, /function swap/);
+  assert.equal(result.finishReason, "stop");
+});
+
 test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {
   const encoder = new TextEncoder();
   const upstreamRequests = [];
