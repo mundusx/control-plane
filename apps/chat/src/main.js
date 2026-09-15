@@ -12074,7 +12074,7 @@ function looksLikeCompleteProgramRequest(lower) {
     "deatailed program",
     "turbo c program",
   ]) || /\b(?:full|complete|working)\s+(?:[a-z0-9.+#-]+\s+){0,3}(?:code|program|contract)\b/i.test(lower) ||
-    /\b(?:build|create|generate|implement|make|write)\s+(?:me\s+)?(?:a|an)\s+(?:[a-z0-9.+#-]+\s+){0,3}(?:api|app|application|contract|program)\b/i.test(lower) || (
+    /\b(?:(?:i\s+)?(?:need|want|would\s+like)\s+to\s+)?(?:build|create|generate|implement|make|write)\s+(?:me\s+)?(?:(?:a|an)\s+)?(?:[a-z0-9.+#-]+\s+){0,3}(?:api|app|application|contract|program)\b/i.test(lower) || (
     containsAny(lower, [
       "convert this code",
       "convert the code",

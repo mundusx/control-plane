@@ -4468,7 +4468,7 @@ test("a new full-code Chat request with long history finishes across bounded res
   const result = await streamChatTurn(
     response,
     {
-      message: "create a solidity program for decentralized exchange",
+      message: "i need to create solidity program for decentralized exchange",
       historyMessages: Array.from({ length: 20 }, (_, index) => ({
         role: index % 2 === 0 ? "user" : "assistant",
         content: `${index % 2 === 0 ? "Earlier request" : "Earlier code"} ${index}: ${"x".repeat(5000)}`,
