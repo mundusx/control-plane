@@ -4590,7 +4590,7 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   assert.equal(requests[1].max_tokens, 4096);
   assert.equal(requests[1].messages.at(-2).role, "assistant");
   assert.equal(requests[1].messages.at(-2).content, "const enrollment = {");
-  assert.match(requests[1].messages.at(-1).content, /Continue exactly where/);
+  assert.match(requests[1].messages.at(-1).content, /Continue immediately after/);
   assert.equal(result.content, "const enrollment = {};");
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
@@ -4653,6 +4653,48 @@ test("a new full-code Chat request with long history finishes across bounded res
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
   assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
+});
+
+test("automatic continuation removes a restarted code prefix and keeps only new output", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const first = "Intro\n```solidity\ncontract DEX {\n  function a() external {}\n";
+  const completed = `${first}  function b() external {}\n}\n\`\`\``;
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  let requestCount = 0;
+  const streamResponse = (content, finishReason) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-restart", choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id: "chatcmpl-restart", choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    { message: "create a solidity program for decentralized exchange", historyMessages: [], toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      requestCount += 1;
+      return requestCount === 1
+        ? streamResponse(first, "length")
+        : streamResponse(completed, "stop");
+    },
+  );
+
+  assert.equal(requestCount, 2);
+  assert.equal(result.content, completed);
+  assert.equal((writes.join("").match(/contract DEX/g) || []).length, 1);
+  assert.equal(result.finishReason, "stop");
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
 });
 
 test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {

@@ -7617,6 +7617,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       const decoder = new TextDecoder();
       let parseBuffer = "";
       let attemptFinishReason = null;
+      let attemptContent = "";
       let sawDone = false;
       const consumeEvent = (eventText) => {
         const data = eventText
@@ -7642,11 +7643,15 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           completionId ||= String(chunk?.id ?? "").trim() || null;
           const choice = chunk?.choices?.[0];
           const delta = String(choice?.delta?.content ?? "");
-          if (delta) content += delta;
+          if (delta) {
+            attemptContent += delta;
+            if (attempt === 0) content += delta;
+          }
           if (choice?.finish_reason) {
             attemptFinishReason = choice.finish_reason;
             finishReason = choice.finish_reason;
           }
+          if (attempt > 0) return;
           if (choice?.finish_reason === "length") {
             if (delta) {
               response.write(`data: ${JSON.stringify({
@@ -7678,6 +7683,13 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       reader = null;
       if (!sawDone) throw new Error("control-plane stream ended before [DONE]");
 
+      const uniqueSegment = attempt === 0
+        ? attemptContent
+        : uniqueContinuationSuffix(content, attemptContent);
+      if (attempt > 0 && uniqueSegment) {
+        content += uniqueSegment;
+        writeContinuationContent(response, uniqueSegment, completionId);
+      }
       const segmentMadeProgress = content.length > segmentStartLength;
       const reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
       if (attemptFinishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
@@ -7688,6 +7700,14 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             created: Math.floor(Date.now() / 1000),
             model: PUBLIC_MODEL_ID,
             choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+          })}\n\n`);
+        } else if (attempt > 0) {
+          response.write(`data: ${JSON.stringify({
+            id: completionId,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: PUBLIC_MODEL_ID,
+            choices: [{ index: 0, delta: {}, finish_reason: attemptFinishReason || "stop" }],
           })}\n\n`);
         }
         response.write("data: [DONE]\n\n");
@@ -7711,7 +7731,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           { role: "assistant", content: continuationTail },
           {
             role: "user",
-            content: "Continue exactly where the previous response stopped. Do not repeat earlier content. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
+            content: "The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
           },
         ],
       };
@@ -7733,6 +7753,47 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
     response.off?.("close", disconnect);
     await reader?.cancel().catch(() => {});
     reader?.releaseLock?.();
+  }
+}
+
+function uniqueContinuationSuffix(existingContent, candidateContent) {
+  const existing = String(existingContent ?? "");
+  const candidate = String(candidateContent ?? "");
+  if (!candidate || !existing) return candidate;
+  if (existing.endsWith(candidate)) return "";
+  if (candidate.startsWith(existing)) return candidate.slice(existing.length);
+
+  const maximumOverlap = Math.min(existing.length, candidate.length);
+  for (let overlap = maximumOverlap; overlap >= 24; overlap -= 1) {
+    if (existing.endsWith(candidate.slice(0, overlap))) {
+      return candidate.slice(overlap);
+    }
+  }
+
+  const restartProbe = Math.min(256, existing.length, candidate.length);
+  if (restartProbe >= 80 && existing.slice(0, restartProbe) === candidate.slice(0, restartProbe)) {
+    let sharedPrefix = restartProbe;
+    while (
+      sharedPrefix < existing.length &&
+      sharedPrefix < candidate.length &&
+      existing[sharedPrefix] === candidate[sharedPrefix]
+    ) {
+      sharedPrefix += 1;
+    }
+    return candidate.slice(sharedPrefix);
+  }
+  return candidate;
+}
+
+function writeContinuationContent(response, content, completionId) {
+  for (let offset = 0; offset < content.length; offset += 4096) {
+    response.write(`data: ${JSON.stringify({
+      id: completionId,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: PUBLIC_MODEL_ID,
+      choices: [{ index: 0, delta: { content: content.slice(offset, offset + 4096) }, finish_reason: null }],
+    })}\n\n`);
   }
 }
 
