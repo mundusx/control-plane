@@ -45,6 +45,10 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS = 8192;
 const CONTEXT_SAFETY_TOKENS = 256;
 const MAX_HISTORY_CONTEXT_TOKENS = 2048;
 const RECENT_HISTORY_MESSAGES = 6;
+const STREAMING_CODE_HISTORY_TOKENS = 1536;
+const STREAMING_CONTINUATION_MAX_TOKENS = 4096;
+const STREAMING_CONTINUATION_TAIL_CHARS = 6000;
+const STREAMING_CONTINUATION_MAX_SEGMENTS = 12;
 const PUBLIC_MODEL_ID = "mundusx-agnostic";
 const CHAT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MARKED_BROWSER_PATH = resolve(CHAT_ROOT, "node_modules/marked/lib/marked.umd.js");
@@ -7328,12 +7332,28 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
       : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
+  const initialMaxTokens = codeProjectContinuation
+    ? STREAMING_CONTINUATION_MAX_TOKENS
+    : inferMaxTokens(message, body?.maxTokens);
+  const boundedHistory = completeCodeResponse
+    ? buildCompressedHistoryContext(historyMessages, {
+        currentMessage: message,
+        maxTokens: STREAMING_CODE_HISTORY_TOKENS,
+        recentMessages: 4,
+      })
+    : null;
+  const requestHistoryMessages = boundedHistory?.compressed
+    ? [{
+        role: "system",
+        content: `Relevant earlier conversation (compressed to preserve room for the requested code):\n${boundedHistory.text}`,
+      }]
+    : historyMessages;
   const requestBody = {
     stream: true,
     mode: "chat",
     messages: [
       { role: "system", content: systemPrompt },
-      ...historyMessages,
+      ...requestHistoryMessages,
       // Qwen3 workers released before node-agent 0.1.40 do not pass
       // chat_template_kwargs to vLLM. The soft switch keeps live chat from
       // spending tens of seconds in hidden reasoning before its first token.
@@ -7341,9 +7361,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     ],
     temperature: typeof body?.temperature === "number" ? body.temperature : 0.2,
     top_p: typeof body?.topP === "number" ? body.topP : 0.9,
-    max_tokens: codeProjectContinuation
-      ? 6144
-      : inferMaxTokens(message, body?.maxTokens),
+    max_tokens: initialMaxTokens,
   };
   if (model) requestBody.model = model;
 
@@ -7551,7 +7569,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   // A long code answer can legitimately need several provider-sized segments.
   // Keep continuation bounded by the complete accumulated answer instead of a
   // fixed three-request ceiling, which cut otherwise healthy generations off.
-  const maxSegments = 8;
+  const maxSegments = STREAMING_CONTINUATION_MAX_SEGMENTS;
   const maxOutputCharacters = 262_144;
   const headers = {
     Accept: "text/event-stream",
@@ -7677,13 +7695,20 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
 
       response.write(": continuing project response\n\n");
-      const previousBudget = Number(requestBody.max_tokens) || 6144;
+      const previousBudget = Number(requestBody.max_tokens) || STREAMING_CONTINUATION_MAX_TOKENS;
+      const continuationTail = content.slice(-STREAMING_CONTINUATION_TAIL_CHARS);
       requestBody = {
         ...requestBody,
-        max_tokens: Math.min(24_576, Math.max(previousBudget + 2048, previousBudget * 2)),
+        // Keep enough room for the prompt and a recent code tail inside the
+        // worker context window. Increasing this budget while also resending
+        // the entire growing answer caused every retry to terminate at length.
+        max_tokens: Math.min(
+          STREAMING_CONTINUATION_MAX_TOKENS,
+          Math.max(2048, previousBudget),
+        ),
         messages: [
           ...(Array.isArray(body.messages) ? body.messages : []),
-          { role: "assistant", content },
+          { role: "assistant", content: continuationTail },
           {
             role: "user",
             content: "Continue exactly where the previous response stopped. Do not repeat earlier content. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
