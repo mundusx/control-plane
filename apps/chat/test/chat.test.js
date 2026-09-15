@@ -4629,7 +4629,7 @@ test("automatic continuation retries a regenerated fenced source header", async 
   assert.equal(result.finishReason, "stop");
 });
 
-test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {
+test("normal Chat gives every code-generation request a full first-pass budget", async () => {
   const encoder = new TextEncoder();
   const upstreamRequests = [];
   const response = {
@@ -4657,9 +4657,69 @@ test("normal Chat keeps a simple Solidity example on the compact legacy budget",
     },
   );
   assert.equal(upstreamRequests.length, 2);
-  assert.equal(upstreamRequests[0].max_tokens, 512);
+  assert.equal(upstreamRequests[0].max_tokens, 4096);
   assert.equal(upstreamRequests[0].mode, "chat");
-  assert.equal(upstreamRequests[1].max_tokens, 2048);
+  assert.equal(upstreamRequests[1].max_tokens, 4096);
+});
+
+test("automatic continuation streams new deltas before the segment completes", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  let requestCount = 0;
+  let releaseContinuation;
+  let continuationStarted;
+  const continuationStartedPromise = new Promise((resolve) => { continuationStarted = resolve; });
+  const firstResponse = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        'data: {"id":"chatcmpl-live-continuation","choices":[{"delta":{"content":"contract DEX {\\n"},"finish_reason":"length"}]}\n\n' +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const continuationResponse = new Response(new ReadableStream({
+    start(controller) {
+      const progressiveContent = `  function swap() external {${" ".repeat(128)}`;
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-live-continuation", choices: [{ delta: { content: progressiveContent }, finish_reason: null }] })}\n\n`,
+      ));
+      continuationStarted();
+      releaseContinuation = () => {
+        controller.enqueue(encoder.encode(
+          'data: {"id":"chatcmpl-live-continuation","choices":[{"delta":{"content":"}\\n}"},"finish_reason":null}]}\n\n' +
+          'data: {"id":"chatcmpl-live-continuation","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+          "data: [DONE]\n\n",
+        ));
+        controller.close();
+      };
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const turn = streamChatTurn(
+    response,
+    { message: "show me Solidity for a decentralized exchange", historyMessages: [], toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => (++requestCount === 1 ? firstResponse : continuationResponse),
+  );
+
+  await continuationStartedPromise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(writes.join(""), /function swap/);
+  assert.doesNotMatch(writes.join(""), /finish_reason":"stop"/);
+
+  releaseContinuation();
+  const result = await turn;
+  assert.equal(result.finishReason, "stop");
+  assert.match(result.content, /function swap/);
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
 });
 
 test("Hermes model discovery intentionally hides heterogeneous implementation details", () => {
