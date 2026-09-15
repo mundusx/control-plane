@@ -4441,6 +4441,52 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
 });
 
+test("project Chat can finish after more than three streamed response segments", async () => {
+  const encoder = new TextEncoder();
+  const requests = [];
+  const writes = [];
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) {
+      this.writableEnded = true;
+      if (value) writes.push(String(value));
+    },
+  };
+  const streamResponse = (content, finishReason, id) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id, choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id, choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "Extend this existing Solidity project with the complete exchange contract.",
+      historyMessages: [{ role: "assistant", content: "```solidity\ncontract Exchange {\n```" }],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (_url, init = {}) => {
+      requests.push(JSON.parse(init.body));
+      const segment = requests.length;
+      return streamResponse(`segment-${segment}\n`, segment < 6 ? "length" : "stop", `chatcmpl-part-${segment}`);
+    },
+  );
+
+  assert.equal(requests.length, 6);
+  assert.equal(result.content, "segment-1\nsegment-2\nsegment-3\nsegment-4\nsegment-5\nsegment-6\n");
+  assert.equal(result.finishReason, "stop");
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
+  assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
+});
+
 test("normal Chat keeps a simple Solidity example on the compact legacy budget", async () => {
   const encoder = new TextEncoder();
   let upstreamRequest = null;

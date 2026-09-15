@@ -6709,7 +6709,10 @@ export async function relayControlPlaneOpenAiStream(
   let completionId = null;
   let finishReason = null;
   let responseStarted = false;
-  const maxContinuationAttempts = hooks.continueOnLength === true ? 2 : 0;
+  // Allow a long code response to span several provider-sized segments while
+  // keeping the accumulated answer and stalled continuations bounded.
+  const maxContinuationAttempts = hooks.continueOnLength === true ? 7 : 0;
+  const maxOutputCharacters = 262_144;
 
   const inspectEvent = (eventText, state) => {
     const data = eventText
@@ -6810,7 +6813,9 @@ export async function relayControlPlaneOpenAiStream(
       }
       if (!state.sawDone) throw new Error("control-plane stream ended before [DONE]");
 
-      if (state.finishReason !== "length" || attempt >= maxContinuationAttempts) {
+      const segmentMadeProgress = state.content.length > 0;
+      const reachedContinuationLimit = attempt >= maxContinuationAttempts || content.length >= maxOutputCharacters;
+      if (state.finishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (hooks.continueOnLength === true) {
           if (state.finishReason === "length") {
             response.write(`data: ${JSON.stringify({
