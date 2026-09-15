@@ -6780,6 +6780,7 @@ export async function relayControlPlaneOpenAiStream(
 
   try {
     let requestBody = { ...body, stream: true };
+    let stalledContinuationAttempts = 0;
     for (let attempt = 0; ; attempt += 1) {
       const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
         method: "POST",
@@ -6846,6 +6847,23 @@ export async function relayControlPlaneOpenAiStream(
       }
       const segmentMadeProgress = uniqueSegment.length > 0;
       const reachedContinuationLimit = attempt >= maxContinuationAttempts || content.length >= maxOutputCharacters;
+      if (
+        attempt > 0 &&
+        state.finishReason === "length" &&
+        !segmentMadeProgress &&
+        !reachedContinuationLimit &&
+        stalledContinuationAttempts < 2
+      ) {
+        stalledContinuationAttempts += 1;
+        response.write(": retrying stalled project continuation\n\n");
+        requestBody = buildContinuationRequestBody(
+          requestBody,
+          body.messages,
+          content,
+          stalledContinuationAttempts,
+        );
+        continue;
+      }
       if (state.finishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (hooks.continueOnLength === true) {
           if (state.finishReason === "length") {
@@ -6870,23 +6888,8 @@ export async function relayControlPlaneOpenAiStream(
         break;
       }
 
-      const previousBudget = Number(requestBody.max_tokens) || STREAMING_CONTINUATION_MAX_TOKENS;
-      const continuationTail = content.slice(-STREAMING_CONTINUATION_TAIL_CHARS);
-      requestBody = {
-        ...requestBody,
-        max_tokens: Math.min(
-          STREAMING_CONTINUATION_MAX_TOKENS,
-          Math.max(2048, previousBudget),
-        ),
-        messages: [
-          ...(Array.isArray(body.messages) ? body.messages : []),
-          { role: "assistant", content: continuationTail },
-          {
-            role: "user",
-            content: "The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.\n/no_think",
-          },
-        ],
-      };
+      stalledContinuationAttempts = 0;
+      requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
     }
     response.end();
     await hooks.onComplete?.({ content, completionId, finishReason });
@@ -6939,6 +6942,38 @@ function writeContinuationContent(response, content, completionId) {
       choices: [{ index: 0, delta: { content: content.slice(offset, offset + 4096) }, finish_reason: null }],
     })}\n\n`);
   }
+}
+
+function buildContinuationRequestBody(currentBody, originalMessages, content, stalledAttempt = 0) {
+  const previousBudget = Number(currentBody?.max_tokens) || STREAMING_CONTINUATION_MAX_TOKENS;
+  const continuationTail = String(content ?? "").slice(-STREAMING_CONTINUATION_TAIL_CHARS);
+  const baseMessages = (Array.isArray(originalMessages) ? originalMessages : []).map((entry) =>
+    entry?.role === "system"
+      ? {
+          ...entry,
+          content: `${entry.content} Continuation override: for the latest continuation request, output only the missing suffix after the supplied assistant tail. Do not restart or reproduce the complete file from its beginning.`,
+        }
+      : entry,
+  );
+  const retryInstruction = stalledAttempt > 0
+    ? ` A previous continuation restarted the answer and was discarded. This is recovery attempt ${stalledAttempt + 1}; begin with the next missing code line only.`
+    : "";
+  return {
+    ...currentBody,
+    temperature: 0,
+    max_tokens: Math.min(
+      STREAMING_CONTINUATION_MAX_TOKENS,
+      Math.max(2048, previousBudget),
+    ),
+    messages: [
+      ...baseMessages,
+      { role: "assistant", content: continuationTail },
+      {
+        role: "user",
+        content: `The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.${retryInstruction}\n/no_think`,
+      },
+    ],
+  };
 }
 
 export function normalizePublicOpenAiStreamEvent(eventText) {
