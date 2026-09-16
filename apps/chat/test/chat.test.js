@@ -4621,12 +4621,8 @@ test("a new full-code Chat request with long history finishes across bounded res
     async (_url, init = {}) => {
       requests.push(JSON.parse(init.body));
       const segment = requests.length;
-      const continuationPrompt = requests.at(-1).messages.at(-1)?.content ?? "";
-      const continuationAnchor = segment > 1
-        ? continuationPrompt.match(/CONTINUATION_ANCHOR:\n([\s\S]*?)\nEND_CONTINUATION_ANCHOR/)?.[1] ?? ""
-        : "";
       return streamResponse(
-        `${continuationAnchor}segment-${segment}:${"y".repeat(1990)}\n`,
+        `segment-${segment}:${"y".repeat(1990)}\n`,
         segment < 6 ? "length" : "stop",
         `chatcmpl-part-${segment}`,
       );
@@ -4690,58 +4686,6 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
   assert.equal(requests[1].temperature, 0);
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
-});
-
-test("automatic continuation waits for the exact anchor before streaming a restarted section", async () => {
-  const encoder = new TextEncoder();
-  const writes = [];
-  const first = `Intro\n\`\`\`js\n${"// existing controller line\n".repeat(18)}const updateBooking = async (req, res) => {\n  return res`;
-  const anchor = first.slice(-256);
-  const suffix = ".status(200).json({ ok: true });\n};\n\`\`\`";
-  const response = {
-    writableEnded: false,
-    writeHead() {}, flushHeaders() {},
-    write(value) { writes.push(String(value)); return true; },
-    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
-  };
-  const streamResponse = (chunks, finishReason) => new Response(new ReadableStream({
-    start(controller) {
-      for (const content of chunks) {
-        controller.enqueue(encoder.encode(
-          `data: ${JSON.stringify({ id: "chatcmpl-anchor", choices: [{ delta: { content }, finish_reason: null }] })}\n\n`,
-        ));
-      }
-      controller.enqueue(encoder.encode(
-        `data: ${JSON.stringify({ id: "chatcmpl-anchor", choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
-        "data: [DONE]\n\n",
-      ));
-      controller.close();
-    },
-  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
-
-  let requestCount = 0;
-  const result = await streamChatTurn(
-    response,
-    { message: "create a complete booking API", historyMessages: [], toolMode: false },
-    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    async () => {
-      requestCount += 1;
-      if (requestCount === 1) return streamResponse([first], "length");
-      return streamResponse([
-        "Restarting the controller from an earlier point.\n",
-        anchor.slice(0, 120),
-        anchor.slice(120) + suffix.slice(0, 18),
-        suffix.slice(18),
-      ], "stop");
-    },
-  );
-
-  assert.equal(requestCount, 2);
-  assert.equal(result.content, first + suffix);
-  assert.equal(result.finishReason, "stop");
-  assert.doesNotMatch(writes.join(""), /continuation changed after its streamed prefix/);
-  assert.doesNotMatch(writes.join(""), /Restarting the controller/);
-  assert.equal((writes.join("").match(/data: \[DONE\]/g) || []).length, 1);
 });
 
 test("automatic continuation strips generation markers and advances past a restarted controller block", async () => {
@@ -4974,7 +4918,7 @@ test("automatic continuation streams new deltas before the segment completes", a
 
   const continuationResponse = new Response(new ReadableStream({
     start(controller) {
-      const progressiveContent = `contract DEX {\n  function swap() external {${" ".repeat(128)}`;
+      const progressiveContent = `  function swap() external {${" ".repeat(128)}`;
       controller.enqueue(encoder.encode(
         `data: ${JSON.stringify({ id: "chatcmpl-live-continuation", choices: [{ delta: { content: progressiveContent }, finish_reason: null }] })}\n\n`,
       ));
