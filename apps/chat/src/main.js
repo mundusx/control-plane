@@ -1,4 +1,5 @@
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
+import { migrateChatFromEnv } from "./migrations.js";
 import { createServer } from "node:http";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -14628,6 +14629,7 @@ function delay(ms) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const config = configFromEnv();
+  await migrateChatFromEnv();
   createServerApp(config).listen(config.port, "0.0.0.0", () => {
     console.log(`MundusX chat listening on http://127.0.0.1:${config.port}`);
     console.log(`controlPlaneUrl: ${config.controlPlaneUrl}`);
