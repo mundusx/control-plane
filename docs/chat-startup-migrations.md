@@ -3,8 +3,8 @@
 Railway runs `npm run db:migrate` as its pre-deploy command after building
 and before starting the new deployment. Ordinary application starts and restarts
 do not invoke migrations.
-The packaged SQL is included under `apps/chat/migrations` because manual Chat
-uploads use that directory as their deployment root. A test compares packaged
+The packaged SQL is included under `apps/chat/migrations` because Railway builds
+the Chat service from `/apps/chat`. Upload the repository root for manual deployments. A test compares packaged
 SQL with the canonical `db/migrations` file.
 
 Each migration takes a transaction-scoped advisory lock, checks
@@ -23,3 +23,8 @@ Pre-deploy logs distinguish `applied`, `adopted`, and `skipped`.
 
 No request-time migrations, timers, GitHub Actions, credentials in logs or
 public migration endpoints are used. The ledger lives in a private schema.
+
+Railway Chat service settings must contain the pre-deploy command explicitly.
+Confirm the deployment manifest includes it; a config file alone is not proof.
+Redeploying an old deployment may reuse its old configuration; make a new upload
+after changing service settings.
