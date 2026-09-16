@@ -1328,7 +1328,11 @@ const CHAT_MESSAGE_INSERT_SQL: &str = r#"
 with inserted as (
   insert into public.chat_messages (conversation_id, role, content, job_id, tool, metadata)
   values ($1::text::uuid, $2, $3, $4, $5, $6::text::jsonb)
-  on conflict (job_id) where job_id is not null do nothing
+  on conflict (job_id) where job_id is not null do update set
+    role = excluded.role,
+    content = excluded.content,
+    tool = excluded.tool,
+    metadata = excluded.metadata
   returning *
 ), selected as (
   select * from inserted
@@ -1685,6 +1689,13 @@ mod tests {
         assert!(CREDITS_UPSERT_SQL.contains("($11::text)::timestamptz"));
         assert!(JOB_EVENTS_UPSERT_SQL.contains("$6::text"));
         assert!(JOB_EVENTS_UPSERT_SQL.contains("($6::text)::timestamptz"));
+    }
+
+    #[test]
+    fn chat_message_job_id_upsert_can_finalize_streaming_checkpoints() {
+        assert!(CHAT_MESSAGE_INSERT_SQL.contains("on conflict (job_id) where job_id is not null do update"));
+        assert!(CHAT_MESSAGE_INSERT_SQL.contains("content = excluded.content"));
+        assert!(CHAT_MESSAGE_INSERT_SQL.contains("metadata = excluded.metadata"));
     }
 
     #[test]

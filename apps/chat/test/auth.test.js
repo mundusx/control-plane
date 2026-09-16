@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { PGlite } from "@electric-sql/pglite";
 
 import { PostgresAuthStore, authConfigFromEnv } from "../src/auth.js";
 
@@ -470,8 +472,12 @@ test("conversation ownership is claimed once and rejects another user", async ()
   const pool = {
     async query(sql, values) {
       if (sql.startsWith("insert into")) {
-        if (!rows.has(values[0])) rows.set(values[0], values[1]);
-        return { rowCount: 1, rows: [] };
+        if (!rows.has(values[0])) {
+          rows.set(values[0], values[1]);
+          return { rowCount: 1, rows: [{ conversation_id: values[0] }] };
+        }
+        const owned = rows.get(values[0]) === values[1];
+        return { rowCount: owned ? 1 : 0, rows: owned ? [{ conversation_id: values[0] }] : [] };
       }
       const matches = rows.get(values[0]) === values[1];
       return { rowCount: matches ? 1 : 0, rows: matches ? [{ exists: 1 }] : [] };
@@ -583,6 +589,71 @@ test("local agent auto claims select Hermes only when advertised and preferred",
   assert.match(queries[0].sql, /capabilities->'agent_runtimes' \? 'hermes'/);
   assert.match(queries[0].sql, /capabilities->>'preferred_agent' = 'hermes'/);
   assert.match(queries[0].sql, /order by created_at desc/);
+});
+
+test("conversation index is account scoped, bounded, and ordered for cross-device restore", async () => {
+  let query;
+  const store = new PostgresAuthStore({}, { pool: {
+    async query(sql, values) {
+      query = { sql, values };
+      return { rows: [{
+        conversation_id: "d0c1f854-60e7-4af3-95fe-2745621de39d",
+        title: "Distributed systems",
+        pinned: true,
+        created_at: new Date("2026-09-16T08:00:00Z"),
+        updated_at: new Date("2026-09-16T09:00:00Z"),
+        last_message_at: new Date("2026-09-16T09:00:00Z"),
+      }] };
+    },
+  } });
+  const conversations = await store.chatConversations("11111111-1111-4111-8111-111111111111", 500);
+  assert.equal(conversations[0].title, "Distributed systems");
+  assert.equal(conversations[0].pinned, true);
+  assert.match(query.sql, /where user_id = \$1::uuid/);
+  assert.match(query.sql, /order by pinned desc, last_message_at desc/);
+  assert.equal(query.values[1], 100);
+});
+
+test("conversation metadata updates remain owner scoped", async () => {
+  let query;
+  const id = "d0c1f854-60e7-4af3-95fe-2745621de39d";
+  const store = new PostgresAuthStore({}, { pool: {
+    async query(sql, values) {
+      query = { sql, values };
+      return { rowCount: 1, rows: [{ conversation_id: id, title: "Renamed", pinned: true }] };
+    },
+  } });
+  const updated = await store.updateChatConversation("11111111-1111-4111-8111-111111111111", id, {
+    title: "Renamed",
+    pinned: true,
+  });
+  assert.equal(updated.title, "Renamed");
+  assert.equal(updated.pinned, true);
+  assert.match(query.sql, /conversation_id = \$1::uuid and user_id = \$2::uuid/);
+  assert.deepEqual(query.values.slice(2), [true, "Renamed", true, true]);
+});
+
+test("conversation metadata migration backfills existing titles for cross-device discovery", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      create table user_chat_conversations (
+        conversation_id uuid primary key, user_id uuid not null, created_at timestamptz not null default now()
+      );
+      create table chat_messages (
+        id bigint generated always as identity primary key,
+        conversation_id uuid not null, role text not null, content text not null,
+        created_at timestamptz not null default now()
+      );
+    `);
+    await db.exec("insert into user_chat_conversations(conversation_id,user_id) values('22222222-2222-4222-8222-222222222222','11111111-1111-4111-8111-111111111111')");
+    await db.exec("insert into chat_messages(conversation_id,role,content) values('22222222-2222-4222-8222-222222222222','user','  First   synced title  ')");
+    await db.exec(readFileSync(new URL("../../../db/migrations/0036_chat_conversation_metadata.sql", import.meta.url), "utf8"));
+    const result = await db.query("select title, pinned from user_chat_conversations");
+    assert.deepEqual(result.rows, [{ title: "First synced title", pinned: false }]);
+  } finally {
+    await db.close();
+  }
 });
 
 test("local agent progress events are persisted in one database batch", async () => {

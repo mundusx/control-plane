@@ -791,11 +791,22 @@ export class PostgresAuthStore {
     return result.rows[0];
   }
 
-  async authorizeConversation(userId, conversationId, create = false) {
+  async authorizeConversation(userId, conversationId, create = false, metadata = {}) {
     if (!conversationId) throw Object.assign(new Error("conversation id is required"), { statusCode: 400 });
     try {
       if (create) {
-        await this.pool.query("insert into public.user_chat_conversations (conversation_id, user_id) values ($1::uuid, $2::uuid) on conflict (conversation_id) do nothing", [conversationId, userId]);
+        const title = String(metadata.title || "").trim().slice(0, 72) || null;
+        const claimed = await this.pool.query(`insert into public.user_chat_conversations
+          (conversation_id, user_id, title, last_message_at, updated_at)
+          values ($1::uuid, $2::uuid, $3, now(), now())
+          on conflict (conversation_id) do update set
+            title = coalesce(public.user_chat_conversations.title, excluded.title),
+            last_message_at = now(),
+            updated_at = now()
+          where public.user_chat_conversations.user_id = excluded.user_id
+          returning conversation_id`, [conversationId, userId, title]);
+        if (claimed.rowCount !== 1) throw Object.assign(new Error("Conversation is not available to this user"), { statusCode: 404 });
+        return;
       }
       const found = await this.pool.query("select 1 from public.user_chat_conversations where conversation_id = $1::uuid and user_id = $2::uuid", [conversationId, userId]);
       if (found.rowCount !== 1) throw Object.assign(new Error("Conversation is not available to this user"), { statusCode: 404 });
@@ -803,6 +814,55 @@ export class PostgresAuthStore {
       if (error.code === "22P02") throw Object.assign(new Error("conversation id must be a UUID"), { statusCode: 400 });
       throw error;
     }
+  }
+
+  async chatConversations(userId, limit = 50) {
+    const boundedLimit = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 50));
+    const result = await this.pool.query(`select conversation_id, title, pinned, created_at, updated_at, last_message_at
+      from public.user_chat_conversations
+      where user_id = $1::uuid
+      order by pinned desc, last_message_at desc, conversation_id
+      limit $2`, [userId, boundedLimit]);
+    return result.rows.map((row) => ({
+      conversation_id: row.conversation_id,
+      title: row.title || null,
+      pinned: row.pinned === true,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      last_message_at: row.last_message_at,
+    }));
+  }
+
+  async updateChatConversation(userId, conversationId, input = {}) {
+    if (!conversationId || !UUID_PATTERN.test(String(conversationId))) {
+      throw Object.assign(new Error("conversation id must be a UUID"), { statusCode: 400 });
+    }
+    const hasTitle = Object.prototype.hasOwnProperty.call(input, "title");
+    const hasPinned = Object.prototype.hasOwnProperty.call(input, "pinned");
+    if (!hasTitle && !hasPinned) {
+      throw Object.assign(new Error("title or pinned is required"), { statusCode: 400 });
+    }
+    const title = hasTitle ? String(input.title || "").trim().slice(0, 72) : null;
+    if (hasTitle && !title) throw Object.assign(new Error("title is required"), { statusCode: 400 });
+    const result = await this.pool.query(`update public.user_chat_conversations set
+        title = case when $3::boolean then $4 else title end,
+        pinned = case when $5::boolean then $6 else pinned end,
+        updated_at = now()
+      where conversation_id = $1::uuid and user_id = $2::uuid
+      returning conversation_id, title, pinned, created_at, updated_at, last_message_at`,
+    [conversationId, userId, hasTitle, title, hasPinned, input.pinned === true]);
+    if (result.rowCount !== 1) throw Object.assign(new Error("Conversation is not available to this user"), { statusCode: 404 });
+    const row = result.rows[0];
+    return { conversation_id: row.conversation_id, title: row.title || "New chat", pinned: row.pinned === true,
+      created_at: row.created_at, updated_at: row.updated_at, last_message_at: row.last_message_at };
+  }
+
+  async removeChatConversation(userId, conversationId) {
+    const result = await this.pool.query(
+      "delete from public.user_chat_conversations where conversation_id = $1::uuid and user_id = $2::uuid",
+      [conversationId, userId],
+    );
+    return result.rowCount === 1;
   }
 
   async storeGithubToken(database, userId, payload) {
