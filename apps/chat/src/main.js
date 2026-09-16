@@ -7701,6 +7701,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let responseStarted = false;
   let requestBody = { ...body, stream: true };
   let stalledContinuationAttempts = 0;
+  let transientStreamRecoveries = 0;
 
   try {
     for (let attempt = 0; ; attempt += 1) {
@@ -7811,22 +7812,76 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         response.write(`${eventText}\n\n`);
       };
 
-      while (!sawDone) {
-        const { value, done } = await reader.read();
-        if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
-        if (done) break;
-        parseBuffer += decoder.decode(value, { stream: true });
-        const events = parseBuffer.split(/\r?\n\r?\n/);
-        parseBuffer = events.pop() ?? "";
-        events.forEach(consumeEvent);
-        hooks.onProgress?.({ content, completionId, finishReason });
+      let streamError = null;
+      try {
+        while (!sawDone) {
+          const { value, done } = await reader.read();
+          if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+          if (done) break;
+          parseBuffer += decoder.decode(value, { stream: true });
+          const events = parseBuffer.split(/\r?\n\r?\n/);
+          parseBuffer = events.pop() ?? "";
+          events.forEach(consumeEvent);
+          hooks.onProgress?.({ content, completionId, finishReason });
+        }
+        parseBuffer += decoder.decode();
+        if (!sawDone && parseBuffer.trim()) consumeEvent(parseBuffer);
+        if (!sawDone) streamError = new Error("control-plane stream ended before [DONE]");
+      } catch (error) {
+        streamError = error;
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock?.();
+        reader = null;
       }
-      parseBuffer += decoder.decode();
-      if (!sawDone && parseBuffer.trim()) consumeEvent(parseBuffer);
-      await reader.cancel().catch(() => {});
-      reader.releaseLock?.();
-      reader = null;
-      if (!sawDone) throw new Error("control-plane stream ended before [DONE]");
+
+      if (streamError) {
+        if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+
+        // A later continuation may already have produced verified text before
+        // its socket disappeared. Commit only text behind the explicit anchor;
+        // an unanchored restart is discarded and regenerated from the durable
+        // accumulated prefix.
+        if (attempt > 0 && attemptContent) {
+          const recoveredSuffix = anchoredContinuationSuffix(content, attemptContent);
+          if (recoveredSuffix !== null) {
+            if (
+              streamedContinuationContent &&
+              !recoveredSuffix.startsWith(streamedContinuationContent)
+            ) {
+              throw new Error("interrupted continuation changed after its streamed prefix");
+            }
+            content += recoveredSuffix;
+            writeContinuationContent(
+              response,
+              recoveredSuffix.slice(streamedContinuationContent.length),
+              completionId,
+            );
+          }
+        }
+
+        const canRecover =
+          isRecoverableUpstreamStreamError(streamError) &&
+          transientStreamRecoveries < 3 &&
+          attempt + 1 < maxSegments &&
+          content.length < maxOutputCharacters;
+        if (!canRecover) throw streamError;
+
+        transientStreamRecoveries += 1;
+        finishReason = null;
+        console.warn("[openai-stream-recovery]", JSON.stringify({
+          completionId,
+          attempt: transientStreamRecoveries,
+          cause: streamError.cause?.code ?? streamError.code ?? streamError.message,
+          preservedCharacters: content.length,
+        }));
+        response.write(": recovering interrupted upstream stream\n\n");
+        hooks.onProgress?.({ content, completionId, finishReason });
+        if (content) {
+          requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
+        }
+        continue;
+      }
 
       // Remove a redundant Markdown fence before overlap detection.  Doing
       // this afterwards hid the useful overlap when a continuation restarted
@@ -7998,6 +8053,14 @@ function uniqueContinuationSuffix(existingContent, candidateContent) {
     return candidate.slice(sharedPrefix);
   }
   return candidate;
+}
+
+function isRecoverableUpstreamStreamError(error) {
+  const code = String(error?.cause?.code ?? error?.code ?? "").toUpperCase();
+  if (["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(code)) return true;
+  return /terminated|socket|premature close|stream ended before \[done\]/i.test(
+    String(error?.message ?? error ?? ""),
+  );
 }
 
 function anchoredContinuationSuffix(existingContent, candidateContent) {

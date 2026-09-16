@@ -4900,6 +4900,64 @@ test("automatic continuation waits for the exact anchor before streaming a resta
   assert.equal((writes.join("").match(/data: \[DONE\]/g) || []).length, 1);
 });
 
+test("automatic continuation resumes after an upstream socket terminates mid-response", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const first = `package.json\n\`\`\`json\n{\n  "name": "bus-ticketing-api",\n${"  \"dependency\": \"express\",\n".repeat(12)}`;
+  const suffix = `  "scripts": { "start": "node src/app.js" }\n}\n\`\`\``;
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  const terminated = Object.assign(new TypeError("terminated"), {
+    cause: { code: "UND_ERR_SOCKET" },
+  });
+  const interrupted = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-bus", choices: [{ delta: { content: first }, finish_reason: null }] })}\n\n`,
+      ));
+      setTimeout(() => controller.error(terminated), 0);
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  let requestCount = 0;
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "can u please create a nodejs code for CRUD api complete for Bus Ticketing",
+      historyMessages: [],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (_url, init = {}) => {
+      requestCount += 1;
+      if (requestCount === 1) return interrupted;
+      const request = JSON.parse(init.body);
+      const prompt = request.messages.at(-1)?.content ?? "";
+      const anchor = prompt.match(/CONTINUATION_ANCHOR:\n([\s\S]*?)\nEND_CONTINUATION_ANCHOR/)?.[1] ?? "";
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ id: "chatcmpl-bus", choices: [{ delta: { content: anchor + suffix }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: "chatcmpl-bus", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+            "data: [DONE]\n\n",
+          ));
+          controller.close();
+        },
+      }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+    },
+  );
+
+  assert.equal(requestCount, 2);
+  assert.equal(result.content, first + suffix);
+  assert.equal(result.finishReason, "stop");
+  assert.doesNotMatch(writes.join(""), /network error|interrupted before completion|UND_ERR_SOCKET/i);
+  assert.equal((writes.join("").match(/data: \[DONE\]/g) || []).length, 1);
+});
+
 test("automatic continuation strips generation markers and advances past a restarted controller block", async () => {
   const encoder = new TextEncoder();
   const writes = [];
