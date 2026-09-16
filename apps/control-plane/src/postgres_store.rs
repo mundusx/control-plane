@@ -38,14 +38,9 @@ impl PostgresStore {
         let mut client = self.connect()?;
         let devices: Vec<NodeRecord> = query_json_rows(&mut client, DEVICES_RESTORE_SQL)?;
         let jobs: Vec<JobRecord> = query_json_rows(&mut client, JOBS_RESTORE_SQL)?;
-        let job_events: Vec<JobEventRecord> = query_json_rows(
-            &mut client,
-            "select to_jsonb(t)::text from public.job_events t order by t.source_event_id asc nulls last, t.id asc",
-        )?;
-        let credits_ledger: Vec<CreditsLedgerRecord> = query_json_rows(
-            &mut client,
-            "select to_jsonb(t)::text from public.credits_ledger t order by t.created_at asc, t.id asc",
-        )?;
+        let job_events: Vec<JobEventRecord> = query_json_rows(&mut client, JOB_EVENTS_RESTORE_SQL)?;
+        let credits_ledger: Vec<CreditsLedgerRecord> =
+            query_json_rows(&mut client, CREDITS_RESTORE_SQL)?;
 
         let mut state = ControlPlaneState::default();
         for device in devices {
@@ -1164,7 +1159,40 @@ select jsonb_build_object(
   'error', error
 )::text
 from public.jobs
+where status in ('queued', 'assigned')
+   or job_id in (
+     select recent.job_id
+     from public.jobs recent
+     where recent.status in ('completed', 'failed')
+     order by recent.submitted_at_epoch desc nulls last, recent.job_id desc
+     limit 512
+   )
 order by submitted_at_epoch asc nulls last, job_id asc
+"#;
+
+// The database is the durable history. The process only needs a bounded hot
+// window in memory; restoring every historical event made startup and every
+// snapshot grow without bound as production traffic accumulated.
+const JOB_EVENTS_RESTORE_SQL: &str = r#"
+select to_jsonb(t)::text
+from (
+  select *
+  from public.job_events
+  order by source_event_id desc nulls last, id desc
+  limit 4096
+) t
+order by t.source_event_id asc nulls last, t.id asc
+"#;
+
+const CREDITS_RESTORE_SQL: &str = r#"
+select to_jsonb(t)::text
+from (
+  select *
+  from public.credits_ledger
+  order by created_at desc, id desc
+  limit 4096
+) t
+order by t.created_at asc, t.id asc
 "#;
 
 const DEVICES_UPSERT_SQL: &str = r#"
@@ -1325,7 +1353,11 @@ from (
 
 const HARNESS_TASKS_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.task_id)::text, '[]')
-from public.harness_tasks t
+from (
+  select * from public.harness_tasks
+  order by updated_at_epoch desc, task_id desc
+  limit 512
+) t
 "#;
 
 const HARNESS_RUNNERS_RESTORE_SQL: &str = r#"
@@ -1335,32 +1367,63 @@ from public.harness_runners t
 
 const HARNESS_ATTEMPTS_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.attempt_id)::text, '[]')
-from public.harness_attempts t
+from (
+  select * from public.harness_attempts
+  order by updated_at_epoch desc, attempt_id desc
+  limit 2048
+) t
 "#;
 
 const HARNESS_RESERVATIONS_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.reservation_id)::text, '[]')
-from public.harness_capacity_reservations t
+from (
+  select * from public.harness_capacity_reservations
+  order by created_at_epoch desc, reservation_id desc
+  limit 2048
+) t
 "#;
 
 const HARNESS_APPROVALS_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.approval_id)::text, '[]')
-from public.harness_approvals t
+from (
+  select * from public.harness_approvals
+  order by created_at_epoch desc, approval_id desc
+  limit 2048
+) t
 "#;
 
 const HARNESS_AUDIT_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.event_id)::text, '[]')
-from public.harness_audit_events t
+from (
+  select * from public.harness_audit_events
+  order by created_at_epoch desc, event_id desc
+  limit 4096
+) t
 "#;
 
 const HARNESS_TOOL_CALLS_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.tool_call_id)::text, '[]') from public.harness_tool_calls t
+select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.tool_call_id)::text, '[]')
+from (
+  select * from public.harness_tool_calls
+  order by created_at_epoch desc, tool_call_id desc
+  limit 4096
+) t
 "#;
 const HARNESS_VALIDATIONS_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.validation_id)::text, '[]') from public.harness_validations t
+select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.validation_id)::text, '[]')
+from (
+  select * from public.harness_validations
+  order by created_at_epoch desc, validation_id desc
+  limit 4096
+) t
 "#;
 const HARNESS_ARTIFACTS_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.artifact_id)::text, '[]') from public.harness_artifacts t
+select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.artifact_id)::text, '[]')
+from (
+  select * from public.harness_artifacts
+  order by created_at_epoch desc, artifact_id desc
+  limit 2048
+) t
 "#;
 const HARNESS_OPERATIONAL_POLICY_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(jsonb_build_object(
@@ -1372,7 +1435,12 @@ select coalesce(jsonb_agg(jsonb_build_object(
 ))::text, '[]') from public.harness_operational_policy where singleton = true
 "#;
 const HARNESS_OPERATIONAL_EVENTS_RESTORE_SQL: &str = r#"
-select coalesce(jsonb_agg(to_jsonb(t) - 'id' order by t.created_at_epoch, t.event_id)::text, '[]') from public.harness_operational_events t
+select coalesce(jsonb_agg(to_jsonb(t) - 'id' order by t.created_at_epoch, t.event_id)::text, '[]')
+from (
+  select * from public.harness_operational_events
+  order by created_at_epoch desc, event_id desc
+  limit 4096
+) t
 "#;
 
 const HARNESS_TASK_UPSERT_SQL: &str = r#"
@@ -1556,9 +1624,10 @@ on conflict (event_id) do nothing
 #[cfg(test)]
 mod tests {
     use super::{
-        PostgresStore, CHAT_MESSAGE_INSERT_SQL, CREDITS_UPSERT_SQL, DEVICES_UPSERT_SQL,
-        HARNESS_AUDIT_UPSERT_SQL, HARNESS_RESERVATION_UPSERT_SQL, HARNESS_TASK_UPSERT_SQL,
-        JOBS_UPSERT_SQL, JOB_EVENTS_UPSERT_SQL,
+        PostgresStore, CHAT_MESSAGE_INSERT_SQL, CREDITS_RESTORE_SQL, CREDITS_UPSERT_SQL,
+        DEVICES_UPSERT_SQL, HARNESS_ARTIFACTS_RESTORE_SQL, HARNESS_AUDIT_UPSERT_SQL,
+        HARNESS_TASKS_RESTORE_SQL, HARNESS_RESERVATION_UPSERT_SQL, HARNESS_TASK_UPSERT_SQL,
+        JOBS_RESTORE_SQL, JOBS_UPSERT_SQL, JOB_EVENTS_RESTORE_SQL, JOB_EVENTS_UPSERT_SQL,
     };
 
     #[test]
@@ -1616,5 +1685,15 @@ mod tests {
         assert!(CREDITS_UPSERT_SQL.contains("($11::text)::timestamptz"));
         assert!(JOB_EVENTS_UPSERT_SQL.contains("$6::text"));
         assert!(JOB_EVENTS_UPSERT_SQL.contains("($6::text)::timestamptz"));
+    }
+
+    #[test]
+    fn restore_queries_keep_durable_history_out_of_hot_memory() {
+        assert!(JOBS_RESTORE_SQL.contains("status in ('queued', 'assigned')"));
+        assert!(JOBS_RESTORE_SQL.contains("limit 512"));
+        assert!(JOB_EVENTS_RESTORE_SQL.contains("limit 4096"));
+        assert!(CREDITS_RESTORE_SQL.contains("limit 4096"));
+        assert!(HARNESS_TASKS_RESTORE_SQL.contains("limit 512"));
+        assert!(HARNESS_ARTIFACTS_RESTORE_SQL.contains("limit 2048"));
     }
 }

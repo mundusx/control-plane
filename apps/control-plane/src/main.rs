@@ -7201,15 +7201,13 @@ fn handle_connection_with_streams(
             }
         }
         ("GET", "/health") => {
-            let snapshot = state
-                .lock()
-                .expect("state lock")
-                .snapshot(storage_source.as_str());
+            let guard = state.lock().expect("state lock");
             let snapshot = if wants_full_snapshot(query) {
-                snapshot
+                guard.snapshot(storage_source.as_str())
             } else {
-                compact_status_snapshot(snapshot)
+                compact_status_snapshot(guard.compact_snapshot(storage_source.as_str()))
             };
+            drop(guard);
             let sync_snapshot = sync_status.lock().expect("sync status lock").clone();
             let deploy_fingerprint = deploy_fingerprint();
             let auth_mode = operator_auth_mode();
@@ -7244,15 +7242,13 @@ fn handle_connection_with_streams(
             )
         }
         ("GET", "/v1/status") => {
-            let snapshot = state
-                .lock()
-                .expect("state lock")
-                .snapshot(storage_source.as_str());
+            let guard = state.lock().expect("state lock");
             let snapshot = if wants_full_snapshot(query) {
-                snapshot
+                guard.snapshot(storage_source.as_str())
             } else {
-                compact_status_snapshot(snapshot)
+                compact_status_snapshot(guard.compact_snapshot(storage_source.as_str()))
             };
+            drop(guard);
             let mut snapshot =
                 status_snapshot_with_deploy_fingerprint(snapshot, deploy_fingerprint());
             if let serde_json::Value::Object(fields) = &mut snapshot {
