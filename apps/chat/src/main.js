@@ -47,7 +47,13 @@ const MAX_HISTORY_CONTEXT_TOKENS = 2048;
 const RECENT_HISTORY_MESSAGES = 6;
 const STREAMING_CODE_HISTORY_TOKENS = 1536;
 const STREAMING_CONTINUATION_MAX_TOKENS = 4096;
-const STREAMING_CONTINUATION_TAIL_CHARS = 6000;
+// Keep enough of the already streamed answer for the model to identify its
+// exact position.  A 6K character tail was too small for large multi-file
+// answers: Qwen could see a valid code fragment, but not which repeated
+// controller/route block it belonged to, and restarted an earlier section.
+// 24K characters is still comfortably bounded for the smallest supported
+// 32K-token worker together with the 4K-token continuation budget.
+const STREAMING_CONTINUATION_TAIL_CHARS = 24_000;
 const STREAMING_CONTINUATION_MAX_SEGMENTS = 12;
 const PUBLIC_MODEL_ID = "mundusx-agnostic";
 const CHAT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -6762,7 +6768,13 @@ export async function relayControlPlaneOpenAiStream(
       if (chunk?.error) return;
       completionId ||= String(chunk?.id ?? "").trim() || null;
       const choice = chunk?.choices?.[0];
-      const delta = String(choice?.delta?.content ?? "");
+      let delta = String(choice?.delta?.content ?? "");
+      if (!state.content) {
+        delta = delta.replace(
+          /^\s*\[truncated:\s*hit the generation limit\]\s*/i,
+          "",
+        );
+      }
       if (delta) {
         state.content += delta;
         if (!state.buffered) content += delta;
@@ -6822,10 +6834,8 @@ export async function relayControlPlaneOpenAiStream(
       };
       const streamContinuationProgress = (force = false) => {
         if (attempt === 0 || (!force && state.content.length < 128)) return;
-        const candidate = normalizeContinuationBoundary(
-          content,
-          uniqueContinuationSuffix(content, state.content),
-        );
+        const boundary = normalizeContinuationBoundary(content, state.content);
+        const candidate = uniqueContinuationSuffix(content, boundary);
         if (!candidate || !candidate.startsWith(state.streamedContinuationContent)) return;
         const delta = candidate.slice(state.streamedContinuationContent.length);
         if (!delta) return;
@@ -6867,12 +6877,15 @@ export async function relayControlPlaneOpenAiStream(
       }
       if (!state.sawDone) throw new Error("control-plane stream ended before [DONE]");
 
-      const uniqueSegment = attempt === 0
+      // Remove a redundant Markdown fence before overlap detection.  Doing
+      // this afterwards hid the useful overlap when a continuation restarted
+      // with ```js followed by an earlier line from the same code block.
+      const boundarySegment = attempt === 0
         ? state.content
-        : uniqueContinuationSuffix(content, state.content);
+        : normalizeContinuationBoundary(content, state.content);
       const joinedSegment = attempt === 0
-        ? uniqueSegment
-        : normalizeContinuationBoundary(content, uniqueSegment);
+        ? boundarySegment
+        : uniqueContinuationSuffix(content, boundarySegment);
       if (attempt > 0 && joinedSegment) {
         streamContinuationProgress(true);
         if (
@@ -6965,6 +6978,48 @@ function uniqueContinuationSuffix(existingContent, candidateContent) {
     }
   }
 
+  // A token cap can split a short identifier (for example `return res` /
+  // `res.status(...)`).  The general overlap floor intentionally stays high
+  // to avoid accidental prose matches, so handle this lexical boundary
+  // explicitly.
+  const trailingIdentifier = existing.match(/([A-Za-z_$][\w$]{2,})$/)?.[1];
+  if (
+    trailingIdentifier &&
+    candidate.startsWith(trailingIdentifier) &&
+    /^[.\[(]/.test(candidate.slice(trailingIdentifier.length))
+  ) {
+    return candidate.slice(trailingIdentifier.length);
+  }
+
+  // Models sometimes resume at the start of a nearby function instead of at
+  // the final character.  If that regenerated prefix reaches the current end
+  // byte-for-byte, discard the overlap and keep only the genuinely new suffix.
+  // If it diverges before reaching the end, reject it as a rewritten section;
+  // appending two competing implementations corrupts both Markdown and code.
+  if (candidate.length >= 96 && existing.length >= 96) {
+    const anchorLength = Math.min(160, candidate.length);
+    const anchor = candidate.slice(0, anchorLength);
+    let occurrence = existing.indexOf(anchor);
+    let best = null;
+    while (occurrence >= 0) {
+      let shared = anchorLength;
+      while (
+        occurrence + shared < existing.length &&
+        shared < candidate.length &&
+        existing[occurrence + shared] === candidate[shared]
+      ) {
+        shared += 1;
+      }
+      if (!best || shared > best.shared) best = { occurrence, shared };
+      occurrence = existing.indexOf(anchor, occurrence + 1);
+    }
+    if (best) {
+      const existingRemainder = existing.length - best.occurrence;
+      if (best.shared >= existingRemainder) return candidate.slice(existingRemainder);
+      if (best.shared >= 512 || best.shared >= candidate.length * 0.6) return "";
+    }
+  }
+
   const restartProbe = Math.min(256, existing.length, candidate.length);
   if (restartProbe >= 80 && existing.slice(0, restartProbe) === candidate.slice(0, restartProbe)) {
     let sharedPrefix = restartProbe;
@@ -7027,10 +7082,15 @@ function buildContinuationRequestBody(currentBody, originalMessages, content, st
     entry?.role === "system"
       ? {
           ...entry,
-          content: `${entry.content} Continuation override: for the latest continuation request, output only the missing suffix after the supplied assistant tail. Do not restart or reproduce the complete file from its beginning.`,
+          // Historical partial answers are useful for an ordinary turn but
+          // actively confuse continuation: the model sees multiple copies of
+          // the same incomplete program.  The current request and the durable
+          // assistant tail below are the only state needed to continue.
+          content: `${String(entry.content ?? "").replace(/\n<conversation_history>[\s\S]*?<\/conversation_history>/, "")} Continuation override: for the latest continuation request, output only the missing suffix after the supplied assistant tail. Do not restart or reproduce the complete file from its beginning.`,
         }
       : entry,
   );
+  const continuationAnchor = continuationTail.slice(-256);
   const retryInstruction = stalledAttempt > 0
     ? ` A previous continuation restarted the answer and was discarded. This is recovery attempt ${stalledAttempt + 1}; begin with the next missing code line only.`
     : "";
@@ -7046,7 +7106,7 @@ function buildContinuationRequestBody(currentBody, originalMessages, content, st
       { role: "assistant", content: continuationTail },
       {
         role: "user",
-        content: `The assistant message above contains only the tail of a longer response. Continue immediately after its final character. Do not begin with a Markdown fence or language label. Do not restart the answer, repeat any heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.${retryInstruction}\n/no_think`,
+        content: `The assistant message above contains only the tail of a longer response. First repeat the CONTINUATION_ANCHOR below exactly. Continue immediately after that anchor with only the missing suffix; the relay removes the repeated anchor. Do not begin with a Markdown fence or language label. Do not restart the answer, repeat any earlier heading, import, declaration, contract, class, or function, or add a new introduction. Finish all requested project code and close every open code fence and delimiter.${retryInstruction}\n\nCONTINUATION_ANCHOR:\n${continuationAnchor}\nEND_CONTINUATION_ANCHOR\n/no_think`,
       },
     ],
   };

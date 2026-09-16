@@ -4491,7 +4491,7 @@ test("a new full-code Chat request with long history finishes across bounded res
   assert.match(requests[0].messages[1].content, /Earlier conversation compressed/);
   assert.ok(requests[0].messages.reduce((total, entry) => total + entry.content.length, 0) < 16_000);
   assert.equal(requests[1].max_tokens, 4096);
-  assert.ok(requests.at(-1).messages.at(-2).content.length <= 6000);
+  assert.ok(requests.at(-1).messages.at(-2).content.length <= 24_000);
   assert.ok(result.content.startsWith("segment-1:"));
   assert.ok(result.content.endsWith(`${"y".repeat(1990)}\n`));
   assert.equal(result.finishReason, "stop");
@@ -4542,6 +4542,62 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
   assert.match(requests[1].messages[0].content, /Continuation override/);
   assert.match(requests[2].messages.at(-1).content, /previous continuation restarted/);
   assert.equal(requests[1].temperature, 0);
+  assert.equal(result.finishReason, "stop");
+  assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
+});
+
+test("automatic continuation strips generation markers and advances past a restarted controller block", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const requests = [];
+  const first = "```js\nconst updateTicket = async (req, res) => {\n  try {\n    const ticket = await Ticket.findById(req.params.id);\n    return res";
+  const overlap = "res.status(200).json({ success: true, data: ticket });\n  } catch (error) {\n    res.status(500).json({ success: false });\n  }\n};\n";
+  const second = `\`\`\`js\n${overlap}const deleteTicket = async (req, res) => {\n  await Ticket.findByIdAndDelete(req.params.id);\n};\n`;
+  const final = `${overlap}const deleteTicket = async (req, res) => {\n  await Ticket.findByIdAndDelete(req.params.id);\n};\n\nmodule.exports = { updateTicket, deleteTicket };\n\`\`\``;
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  const streamResponse = (content, finishReason, id) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id, choices: [{ delta: { content: `[truncated: hit the generation limit] ${content}` }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id, choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  let count = 0;
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "create a complete Node.js CRUD API",
+      historyMessages: [
+        { role: "user", content: "an older request" },
+        { role: "assistant", content: "an older incomplete program" },
+      ],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (_url, init = {}) => {
+      count += 1;
+      requests.push(JSON.parse(init.body));
+      if (count === 1) return streamResponse(first, "length", "part-1");
+      if (count === 2) return streamResponse(second, "length", "part-2");
+      return streamResponse(final, "stop", "part-3");
+    },
+  );
+
+  assert.equal(count, 3);
+  assert.doesNotMatch(result.content, /truncated: hit the generation limit/i);
+  assert.equal((result.content.match(/const deleteTicket/g) || []).length, 1);
+  assert.match(result.content, /module\.exports = \{ updateTicket, deleteTicket \}/);
+  assert.doesNotMatch(requests[1].messages[0].content, /older incomplete program/);
+  assert.match(requests[1].messages.at(-1).content, /CONTINUATION_ANCHOR/);
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
 });
