@@ -58,3 +58,10 @@ test("packaged migration matches canonical SQL", async () => {
   const canonical = await readFile(new URL("../../../db/migrations/0036_chat_conversation_metadata.sql", import.meta.url), "utf8");
   assert.equal((await readFile(chatMigrations[0].file, "utf8")).replace(/\r\n/g,"\n"), canonical.replace(/\r\n/g,"\n"));
 });
+
+test("Railway deploy owns migrations; ordinary server starts do not run them", async () => {
+  const config = JSON.parse(await readFile(new URL("../railway.json", import.meta.url), "utf8"));
+  assert.deepEqual(config.deploy.preDeployCommand, ["npm run db:migrate"]);
+  const app = await readFile(new URL("../src/main.js", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /migrateChatFromEnv/);
+});
