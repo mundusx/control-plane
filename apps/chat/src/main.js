@@ -4682,7 +4682,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     function isRecoverableBrowserStreamError(error) {
       const message = String(error?.message || error || "");
       return error instanceof TypeError ||
-        /network\s*error|failed to fetch|load failed|stream ended before completion|terminated|connection.*(?:closed|reset)/i.test(message);
+        /network\s*error|failed to fetch|load failed|stream ended before completion|connection.*(?:closed|reset)/i.test(message);
     }
 
     async function recoverInterruptedConversationStream(conversationId, message, error) {
