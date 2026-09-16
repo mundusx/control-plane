@@ -689,10 +689,10 @@ fn should_enable_live_stream(
     _native_tool_turn: bool,
     mode: Option<&str>,
     record: &JobRecord,
-    streaming_node_available: bool,
+    streaming_node_known: bool,
 ) -> bool {
     let direct_mode = mode.is_none_or(|value| value.eq_ignore_ascii_case("chat"));
-    wants_stream && direct_mode && !record.graph_execution_enabled && streaming_node_available
+    wants_stream && direct_mode && !record.graph_execution_enabled && streaming_node_known
 }
 
 fn chat_job_execution_mode(
@@ -8968,11 +8968,20 @@ fn handle_connection_with_streams(
                     let mut guard = state.lock().expect("state lock");
                     let submitted =
                         guard.submit_job_with_mode(job_request, mode.clone(), now_unix_seconds());
-                    let streaming_node_available = guard.nodes.values().any(|node| {
+                    // Preserve the caller's streaming contract while a known
+                    // streaming worker reconnects after a control-plane
+                    // restart. Requiring the worker to be healthy at this
+                    // exact instant permanently downgraded requests arriving
+                    // during the heartbeat gap to buffered delivery, so the
+                    // browser saw no token until a large generation finished.
+                    // The scheduler still requires healthy/runtime-ready
+                    // state before assigning the streaming job.
+                    let streaming_node_known = guard.nodes.values().any(|node| {
                         node.policy_allowed
-                            && node.worker_health.as_ref().is_some_and(|health| {
-                                health.healthy && health.runtime_ready && health.streaming_supported
-                            })
+                            && node
+                                .worker_health
+                                .as_ref()
+                                .is_some_and(|health| health.streaming_supported)
                     });
                     // Plan first with buffered delivery so the graph remains authoritative.
                     // Only direct jobs are upgraded to live worker deltas.
@@ -8982,7 +8991,7 @@ fn handle_connection_with_streams(
                         native_tool_turn,
                         mode.as_deref(),
                         &submitted,
-                        streaming_node_available,
+                        streaming_node_known,
                     );
                     if live_stream_job {
                         guard
@@ -9753,7 +9762,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn live_streaming_requires_a_direct_plan_and_streaming_node() {
+    fn live_streaming_waits_for_a_known_streaming_node_to_reconnect() {
         let mut state = ControlPlaneState::default();
         let direct = state.submit_job(
             JobRequest {
