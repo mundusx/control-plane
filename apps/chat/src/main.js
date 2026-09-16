@@ -2328,6 +2328,9 @@ export function page(config = configFromEnv()) {
           .then((status) => { lastLocalAgentStatus = status; renderRuntimeControls(); })
           .catch(() => {});
         activeHistoryId = localStorage.getItem(conversationIdKey);
+        await syncServerHistory().catch((error) => {
+          console.warn("Unable to synchronize conversation history", error);
+        });
         const name = user.display_name || user.email;
         document.querySelectorAll("[data-account-name]").forEach((node) => node.textContent = name);
         document.querySelectorAll("[data-account-email]").forEach((node) => node.textContent = user.email);
@@ -5438,6 +5441,35 @@ export function page(config = configFromEnv()) {
       renderHistory();
     }
 
+    async function syncServerHistory() {
+      const response = await nativeFetch("/api/conversations?limit=50");
+      if (!response.ok) throw new Error("conversation index unavailable");
+      const payload = await response.json();
+      const remote = Array.isArray(payload.conversations) ? payload.conversations : [];
+      const local = readHistory();
+      const localById = new Map(local.map((item) => [item.conversationId || item.id, item]));
+      const remoteIds = new Set(remote.map((item) => item.conversation_id));
+      const merged = [
+        ...remote.map((item) => {
+          const cached = localById.get(item.conversation_id);
+          return {
+            id: item.conversation_id,
+            conversationId: item.conversation_id,
+            title: item.title || cached?.title || "New chat",
+            pinned: item.pinned === true,
+            createdAt: Date.parse(item.created_at || item.last_message_at) || cached?.createdAt || Date.now(),
+            updatedAt: Date.parse(item.updated_at || item.last_message_at) || cached?.updatedAt || Date.now(),
+          };
+        }),
+        ...local.filter((item) => !remoteIds.has(item.conversationId || item.id)),
+      ].slice(0, 50);
+      localStorage.setItem(historyKey, JSON.stringify(merged));
+      if (!activeHistoryId && merged.length) {
+        activeHistoryId = merged[0].conversationId || merged[0].id;
+        localStorage.setItem(conversationIdKey, activeHistoryId);
+      }
+    }
+
     function readHistory() {
       try {
         const items = JSON.parse(localStorage.getItem(historyKey) || "[]");
@@ -5676,6 +5708,10 @@ export function page(config = configFromEnv()) {
         entry.id === item.id ? { ...entry, title, updatedAt: Date.now() } : entry,
       );
       writeHistory(items);
+      persistConversationMetadata(item.conversationId || item.id, { title }).catch(() => {
+        writeHistory(readHistory().map((entry) => entry.id === item.id ? item : entry));
+        setStatus("error", "Rename failed");
+      });
     }
 
     function togglePinnedHistoryItem(item) {
@@ -5683,6 +5719,21 @@ export function page(config = configFromEnv()) {
         entry.id === item.id ? { ...entry, pinned: !entry.pinned, updatedAt: Date.now() } : entry,
       );
       writeHistory(items);
+      persistConversationMetadata(item.conversationId || item.id, { pinned: !item.pinned }).catch(() => {
+        writeHistory(readHistory().map((entry) => entry.id === item.id ? item : entry));
+        setStatus("error", "Pin update failed");
+      });
+    }
+
+    async function persistConversationMetadata(conversationId, changes) {
+      const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "conversation update failed");
+      return payload;
     }
 
     async function deleteHistoryItem(item) {
@@ -6147,6 +6198,13 @@ export function createServerApp(config = configFromEnv()) {
         const result = await authStore.repositoryContents(session.id, githubContentsMatch[1], url.searchParams.get("path") || "", url.searchParams.get("ref") || "");
         return sendJson(response, 200, result);
       }
+      if (request.method === "GET" && url.pathname === "/api/conversations") {
+        if (!request.mundusxSession) throw httpError(401, "Sign in is required");
+        const limit = Number.parseInt(url.searchParams.get("limit") || "50", 10);
+        return sendJson(response, 200, {
+          conversations: await authStore.chatConversations(request.mundusxSession.id, limit),
+        });
+      }
       if (request.method === "GET" && url.pathname.startsWith("/api/conversations/") && url.pathname.endsWith("/messages")) {
         const conversationId = decodeURIComponent(
           url.pathname.slice("/api/conversations/".length, -"/messages".length),
@@ -6160,24 +6218,31 @@ export function createServerApp(config = configFromEnv()) {
         const conversationId = decodeURIComponent(url.pathname.slice("/api/conversations/".length));
         if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, conversationId);
         const result = await deleteChatConversation(conversationId, config, fetch);
+        if (request.mundusxSession) await authStore.removeChatConversation(request.mundusxSession.id, conversationId);
         return sendJson(response, 200, result);
+      }
+      if (request.method === "PATCH" && url.pathname.startsWith("/api/conversations/")) {
+        if (!request.mundusxSession) throw httpError(401, "Sign in is required");
+        const conversationId = decodeURIComponent(url.pathname.slice("/api/conversations/".length));
+        const body = await readJsonBody(request);
+        return sendJson(response, 200, await authStore.updateChatConversation(request.mundusxSession.id, conversationId, body));
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {
         const body = await readJsonBody(request);
-        if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, body?.conversationId, true);
+        if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, body?.conversationId, true, { title: body?.message });
         if (request.mundusxSession) body.skillContext = await runtimeSkillContext(authStore, request.mundusxSession.id);
         const result = await submitChatTurn(body, config);
         return sendJson(response, 200, result);
       }
       if (request.method === "POST" && url.pathname === "/api/chat/stream") {
         const body = await readJsonBody(request);
-        if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, body?.conversationId, true);
+        if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, body?.conversationId, true, { title: body?.message });
         if (request.mundusxSession) body.skillContext = await runtimeSkillContext(authStore, request.mundusxSession.id);
         return await streamChatTurn(response, body, config);
       }
       if (request.method === "POST" && url.pathname === "/api/chat/jobs") {
         const body = await readJsonBody(request);
-        if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, body?.conversationId, true);
+        if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, body?.conversationId, true, { title: body?.message });
         if (request.mundusxSession) body.skillContext = await runtimeSkillContext(authStore, request.mundusxSession.id);
         const result = await submitChatJob(body, config);
         return sendJson(response, 202, result);
@@ -6589,11 +6654,12 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   const codeProjectContinuation = isCodeProjectContinuation(message, historyMessages);
   const completeCodeResponse = codeProjectContinuation || looksLikeCompleteProgramRequest(message.toLowerCase());
   const codeGenerationResponse = completeCodeResponse || looksLikeCodeGenerationRequest(message.toLowerCase());
-  if (conversationId) {
-    await appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
+  const userPersistence = conversationId
+    ? appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
       console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
-    });
-  }
+      return null;
+    })
+    : Promise.resolve(null);
 
   // Keep small, deterministic lookups on the fast Chat path. This does not
   // invoke the planner, discovery, Hermes, or a recoverable background job.
@@ -6622,6 +6688,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
         startOpenAiStream(response, "direct-tool", completionId);
         for (const frame of openAiSseFrames(completion, { buffered: false })) response.write(frame);
         response.end("data: [DONE]\n\n");
+        await userPersistence;
         await recordAssistantTurn(conversationId, config, fetchImpl, weatherResult);
         return { content, completionId, finishReason: "stop", tool: "weather" };
       } catch (error) {
@@ -6673,19 +6740,42 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   };
   if (model) requestBody.model = model;
 
+  let checkpointChain = Promise.resolve();
+  let checkpointChars = 0;
+  let checkpointAt = Date.now();
+  const queueAssistantCheckpoint = ({ content, completionId, final = false, force = false }) => {
+    const text = String(content || "");
+    const now = Date.now();
+    if (!conversationId || !completionId || !text) return checkpointChain;
+    if (!force && !final && text.length - checkpointChars < 8192 && now - checkpointAt < 5000) return checkpointChain;
+    checkpointChars = text.length;
+    checkpointAt = now;
+    checkpointChain = checkpointChain.then(async () => {
+      await userPersistence;
+      await appendConversationMessage(conversationId, "assistant", text, config, fetchImpl, {
+        jobId: completionId,
+        metadata: { partial: !final },
+      });
+    }).catch((error) => {
+      console.warn(`[conversation] failed to persist streaming assistant checkpoint: ${error.message}`);
+    });
+    return checkpointChain;
+  };
+
   return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
     // A provider length stop is authoritative and must never depend on the
     // wording classifier. The continuation relay adds no request when the
     // first segment finishes normally, while preventing any unrecognized
     // code phrasing from surfacing a truncated answer to the browser.
     continueOnLength: true,
+    onProgress: queueAssistantCheckpoint,
+    onInterrupted: async ({ content, completionId }) => {
+      if (!conversationId || !content) return;
+      await queueAssistantCheckpoint({ content, completionId, force: true });
+    },
     onComplete: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
-      await appendConversationMessage(conversationId, "assistant", content, config, fetchImpl, {
-        jobId: completionId,
-      }).catch((error) => {
-        console.warn(`[conversation] failed to persist streaming assistant message: ${error.message}`);
-      });
+      await queueAssistantCheckpoint({ content, completionId, final: true });
     },
   });
 }
@@ -6859,6 +6949,7 @@ export async function relayControlPlaneOpenAiStream(
             response.write(text);
             events.forEach((eventText) => inspectEvent(eventText, state));
           }
+          hooks.onProgress?.({ content, completionId, finishReason });
         }
         const decoderTail = decoder.decode();
         parseBuffer += decoderTail;
@@ -6900,6 +6991,7 @@ export async function relayControlPlaneOpenAiStream(
           joinedSegment.slice(state.streamedContinuationContent.length),
           completionId,
         );
+        hooks.onProgress?.({ content, completionId, finishReason });
       }
       const segmentMadeProgress = joinedSegment.length > 0;
       const reachedContinuationLimit = attempt >= maxContinuationAttempts || content.length >= maxOutputCharacters;
@@ -6963,6 +7055,7 @@ export async function relayControlPlaneOpenAiStream(
     await hooks.onComplete?.({ content, completionId, finishReason });
     return { content, completionId, finishReason };
   } catch (error) {
+    await hooks.onInterrupted?.({ content, completionId, finishReason, error });
     if (!response.writableEnded) {
       const payload = { error: { message: error.message ?? "stream failed", type: "mundusx_stream_error" } };
       response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
@@ -12844,13 +12937,15 @@ async function appendConversationMessage(conversationId, role, content, config, 
   if (!conversationId || !content) {
     return null;
   }
+  const { jobId, ...fields } = extra;
+  const hasJobId = Object.prototype.hasOwnProperty.call(extra, "jobId");
   return controlPlaneFetch(
     fetchImpl,
     config,
     `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
     {
       method: "POST",
-      body: JSON.stringify({ role, content, ...extra }),
+      body: JSON.stringify({ role, content, ...fields, ...(hasJobId ? { job_id: jobId } : {}) }),
     },
   );
 }

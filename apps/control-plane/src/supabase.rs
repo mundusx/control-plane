@@ -266,7 +266,7 @@ impl SupabaseMirror {
             self.post_json_returning_with_conflict(
                 "chat_messages",
                 Some("job_id"),
-                "resolution=ignore-duplicates,return=representation",
+                "resolution=merge-duplicates,return=representation",
                 message_row,
             )?
         } else {

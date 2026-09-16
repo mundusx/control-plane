@@ -28,10 +28,18 @@ importers:
       zod:
         specifier: ^4.5.4
         version: 4.5.4
+    devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.8
+        version: 0.5.8
 
   apps/dashboard: {}
 
 packages:
+
+  /@electric-sql/pglite@0.5.8:
+    resolution: {integrity: sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q==}
+    dev: true
 
   /@hono/node-server@2.1.1(hono@4.13.7):
     resolution: {integrity: sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg==}

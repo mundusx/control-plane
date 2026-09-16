@@ -4337,7 +4337,7 @@ test("live MundusX Chat stream preserves history and persists one user and assis
   assert.equal(upstreamRequest.messages.at(-1).content, "Explain distributed systems briefly.\n/no_think");
   assert.deepEqual(writes.map((entry) => entry.role), ["user", "assistant"]);
   assert.equal(writes[0].content, "Explain distributed systems briefly.");
-  assert.equal(writes[1].jobId, "chatcmpl-browser");
+  assert.equal(writes[1].job_id, "chatcmpl-browser");
 });
 
 test("normal Chat uses a context-safe code budget without node-capacity discovery", async () => {
@@ -4439,6 +4439,148 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
   assert.doesNotMatch(writes.join(""), /finish_reason":"length"/);
+});
+
+test("live Chat starts the model stream before the user-message database write completes", async () => {
+  const encoder = new TextEncoder();
+  let releaseUserWrite;
+  let modelStarted = false;
+  let messageWrites = 0;
+  const response = {
+    writableEnded: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    write: () => true,
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url) => {
+    if (url.includes("/v1/conversations/conversation-nonblocking/messages")) {
+      messageWrites += 1;
+      if (messageWrites === 1) {
+        return new Promise((resolve) => { releaseUserWrite = () => resolve(jsonResponse({ stored: true })); });
+      }
+      return jsonResponse({ stored: true });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      modelStarted = true;
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"id":"chatcmpl-nonblocking","choices":[{"delta":{"content":"Ready."},"finish_reason":null}]}\n\n' +
+            'data: {"id":"chatcmpl-nonblocking","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+            'data: [DONE]\n\n',
+          ));
+          controller.close();
+        },
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const turn = streamChatTurn(
+    response,
+    { message: "Hello", conversationId: "conversation-nonblocking" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(modelStarted, true);
+  assert.equal(messageWrites, 1);
+  releaseUserWrite();
+  const result = await turn;
+  assert.equal(result.content, "Ready.");
+  assert.equal(messageWrites, 2);
+});
+
+test("live Chat checkpoints a long assistant stream and finalizes the same completion record", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const content = "x".repeat(9000);
+  const response = {
+    writableEnded: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    write: () => true,
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/v1/conversations/conversation-checkpoint/messages")) {
+      writes.push(JSON.parse(init.body));
+      return jsonResponse({ stored: true });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ id: "chatcmpl-checkpoint", choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: "chatcmpl-checkpoint", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+            "data: [DONE]\n\n",
+          ));
+          controller.close();
+        },
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  await streamChatTurn(
+    response,
+    { message: "Write a long answer", conversationId: "conversation-checkpoint" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.deepEqual(writes.map((entry) => entry.role), ["user", "assistant", "assistant"]);
+  assert.deepEqual(writes.slice(1).map((entry) => entry.job_id), ["chatcmpl-checkpoint", "chatcmpl-checkpoint"]);
+  assert.deepEqual(writes.slice(1).map((entry) => entry.metadata.partial), [true, false]);
+  assert.equal(writes.at(-1).content.length, 9000);
+});
+
+test("live Chat preserves a short assistant checkpoint when the provider stream is interrupted", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const response = {
+    writableEnded: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    write: () => true,
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/v1/conversations/conversation-interrupted/messages")) {
+      writes.push(JSON.parse(init.body));
+      return jsonResponse({ stored: true });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      let sent = false;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (sent) {
+            controller.error(new Error("provider disconnected"));
+            return;
+          }
+          sent = true;
+          controller.enqueue(encoder.encode(
+            'data: {"id":"chatcmpl-interrupted","choices":[{"delta":{"content":"Recover me."},"finish_reason":null}]}\n\n',
+          ));
+        },
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const result = await streamChatTurn(
+    response,
+    { message: "Write an answer", conversationId: "conversation-interrupted" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(result.finishReason, "error");
+  assert.deepEqual(writes.map((entry) => entry.role), ["user", "assistant"]);
+  assert.equal(writes[1].job_id, "chatcmpl-interrupted");
+  assert.equal(writes[1].content, "Recover me.");
+  assert.equal(writes[1].metadata.partial, true);
 });
 
 test("a new full-code Chat request with long history finishes across bounded response segments", async () => {
@@ -6411,7 +6553,7 @@ test("sync tool paths persist both the user and assistant turns", async () => {
   assert.equal(JSON.parse(messageCalls[0].init.body).role, "user");
   const assistantBody = JSON.parse(messageCalls[1].init.body);
   assert.equal(assistantBody.role, "assistant");
-  assert.equal(assistantBody.jobId, null);
+  assert.equal(assistantBody.job_id, null);
   assert.equal(assistantBody.tool, "weather");
 });
 
@@ -6445,7 +6587,7 @@ test("pollChatJob persists the assistant turn exactly once on completion", async
   const body = JSON.parse(messageCalls[0].init.body);
   assert.equal(body.role, "assistant");
   assert.equal(body.content, "Done.");
-  assert.equal(body.jobId, "job-1");
+  assert.equal(body.job_id, "job-1");
 });
 
 test("pollChatJob keeps deterministic cleanup while verifier is disabled", async () => {
