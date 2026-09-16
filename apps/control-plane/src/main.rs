@@ -8736,6 +8736,7 @@ fn handle_connection_with_streams(
                             "conversation_id": conversation_id,
                             "deleted": persisted,
                             "persisted": persisted,
+                            "credits_affected": false,
                             "reason": if persisted { serde_json::Value::Null } else { serde_json::Value::String("conversation storage was not found".to_string()) }
                         }),
                     ),
@@ -8750,6 +8751,7 @@ fn handle_connection_with_streams(
                         "conversation_id": conversation_id,
                         "deleted": false,
                         "persisted": false,
+                        "credits_affected": false,
                         "reason": "conversation storage is not configured"
                     }),
                 ),

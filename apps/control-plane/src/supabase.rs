@@ -325,10 +325,10 @@ impl SupabaseMirror {
     pub fn delete_chat_conversation(&self, conversation_id: &str) -> Result<bool, String> {
         let conversation_id = escape_query_value(conversation_id);
         let deleted_messages = self.delete_path(&format!(
-            "chat_messages?conversation_id=eq.{conversation_id}"
+            "{CHAT_MESSAGES_TABLE}?conversation_id=eq.{conversation_id}"
         ))?;
         let deleted_conversation = self.delete_path(&format!(
-            "chat_conversations?conversation_id=eq.{conversation_id}"
+            "{CHAT_CONVERSATIONS_TABLE}?conversation_id=eq.{conversation_id}"
         ))?;
         Ok(deleted_messages || deleted_conversation)
     }
@@ -816,6 +816,9 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+const CHAT_MESSAGES_TABLE: &str = "chat_messages";
+const CHAT_CONVERSATIONS_TABLE: &str = "chat_conversations";
+
 fn parse_epoch(input: &str) -> Option<i64> {
     input.trim().parse::<i64>().ok()
 }
@@ -862,6 +865,20 @@ mod tests {
         assert!(is_missing_supabase_table(404, body));
         assert!(!is_missing_supabase_table(500, body));
         assert!(!is_missing_supabase_table(404, r#"{"code":"OTHER"}"#));
+    }
+
+    #[test]
+    fn chat_deletion_is_limited_to_chat_tables() {
+        assert_eq!(
+            [CHAT_MESSAGES_TABLE, CHAT_CONVERSATIONS_TABLE],
+            ["chat_messages", "chat_conversations"]
+        );
+        for table in [CHAT_MESSAGES_TABLE, CHAT_CONVERSATIONS_TABLE] {
+            assert!(!table.contains("credit"));
+            assert!(!table.contains("job"));
+            assert!(!table.contains("user"));
+            assert!(!table.contains("device"));
+        }
     }
 
     #[test]

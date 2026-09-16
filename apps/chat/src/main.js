@@ -6838,6 +6838,7 @@ export function createServerApp(config = configFromEnv()) {
           deleted: result.deleted === true || historyDeleted,
           history_deleted: historyDeleted,
           project_deleted: false,
+          credits_affected: false,
         });
       }
       if (request.method === "PATCH" && url.pathname.startsWith("/api/conversations/")) {
@@ -13867,9 +13868,10 @@ export async function deleteChatConversation(conversationId, config = configFrom
     throw httpError(400, "conversation id is required");
   }
   try {
-    return await controlPlaneFetch(fetchImpl, config, `/v1/conversations/${encodeURIComponent(id)}`, {
+    const result = await controlPlaneFetch(fetchImpl, config, `/v1/conversations/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
+    return { ...result, credits_affected: false };
   } catch (error) {
     // A missing row is already deleted. Storage outages are not success: the
     // browser must keep/restore the history item so the user can retry instead
@@ -13879,6 +13881,7 @@ export async function deleteChatConversation(conversationId, config = configFrom
         conversation_id: id,
         deleted: false,
         persisted: false,
+        credits_affected: false,
         reason: error.message || "conversation was not persisted",
       };
     }
