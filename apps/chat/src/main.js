@@ -23,6 +23,7 @@ import { createSkillsHttpController } from "./features/skills/http-controller.js
 import { createGlobalSkillsController } from "./features/skills/control-plane.js";
 import { httpError } from "./shared/http-error.js";
 import { releaseDownloadLocation } from "./release-downloads.js";
+import { createAdapterDownloads } from "./adapter-downloads.js";
 import {
   detectChatQualityFlags,
   detectCompleteCodeQualityFlags,
@@ -180,8 +181,7 @@ export function configFromEnv(env = process.env) {
     harnessBaseRevision: (env.MUNDUSX_HARNESS_BASE_REVISION ?? "").trim().toLowerCase(),
     harnessAllowedPathPrefixes: (env.MUNDUSX_HARNESS_ALLOWED_PATH_PREFIXES ?? "").trim(),
     harnessValidationProfiles: (env.MUNDUSX_HARNESS_VALIDATION_PROFILES ?? "").trim(),
-    harnessRunnerDownloadUrl: (env.MUNDUSX_HARNESS_RUNNER_DOWNLOAD_URL ?? "").trim()
-      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.80/MundusX-Setup.exe",
+    harnessRunnerDownloadUrl: "/download/adapter",
     latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.87",
     modelOverride: (env.MUNDUSX_CHAT_MODEL ?? env.MUNDUSX_CHAT_DEFAULT_MODEL ?? "").trim(),
     agentModelProviders: parseAgentModelProviders(env),
@@ -327,7 +327,7 @@ export function page(config = configFromEnv()) {
         <div class="project-readiness" id="project-readiness" data-state="checking" aria-live="polite">
           <span class="readiness-dot" aria-hidden="true"></span>
           <span><strong id="project-readiness-title">Checking connection…</strong><small id="project-readiness-text">Looking for a computer connected to this account.</small></span>
-          <a id="project-agent-update" href="${escapeHtml(config.harnessRunnerDownloadUrl)}" download hidden>Update</a>
+          <a id="project-agent-update" href="/download/adapter" target="_blank" rel="noopener" hidden>Update</a>
           <button id="project-readiness-refresh" type="button">Retry</button>
         </div>
         <section class="project-runner-setup" id="project-runner-setup" hidden>
@@ -335,7 +335,7 @@ export function page(config = configFromEnv()) {
             <span class="project-runner-context-icon" aria-hidden="true">⌁</span>
             <span><strong>Run code on this computer</strong><small>A lightweight user-owned runner keeps files and Git credentials on your device. It is separate from contributor nodes.</small></span>
           </div>
-          <a class="harness-download primary" id="harness-download" href="${escapeHtml(config.harnessRunnerDownloadUrl)}" download>Download MundusX + Hermes</a>
+          <a class="harness-download primary" id="harness-download" href="/download/adapter" target="_blank" rel="noopener">Download MundusX + Hermes</a>
           <p id="harness-runner-status" aria-live="polite">After installation, connect this computer to your account and approve it in the browser. Compute contribution remains off unless you enable it separately.</p>
         </section>
         <footer class="project-actions" id="project-actions">
@@ -2676,7 +2676,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (!harnessRunnerStatusEl) return;
       if (harnessDownloadEl) {
         harnessDownloadEl.hidden = ready || paired;
-        harnessDownloadEl.textContent = runnerDownloadStarted && !ready ? "Installer downloaded · awaiting connection…" : "Download MundusX + Hermes";
+        harnessDownloadEl.textContent = runnerDownloadStarted && !ready ? "Setup opened · awaiting connection…" : "Download MundusX + Hermes";
       }
       if (ready) harnessRunnerStatusEl.textContent = "Agent ready. Files, commands, and Git stay on this computer.";
       else if (agentMissing) harnessRunnerStatusEl.textContent = "MundusX is connected, but no coding agent is available. Install or enable Hermes, then retry.";
@@ -3494,8 +3494,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const reconnect = offline && !updateAvailable;
       projectAgentUpdateEl.href = reconnect ? "mundusx://reconnect" : harnessDownloadEl.href;
       projectAgentUpdateEl.dataset.action = reconnect ? "reconnect" : "update";
-      if (reconnect) projectAgentUpdateEl.removeAttribute("download");
-      else projectAgentUpdateEl.setAttribute("download", "");
+      projectAgentUpdateEl.removeAttribute("download");
+      if (reconnect) projectAgentUpdateEl.removeAttribute("target");
+      else projectAgentUpdateEl.setAttribute("target", "_blank");
     }
     projectAgentUpdateEl?.addEventListener("click", () => {
       if (projectAgentUpdateEl.dataset.action !== "reconnect") return;
@@ -6535,6 +6536,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 }
 
 export function createServerApp(config = configFromEnv()) {
+  const handleAdapterDownload = createAdapterDownloads({ minimumVersion: config.latestLocalAgentVersion });
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
@@ -6565,6 +6567,7 @@ export function createServerApp(config = configFromEnv()) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (await handleAdapterDownload(request, response, url)) return;
       if (await handleGlobalSkills({ request, response, url })) return;
       const releaseLocation = releaseDownloadLocation(url.pathname);
       if (["GET", "HEAD"].includes(request.method) && releaseLocation) {

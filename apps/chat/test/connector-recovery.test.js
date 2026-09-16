@@ -30,7 +30,7 @@ test("only an older installed version offers an update download", () => {
     const updateAvailable = !context.releaseVersionAtLeast(installed, required);
     assert.equal(updateAvailable, needsUpdate, installed + " compared to " + required);
     context.configureAgentRecoveryAction(updateAvailable, true);
-    assert.equal(attributes.has("download"), needsUpdate, installed);
+    assert.equal(attributes.has("download"), false, installed);
     assert.equal(link.dataset.action, needsUpdate ? "update" : "reconnect", installed);
   }
 });
@@ -39,7 +39,7 @@ test("paired offline computers hide the first-install download", () => {
   const config = configFromEnv({});
   const html = page(config);
   assert.match(html, /harnessDownloadEl\.hidden = ready \|\| paired/);
-  assert.match(config.harnessRunnerDownloadUrl, /cli-windows-v0\.1\.80\/MundusX-Setup\.exe$/);
+  assert.equal(config.harnessRunnerDownloadUrl, "/download/adapter");
 });
 
 test("Reconnect opens the installed app without downloading; Update still downloads", () => {
@@ -54,7 +54,7 @@ test("Reconnect opens the installed app without downloading; Update still downlo
   context.configureAgentRecoveryAction(true, true);
   assert.equal(link.href, "https://example.test/setup.exe");
   assert.equal(link.dataset.action, "update");
-  assert.equal(attributes.has("download"), true);
+  assert.equal(attributes.has("download"), false);
 });
 
 test("recovery keeps polling when known runners are still offline", async () => {

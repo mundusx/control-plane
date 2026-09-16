@@ -662,7 +662,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(projects, /id="project-runner-setup" hidden/);
   assert.match(projects, /Run code on this computer/);
   assert.match(projects, /It is separate from contributor nodes/);
-  assert.match(projects, /id="harness-download"[^>]*download>Download MundusX \+ Hermes/);
+  assert.match(projects, /id="harness-download"[^>]*href="\/download\/adapter"[^>]*>Download MundusX \+ Hermes/);
   assert.match(projects, /Compute contribution remains off unless you enable it separately/);
   assert.doesNotMatch(projects, /I installed it|Connect browser|pairing code/);
   assert.match(html, /runnerPairingPollTimer = window\.setTimeout/);
@@ -673,8 +673,8 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /projectReadinessRefreshEl\.hidden = localRunnerReady \|\| \(paired && !localRunnerReady && !reconnectTimedOut\)/);
   assert.doesNotMatch(projects, />Create pairing code</);
   assert.doesNotMatch(projects, /<details|Set up local runner/);
-  assert.match(projects, /MundusX-Setup\.exe/);
-  assert.match(projects, /mundusx\/releases\/releases\/download\/cli-windows-v0\.1\.80\/MundusX-Setup\.exe/);
+  assert.match(projects, /\/download\/adapter/);
+  assert.doesNotMatch(projects, /MundusX-Setup\.exe/);
   assert.match(html, /const latestLocalAgentVersion = "0\.1\.87"/);
   assert.match(html, /projectReadinessEl\.dataset\.state = updateAvailable \? "update"/);
   assert.match(html, /projectReadinessTitleEl\.textContent = updateAvailable \? "Update required"/);
