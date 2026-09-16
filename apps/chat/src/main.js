@@ -7697,7 +7697,10 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             finishReason = choice.finish_reason;
           }
           if (attempt > 0) return;
-          if (choice?.finish_reason === "length") {
+          // Hold every terminal frame until the relay has joined the segment
+          // and repaired any dangling Markdown fence.  Emitting `stop` first
+          // made the browser finalize an answer that still looked incomplete.
+          if (choice?.finish_reason) {
             if (delta) {
               response.write(`data: ${JSON.stringify({
                 ...chunk,
@@ -7776,6 +7779,13 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         attemptFinishReason = "length";
         finishReason = "length";
       }
+      if (attemptFinishReason !== "length") {
+        const markdownRepair = closeDanglingMarkdownFence(content);
+        if (markdownRepair) {
+          content += markdownRepair;
+          writeContinuationContent(response, markdownRepair, completionId);
+        }
+      }
       if (attemptFinishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (attemptFinishReason === "length") {
           response.write(`data: ${JSON.stringify({
@@ -7785,7 +7795,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             model: PUBLIC_MODEL_ID,
             choices: [{ index: 0, delta: {}, finish_reason: "length" }],
           })}\n\n`);
-        } else if (attempt > 0) {
+        } else {
           response.write(`data: ${JSON.stringify({
             id: completionId,
             object: "chat.completion.chunk",
@@ -7931,6 +7941,13 @@ function writeContinuationContent(response, content, completionId) {
       choices: [{ index: 0, delta: { content: content.slice(offset, offset + 4096) }, finish_reason: null }],
     })}\n\n`);
   }
+}
+
+function closeDanglingMarkdownFence(content) {
+  const value = String(content ?? "");
+  const fenceCount = (value.match(/(?:^|\n)[ \t]{0,3}```/g) || []).length;
+  if (fenceCount % 2 === 0) return "";
+  return `${value.endsWith("\n") ? "" : "\n"}\`\`\`\n`;
 }
 
 function buildContinuationRequestBody(currentBody, originalMessages, content, stalledAttempt = 0) {
