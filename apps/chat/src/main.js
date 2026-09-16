@@ -6924,8 +6924,14 @@ export async function relayControlPlaneOpenAiStream(
       };
       const streamContinuationProgress = (force = false) => {
         if (attempt === 0 || (!force && state.content.length < 128)) return;
-        const boundary = normalizeContinuationBoundary(content, state.content);
-        const candidate = uniqueContinuationSuffix(content, boundary);
+        // Only stream a continuation after the model has repeated the exact
+        // tail anchor supplied in buildContinuationRequestBody.  Heuristic
+        // overlap can legitimately change as more tokens arrive (for example,
+        // when a model restarts a controller and reaches the true boundary
+        // later).  Streaming that provisional suffix made already-visible
+        // text impossible to reconcile at the end of the segment.
+        const candidate = anchoredContinuationSuffix(content, state.content);
+        if (candidate === null) return;
         if (!candidate || !candidate.startsWith(state.streamedContinuationContent)) return;
         const delta = candidate.slice(state.streamedContinuationContent.length);
         if (!delta) return;
@@ -6971,12 +6977,10 @@ export async function relayControlPlaneOpenAiStream(
       // Remove a redundant Markdown fence before overlap detection.  Doing
       // this afterwards hid the useful overlap when a continuation restarted
       // with ```js followed by an earlier line from the same code block.
-      const boundarySegment = attempt === 0
-        ? state.content
-        : normalizeContinuationBoundary(content, state.content);
+      const boundarySegment = attempt === 0 ? state.content : null;
       const joinedSegment = attempt === 0
         ? boundarySegment
-        : uniqueContinuationSuffix(content, boundarySegment);
+        : finalContinuationSuffix(content, state.content);
       if (attempt > 0 && joinedSegment) {
         streamContinuationProgress(true);
         if (
@@ -7133,6 +7137,30 @@ function uniqueContinuationSuffix(existingContent, candidateContent) {
     return candidate.slice(sharedPrefix);
   }
   return candidate;
+}
+
+function anchoredContinuationSuffix(existingContent, candidateContent) {
+  const existing = String(existingContent ?? "");
+  const candidate = String(candidateContent ?? "");
+  if (!existing || !candidate) return null;
+  const anchor = existing.slice(-Math.min(256, existing.length));
+  // Very early truncations can leave less than 24 characters. The anchor is
+  // still explicit in the continuation prompt, so eight exact characters are
+  // enough to unlock streaming without falling back to a heuristic overlap.
+  if (anchor.length < 8) return null;
+  const anchorIndex = candidate.indexOf(anchor);
+  if (anchorIndex < 0) return null;
+  return normalizeContinuationBoundary(
+    existing,
+    candidate.slice(anchorIndex + anchor.length),
+  );
+}
+
+function finalContinuationSuffix(existingContent, candidateContent) {
+  const anchored = anchoredContinuationSuffix(existingContent, candidateContent);
+  if (anchored !== null) return anchored;
+  const boundary = normalizeContinuationBoundary(existingContent, candidateContent);
+  return uniqueContinuationSuffix(existingContent, boundary);
 }
 
 function normalizeContinuationBoundary(existingContent, candidateContent) {
