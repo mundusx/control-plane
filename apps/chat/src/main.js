@@ -6287,7 +6287,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (!conversationId) return { ok: true, shallow: true };
       const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId), { method: "DELETE" });
       const payload = await response.json().catch(() => ({}));
-      if (response.ok || response.status === 404 || response.status === 503) {
+      if (response.ok || response.status === 404) {
         return { ok: true, ...payload };
       }
       return { ok: false, error: payload.error || "delete failed" };
@@ -6765,8 +6765,18 @@ export function createServerApp(config = configFromEnv()) {
         const conversationId = decodeURIComponent(url.pathname.slice("/api/conversations/".length));
         if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, conversationId);
         const result = await deleteChatConversation(conversationId, config, fetch);
-        if (request.mundusxSession) await authStore.removeChatConversation(request.mundusxSession.id, conversationId);
-        return sendJson(response, 200, result);
+        const historyDeleted = request.mundusxSession
+          ? await authStore.removeChatConversation(request.mundusxSession.id, conversationId)
+          : false;
+        // Deleting a project conversation removes only its chat records. This
+        // route has no project identifier and never invokes project deletion,
+        // so the user's local project folder remains intact.
+        return sendJson(response, 200, {
+          ...result,
+          deleted: result.deleted === true || historyDeleted,
+          history_deleted: historyDeleted,
+          project_deleted: false,
+        });
       }
       if (request.method === "PATCH" && url.pathname.startsWith("/api/conversations/")) {
         if (!request.mundusxSession) throw httpError(401, "Sign in is required");
@@ -13785,7 +13795,10 @@ export async function deleteChatConversation(conversationId, config = configFrom
       method: "DELETE",
     });
   } catch (error) {
-    if ([404, 502, 503].includes(error.statusCode)) {
+    // A missing row is already deleted. Storage outages are not success: the
+    // browser must keep/restore the history item so the user can retry instead
+    // of hiding chat data that still exists in the database.
+    if (error.statusCode === 404) {
       return {
         conversation_id: id,
         deleted: false,

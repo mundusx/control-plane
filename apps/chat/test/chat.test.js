@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { marked } from "marked";
 
 import {
@@ -7410,17 +7411,23 @@ test("deleteChatConversation treats missing backend records as shallow local his
   assert.equal(result.persisted, false);
 });
 
-test("deleteChatConversation keeps local deletion when conversation storage is temporarily unavailable", async () => {
-  const result = await deleteChatConversation(
-    "conv-1",
-    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    async () => jsonResponse({ error: "conversation storage unavailable" }, false, 502),
+test("deleteChatConversation rejects storage outages so database history cannot be orphaned", async () => {
+  await assert.rejects(
+    () => deleteChatConversation(
+      "conv-1",
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async () => jsonResponse({ error: "conversation storage unavailable" }, false, 502),
+    ),
+    (error) => error.statusCode === 502 && /conversation storage unavailable/.test(error.message),
   );
+});
 
-  assert.equal(result.conversation_id, "conv-1");
-  assert.equal(result.deleted, false);
-  assert.equal(result.persisted, false);
-  assert.match(result.reason, /conversation storage unavailable/);
+test("chat deletion restores failed history and explicitly preserves project folders", () => {
+  const source = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+  const browserDelete = source.match(/async function deleteConversationRecord[\s\S]*?\n    }/)?.[0] ?? "";
+  assert.doesNotMatch(browserDelete, /response\.status === 503/);
+  assert.match(source, /project_deleted:\s*false/);
+  assert.doesNotMatch(browserDelete, /projects?\//i);
 });
 
 test("extracts a location that comes before the word weather", () => {
