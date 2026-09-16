@@ -6792,7 +6792,7 @@ export async function relayControlPlaneOpenAiStream(
     inspectEvent(eventText, state);
     if (state.buffered) return;
     const isDone = eventText.split(/\r?\n/).some((line) => line.trim() === "data: [DONE]");
-    if (deferTerminal && (isDone || state.finishReason === "length")) return;
+    if (deferTerminal && (isDone || state.finishReason)) return;
     if (hooks.publicOpenAi === true) {
       const normalized = normalizePublicOpenAiStreamEvent(eventText);
       if (normalized) response.write(`${normalized}\n\n`);
@@ -6925,6 +6925,13 @@ export async function relayControlPlaneOpenAiStream(
         state.finishReason = "length";
         finishReason = "length";
       }
+      if (hooks.continueOnLength === true && state.finishReason !== "length") {
+        const markdownRepair = closeDanglingMarkdownFence(content);
+        if (markdownRepair) {
+          content += markdownRepair;
+          writeContinuationContent(response, markdownRepair, completionId);
+        }
+      }
       if (state.finishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (hooks.continueOnLength === true) {
           if (state.finishReason === "length") {
@@ -6935,7 +6942,7 @@ export async function relayControlPlaneOpenAiStream(
               model: PUBLIC_MODEL_ID,
               choices: [{ index: 0, delta: {}, finish_reason: "length" }],
             })}\n\n`);
-          } else if (attempt > 0) {
+          } else {
             response.write(`data: ${JSON.stringify({
               id: completionId,
               object: "chat.completion.chunk",
@@ -7073,6 +7080,13 @@ function writeContinuationContent(response, content, completionId) {
       choices: [{ index: 0, delta: { content: content.slice(offset, offset + 4096) }, finish_reason: null }],
     })}\n\n`);
   }
+}
+
+function closeDanglingMarkdownFence(content) {
+  const value = String(content ?? "");
+  const fenceCount = (value.match(/(?:^|\n)[ \t]{0,3}```/g) || []).length;
+  if (fenceCount % 2 === 0) return "";
+  return `${value.endsWith("\n") ? "" : "\n"}\`\`\`\n`;
 }
 
 function buildContinuationRequestBody(currentBody, originalMessages, content, stalledAttempt = 0) {

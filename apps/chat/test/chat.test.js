@@ -4602,6 +4602,39 @@ test("automatic continuation strips generation markers and advances past a resta
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
 });
 
+test("a successful streamed answer closes its final Markdown fence before stop", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  const upstream = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "fence-stop", choices: [{ delta: { content: "## app.js\n\n```js\nconst app = express();" }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id: "fence-stop", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  const result = await streamChatTurn(
+    response,
+    { message: "create a Node.js program", historyMessages: [], toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => upstream,
+  );
+
+  assert.equal(result.finishReason, "stop");
+  assert.equal(result.content, "## app.js\n\n```js\nconst app = express();\n```\n");
+  assert.equal((writes.join("").match(/finish_reason\":\"stop/g) || []).length, 1);
+  assert.equal((writes.join("").match(/data: \[DONE\]/g) || []).length, 1);
+});
+
 test("automatic continuation repairs a repeated Markdown fence at a split code line", async () => {
   const encoder = new TextEncoder();
   const writes = [];
