@@ -36,6 +36,8 @@ const REDUCER_SECTION_CHARS_STANDARD: usize = 4_000;
 const REDUCER_SECTION_CHARS_STRONG: usize = 6_000;
 const ARTIFACT_BATCH_MAX_BYTES: usize = 64 * 1024;
 const ARTIFACT_BATCH_MAX_ITEMS: usize = 20;
+const HOT_TERMINAL_JOB_LIMIT: usize = 512;
+const HOT_JOB_EVENT_LIMIT: usize = 4096;
 const GRAPH_NODE_LEASE_SECONDS_ENV: &str = "MUNDUSX_GRAPH_NODE_LEASE_SECONDS";
 const DIRECT_JOB_LEASE_SECONDS_ENV: &str = "MUNDUSX_DIRECT_JOB_LEASE_SECONDS";
 const QUEUED_JOB_TIMEOUT_SECONDS_ENV: &str = "MUNDUSX_QUEUED_JOB_TIMEOUT_SECONDS";
@@ -151,43 +153,61 @@ impl ControlPlaneState {
     }
 
     pub fn snapshot(&self, storage_source: &str) -> serde_json::Value {
-        let nodes: Vec<NodeRecord> = self.nodes.values().cloned().collect();
-        let jobs: Vec<JobRecord> = self.jobs.values().cloned().collect();
+        self.snapshot_with_lists(storage_source, true)
+    }
+
+    pub fn compact_snapshot(&self, storage_source: &str) -> serde_json::Value {
+        self.snapshot_with_lists(storage_source, false)
+    }
+
+    fn snapshot_with_lists(&self, storage_source: &str, include_lists: bool) -> serde_json::Value {
         let job_events = self.job_events.len();
         let credits_ledger = self.credits_ledger.len();
         let credits_total = self.credits_total();
         let credits_by_node = self.credits_by_node();
-        let online_count = nodes
-            .iter()
+        let online_count = self
+            .nodes
+            .values()
             .filter(|node| node.state == AgentState::Ready || node.state == AgentState::Busy)
             .count();
-        let paused_count = nodes
-            .iter()
+        let paused_count = self
+            .nodes
+            .values()
             .filter(|node| node.state == AgentState::Paused)
             .count();
-        let trusted_count = nodes
-            .iter()
+        let trusted_count = self
+            .nodes
+            .values()
             .filter(|node| is_trusted_identity_path(&node.identity_trust_path))
             .count();
-        let policy_blocked_count = nodes.iter().filter(|node| !node.policy_allowed).count();
-        let stopped_count = nodes
-            .iter()
+        let policy_blocked_count = self
+            .nodes
+            .values()
+            .filter(|node| !node.policy_allowed)
+            .count();
+        let stopped_count = self
+            .nodes
+            .values()
             .filter(|node| node.state == AgentState::Stopped)
             .count();
-        let queued_job_count = jobs
-            .iter()
+        let queued_job_count = self
+            .jobs
+            .values()
             .filter(|job| job.status == JobStatus::Queued)
             .count();
-        let assigned_job_count = jobs
-            .iter()
+        let assigned_job_count = self
+            .jobs
+            .values()
             .filter(|job| job.status == JobStatus::Assigned)
             .count();
-        let completed_job_count = jobs
-            .iter()
+        let completed_job_count = self
+            .jobs
+            .values()
             .filter(|job| job.status == JobStatus::Completed)
             .count();
-        let failed_job_count = jobs
-            .iter()
+        let failed_job_count = self
+            .jobs
+            .values()
             .filter(|job| job.status == JobStatus::Failed)
             .count();
         let (active_parallel_slots, total_parallel_slots, available_parallel_slots) = self
@@ -213,8 +233,12 @@ impl ControlPlaneState {
             .count();
 
         serde_json::to_value(ControlPlaneSnapshot {
-            nodes,
-            jobs,
+            nodes: include_lists
+                .then(|| self.nodes.values().cloned().collect())
+                .unwrap_or_default(),
+            jobs: include_lists
+                .then(|| self.jobs.values().cloned().collect())
+                .unwrap_or_default(),
             admission_policy: self.admission_policy.clone(),
             job_events,
             credits_ledger,
@@ -266,9 +290,20 @@ impl ControlPlaneState {
         payload: serde_json::Value,
         created_at: String,
     ) -> JobEventRecord {
+        let next_event_id = self
+            .job_events
+            .last()
+            .and_then(|event| event.source_event_id)
+            .unwrap_or_else(|| {
+                self.job_events
+                    .last()
+                    .map(|event| event.id)
+                    .unwrap_or_default()
+            })
+            .saturating_add(1);
         let record = JobEventRecord {
-            id: self.job_events.len() as u64 + 1,
-            source_event_id: Some(self.job_events.len() as u64 + 1),
+            id: next_event_id,
+            source_event_id: Some(next_event_id),
             node_id,
             job_id,
             event_type: event_type.into(),
@@ -276,7 +311,35 @@ impl ControlPlaneState {
             created_at,
         };
         self.job_events.push(record.clone());
+        if self.job_events.len() > HOT_JOB_EVENT_LIMIT {
+            let excess = self.job_events.len() - HOT_JOB_EVENT_LIMIT;
+            self.job_events.drain(..excess);
+        }
         record
+    }
+
+    /// Keep only the scheduler's active work and a recent diagnostic window in
+    /// process memory. Postgres remains the durable source for older records.
+    fn compact_hot_job_history(&mut self) {
+        let mut terminal: Vec<(String, String)> = self
+            .jobs
+            .values()
+            .filter(|job| matches!(job.status, JobStatus::Completed | JobStatus::Failed))
+            .map(|job| (job.job_id.clone(), job.submitted_at.clone()))
+            .collect();
+        if terminal.len() <= HOT_TERMINAL_JOB_LIMIT {
+            return;
+        }
+        terminal.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+        let retained: BTreeSet<String> = terminal
+            .into_iter()
+            .take(HOT_TERMINAL_JOB_LIMIT)
+            .map(|(job_id, _)| job_id)
+            .collect();
+        self.jobs.retain(|job_id, job| {
+            !matches!(job.status, JobStatus::Completed | JobStatus::Failed)
+                || retained.contains(job_id)
+        });
     }
 
     pub fn record_credit_award(
@@ -498,6 +561,7 @@ impl ControlPlaneState {
         mode: Option<String>,
         submitted_at: String,
     ) -> JobRecord {
+        self.compact_hot_job_history();
         let job_id = request.request_id.clone();
         let classification = classify_job_request(&request);
         let mut scheduling_requirements = scheduling_requirements_for(&request, &classification);
@@ -8507,6 +8571,14 @@ pub fn load_state() -> std::io::Result<Option<ControlPlaneState>> {
 
 pub fn save_state(state: &ControlPlaneState) -> std::io::Result<PathBuf> {
     let path = state_path();
+    // Managed Postgres is the durable store. Re-serializing the complete hot
+    // state to an ephemeral local file on every heartbeat duplicates memory and
+    // I/O and eventually destabilizes a busy control-plane process.
+    if std::env::var_os("MUNDUSX_DATABASE_POOL_URL").is_some()
+        || std::env::var_os("MUNDUSX_DATABASE_URL").is_some()
+    {
+        return Ok(path);
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
