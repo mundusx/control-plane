@@ -8860,7 +8860,7 @@ fn handle_connection_with_streams(
         }
         ("POST", "/v1/chat/completions") => {
             match serde_json::from_str::<ChatCompletionRequest>(&request.body) {
-                Ok(request_body) => {
+                Ok(mut request_body) => {
                     if let Err(error) = chat_gateway::validate_request(&request_body) {
                         return write_chat_error(&mut stream, "400 Bad Request", &error);
                     }
@@ -8877,6 +8877,8 @@ fn handle_connection_with_streams(
                     let created = now_unix_seconds_u64();
                     let wants_stream = request_body.stream.unwrap_or(false);
                     let native_tool_turn = chat_gateway::is_native_tool_turn(&request_body);
+                    let adaptive_native_edit = native_tool_turn
+                        && chat_gateway::apply_adaptive_native_edit_policy(&mut request_body);
                     let (system_prompt, prompt) = if native_tool_turn {
                         let mut native_request = request_body.clone();
                         // The worker returns a complete native assistant message;
@@ -8930,7 +8932,9 @@ fn handle_connection_with_streams(
                         system_prompt,
                         max_tokens,
                         max_tokens_source: Some(
-                            if request_body.max_tokens.is_some() {
+                            if adaptive_native_edit {
+                                "adaptive_native_edit"
+                            } else if request_body.max_tokens.is_some() {
                                 "explicit"
                             } else {
                                 "auto"

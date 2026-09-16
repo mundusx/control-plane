@@ -30,6 +30,81 @@ pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
         })
 }
 
+const ADAPTIVE_EDIT_POLICY_NAME: &str = "mundusx_adaptive_edit_policy";
+const ADAPTIVE_EDIT_OUTPUT_TOKENS: u32 = 8_192;
+const LARGE_NATIVE_HISTORY_CHARS: usize = 64 * 1024;
+const LARGE_TOOL_RESULT_CHARS: usize = 20 * 1024;
+
+/// Adds a cheap, deterministic planning boundary only when a native client is
+/// likely to serialize a large file rewrite into one tool call. Ordinary chat,
+/// reads, terminal calls, and small edits retain their original request.
+pub fn apply_adaptive_native_edit_policy(request: &mut ChatCompletionRequest) -> bool {
+    let edit_tools = request
+        .tools
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                let name = tool
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                ["edit", "write", "replace", "patch", "create_new_file"]
+                    .iter()
+                    .any(|operation| name.contains(operation))
+            })
+        });
+    if !edit_tools {
+        return false;
+    }
+
+    let history_chars = request
+        .messages
+        .iter()
+        .map(|message| message.content.to_string().chars().count())
+        .sum::<usize>();
+    let largest_tool_result = request
+        .messages
+        .iter()
+        .filter(|message| message.role.eq_ignore_ascii_case("tool"))
+        .map(|message| message.content.to_string().chars().count())
+        .max()
+        .unwrap_or_default();
+    let constrained_long_turn =
+        request.messages.len() >= 20 && request.max_tokens.unwrap_or(4_096) <= 4_096;
+    let high_risk = history_chars >= LARGE_NATIVE_HISTORY_CHARS
+        || largest_tool_result >= LARGE_TOOL_RESULT_CHARS
+        || constrained_long_turn;
+    if !high_risk {
+        return false;
+    }
+
+    request.max_tokens = Some(
+        request
+            .max_tokens
+            .unwrap_or_default()
+            .max(ADAPTIVE_EDIT_OUTPUT_TOKENS),
+    );
+    let already_applied = request.messages.iter().any(|message| {
+        message.role.eq_ignore_ascii_case("system")
+            && message.name.as_deref() == Some(ADAPTIVE_EDIT_POLICY_NAME)
+    });
+    if !already_applied {
+        request.messages.insert(0, crate::contracts::ChatMessage {
+            role: "system".to_string(),
+            content: Value::String(
+                "This edit turn has a large workspace history. Plan silently, then issue one small, targeted mutation using the available edit or replacement tool. Keep changed text under 2000 characters when possible. Do not rewrite an entire existing file in one tool call. After the tool result, continue with the next bounded patch until the original task is complete. Preserve exact tool arguments and do not claim completion before verification."
+                    .to_string(),
+            ),
+            tool_calls: None,
+            tool_call_id: None,
+            name: Some(ADAPTIVE_EDIT_POLICY_NAME.to_string()),
+        });
+    }
+    true
+}
+
 #[cfg(test)]
 mod harness_routing_tests {
     use super::*;
@@ -57,6 +132,54 @@ mod harness_routing_tests {
         assert!(!is_native_tool_turn(&request));
         request.tools = Some(json!([{ "type": "function", "function": {"name": "web_search"}}]));
         assert!(is_native_tool_turn(&request));
+    }
+
+    #[test]
+    fn large_native_edit_gets_bounded_policy_and_headroom() {
+        let mut request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages": [
+                {"role":"user","content":"Improve the existing page"},
+                {"role":"assistant","content":null,"tool_calls":[{"id":"read-1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"read-1","content":"x".repeat(LARGE_TOOL_RESULT_CHARS + 1)}
+            ],
+            "tools":[{"type":"function","function":{"name":"edit_existing_file","parameters":{"type":"object"}}}],
+            "max_tokens":4096
+        }))
+        .unwrap();
+
+        assert!(apply_adaptive_native_edit_policy(&mut request));
+        assert_eq!(request.max_tokens, Some(ADAPTIVE_EDIT_OUTPUT_TOKENS));
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|message| message.name.as_deref() == Some(ADAPTIVE_EDIT_POLICY_NAME))
+                .count(),
+            1
+        );
+        assert!(apply_adaptive_native_edit_policy(&mut request));
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|message| message.name.as_deref() == Some(ADAPTIVE_EDIT_POLICY_NAME))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn small_native_tool_turn_keeps_fast_path_unchanged() {
+        let mut request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages":[{"role":"user","content":"Run the tests"}],
+            "tools":[{"type":"function","function":{"name":"run_terminal_command"}}],
+            "max_tokens":4096
+        }))
+        .unwrap();
+
+        assert!(!apply_adaptive_native_edit_policy(&mut request));
+        assert_eq!(request.max_tokens, Some(4096));
+        assert_eq!(request.messages.len(), 1);
     }
 }
 const MAX_STREAM_DELTA_BYTES: usize = 64 * 1024;

@@ -1895,8 +1895,31 @@ impl ControlPlaneState {
                 let mut weighted_score = 0_u32;
                 let mut total_weight = 0_u32;
                 for requirement in &requirements {
-                    let capability_score =
-                        Self::model_capability_score(&model, &requirement.capability, required);
+                    let capability_score = if requirement.capability == "native_tool_calls_v1" {
+                        // Native tool support is actively verified and advertised by
+                        // the worker at node scope. Use that same authority for
+                        // scoring so telemetry cannot report zero for an eligible
+                        // node that already passed the hard capability gate.
+                        node.worker_health.as_ref().map_or(0, |health| {
+                            if health.capabilities.supports_tools
+                                && health
+                                    .capabilities
+                                    .supported_tools
+                                    .iter()
+                                    .any(|tool| tool == "native_tool_calls_v1")
+                            {
+                                100
+                            } else {
+                                0
+                            }
+                        })
+                    } else {
+                        Self::model_capability_score(
+                            &model,
+                            &requirement.capability,
+                            required,
+                        )
+                    };
                     let weight = u32::from(requirement.weight.min(100));
                     weighted_score = weighted_score
                         .saturating_add(u32::from(capability_score).saturating_mul(weight));
@@ -9419,6 +9442,10 @@ mod tests {
             "verified node-level native tools must be authoritative: {:?}",
             decision.reasons
         );
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("capability_fit:native_tool_calls_v1:100;")));
     }
 
     #[test]
