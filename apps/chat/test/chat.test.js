@@ -4693,6 +4693,68 @@ test("live Chat checkpoints a long assistant stream and finalizes the same compl
   assert.equal(writes.at(-1).content.length, 9000);
 });
 
+test("live Chat finishes and persists an answer after the browser stream disconnects", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const content = "x".repeat(9000);
+  let closeHandler = null;
+  let disconnected = false;
+  const response = {
+    writableEnded: false,
+    destroyed: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    once(event, handler) {
+      if (event === "close") closeHandler = handler;
+    },
+    off(event, handler) {
+      if (event === "close" && closeHandler === handler) closeHandler = null;
+    },
+    write() {
+      if (!disconnected) {
+        disconnected = true;
+        this.destroyed = true;
+        closeHandler?.();
+      }
+      return false;
+    },
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/v1/conversations/conversation-disconnect/messages")) {
+      writes.push(JSON.parse(init.body));
+      return jsonResponse({ stored: true });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ id: "chatcmpl-disconnect", choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: "chatcmpl-disconnect", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+            "data: [DONE]\n\n",
+          ));
+          controller.close();
+        },
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const result = await streamChatTurn(
+    response,
+    { message: "Write a long answer", conversationId: "conversation-disconnect" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(result.finishReason, "stop");
+  assert.equal(result.content, content);
+  assert.equal(disconnected, true);
+  assert.equal(writes.at(-1).job_id, "chatcmpl-disconnect");
+  assert.equal(writes.at(-1).metadata.partial, false);
+  assert.equal(writes.at(-1).content, content);
+});
+
 test("live Chat preserves a short assistant checkpoint when the provider stream is interrupted", async () => {
   const encoder = new TextEncoder();
   const writes = [];
