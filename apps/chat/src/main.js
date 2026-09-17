@@ -4526,17 +4526,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const meaningfulEvents = events.filter((item) => item?.event && (item.event.type !== "agent_progress" || (item.event.summary && item.event.summary !== "Hermes is working")));
       const latest = meaningfulEvents.at(-1)?.event || null;
       const progress = describeAgentProgress(latest, true);
+      const workerDisconnected = payload?.state === "running" && payload.worker_connected === false;
       const summary = options.cancelling
         ? "Stopping safely"
         : options.reconnecting
           ? "Reconnecting without losing progress"
-          : progress.label;
+          : workerDisconnected
+            ? "Local worker disconnected"
+            : progress.label;
       const steps = meaningfulEvents.slice(0, -1).filter((item) => !["tool_started", "tool_proposed", "model_turn_queued"].includes(item.event.type)).slice(-4).map((item) => describeAgentProgress(item.event));
       body.replaceChildren();
       const headingRow = document.createElement("div");
       headingRow.className = "agent-progress-heading";
       const orb = document.createElement("span");
       orb.className = "agent-progress-orb";
+      if (workerDisconnected) orb.style.animation = "none";
       orb.setAttribute("aria-hidden", "true");
       const heading = document.createElement("strong");
       heading.textContent = "MundusX · " + runtimeLabel;
@@ -4565,6 +4569,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       current.className = "agent-progress-current";
       const dot = document.createElement("span");
       dot.className = "agent-progress-dot";
+      if (workerDisconnected) dot.style.animation = "none";
       dot.setAttribute("aria-hidden", "true");
       const currentText = document.createElement("span");
       const updateNumber = Number(meaningfulEvents.at(-1)?.sequence || 0);
@@ -4572,7 +4577,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       current.append(dot, currentText);
       timeline.appendChild(current);
       const purpose = document.createElement("p"); purpose.className = "meta";
-      purpose.textContent = options.cancelling ? "Waiting for the current operation to stop." : options.reconnecting ? "Checking the existing task; your request is not being submitted again." : progress.purpose;
+      purpose.textContent = options.cancelling ? "Waiting for the current operation to stop." : options.reconnecting ? "Checking the existing task; your request is not being submitted again." : workerDisconnected ? "The local worker stopped checking in. Reconnect the MundusX agent to resume this task from the project files and saved progress." : progress.purpose;
       timeline.appendChild(purpose);
       const formatDuration = (milliseconds) => {
         const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -4630,7 +4635,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         actions.appendChild(cancel);
         body.appendChild(actions);
       }
-      if (!options.conversationId || activeHistoryId === options.conversationId) setStatus("working", summary);
+      if (!options.conversationId || activeHistoryId === options.conversationId) setStatus(workerDisconnected ? "ready" : "working", summary);
     }
 
     async function tryLiveChatTurn(pending, message, conversationId) {

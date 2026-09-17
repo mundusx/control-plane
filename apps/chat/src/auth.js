@@ -673,7 +673,8 @@ export class PostgresAuthStore {
     }
     const result = await this.pool.query(`select task_id, conversation_id, session_id, state,
       runtime_requested, runtime_selected, workspace_relative, result, error,
-      created_at, started_at, completed_at, cancelled_at
+      created_at, started_at, completed_at, cancelled_at, lease_expires_at,
+      case when state = 'running' then coalesce(lease_expires_at > now(), false) else null end as worker_connected
       from public.local_agent_tasks where task_id = $1::uuid and user_id = $2::uuid`,
     [taskId, userId]);
     if (result.rowCount !== 1) throw Object.assign(new Error("Local agent task was not found"), { statusCode: 404 });
