@@ -13,9 +13,11 @@ test("only an older installed version offers an update download", () => {
   const compare = html.slice(html.indexOf("    function releaseVersionAtLeast("), html.indexOf("    function renderActiveProject("));
   const attributes = new Map();
   const link = { dataset: {}, removeAttribute: (key) => attributes.delete(key), setAttribute: (key, value) => attributes.set(key, value) };
-  const context = vm.createContext({ projectAgentUpdateEl: link, harnessDownloadEl: { href: "https://example.test/setup.exe" } });
+  const context = vm.createContext({ isWindowsAgentDevice: false, projectAgentUpdateEl: link, harnessDownloadEl: { href: "https://example.test/setup.exe" } });
   vm.runInContext(compare + configure, context);
   for (const [installed, required, needsUpdate] of [
+    ["0.1.94-stall.1", "0.1.95", true],
+    ["0.1.95", "0.1.95", false],
     ["0.1.56", "0.1.66", true],
     ["0.1.57", "0.1.66", true],
     ["0.1.66", "0.1.66", false],
@@ -45,7 +47,7 @@ test("paired offline computers hide the first-install download", () => {
 test("Reconnect opens the installed app without downloading; Update still downloads", () => {
   const attributes = new Map([["download", ""]]);
   const link = { dataset: {}, removeAttribute: (key) => attributes.delete(key), setAttribute: (key, value) => attributes.set(key, value) };
-  const context = vm.createContext({ projectAgentUpdateEl: link, harnessDownloadEl: { href: "https://example.test/setup.exe" } });
+  const context = vm.createContext({ isWindowsAgentDevice: false, projectAgentUpdateEl: link, harnessDownloadEl: { href: "https://example.test/setup.exe" } });
   vm.runInContext(configure, context);
   context.configureAgentRecoveryAction(false, true);
   assert.equal(link.href, "mundusx://reconnect");
@@ -55,6 +57,20 @@ test("Reconnect opens the installed app without downloading; Update still downlo
   assert.equal(link.href, "https://example.test/setup.exe");
   assert.equal(link.dataset.action, "update");
   assert.equal(attributes.has("download"), true);
+});
+
+test("Windows update opens the published release while other platforms retain their minimum", () => {
+  const config = configFromEnv({});
+  assert.equal(config.latestWindowsAgentVersion, "0.1.95");
+  assert.equal(config.latestLocalAgentVersion, "0.1.87");
+  const attributes = new Map([["download", ""]]);
+  const link = { dataset: {}, removeAttribute: (key) => attributes.delete(key), setAttribute: (key, value) => attributes.set(key, value) };
+  const context = vm.createContext({ isWindowsAgentDevice: true, windowsAgentUpdateUrl: config.windowsAgentUpdateUrl, projectAgentUpdateEl: link });
+  vm.runInContext(configure, context);
+  context.configureAgentRecoveryAction(true, false);
+  assert.equal(link.href, "https://github.com/mundusx/releases/releases/tag/cli-windows-v0.1.95");
+  assert.equal(link.target, "_blank");
+  assert.equal(attributes.has("download"), false);
 });
 
 test("recovery keeps polling when known runners are still offline", async () => {

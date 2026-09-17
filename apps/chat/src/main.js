@@ -183,6 +183,8 @@ export function configFromEnv(env = process.env) {
     harnessRunnerDownloadUrl: (env.MUNDUSX_HARNESS_RUNNER_DOWNLOAD_URL ?? "").trim()
       || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.80/MundusX-Setup.exe",
     latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.87",
+    latestWindowsAgentVersion: (env.MUNDUSX_LATEST_WINDOWS_AGENT_VERSION ?? "").trim() || "0.1.95",
+    windowsAgentUpdateUrl: "https://github.com/mundusx/releases/releases/tag/cli-windows-v0.1.95",
     modelOverride: (env.MUNDUSX_CHAT_MODEL ?? env.MUNDUSX_CHAT_DEFAULT_MODEL ?? "").trim(),
     agentModelProviders: parseAgentModelProviders(env),
     weatherCacheUrl: (
@@ -2281,6 +2283,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const harnessDownloadEl = document.getElementById("harness-download");
     const projectAgentUpdateEl = document.getElementById("project-agent-update");
     const latestLocalAgentVersion = ${JSON.stringify(config.latestLocalAgentVersion)};
+    const latestWindowsAgentVersion = ${JSON.stringify(config.latestWindowsAgentVersion)};
+    const windowsAgentUpdateUrl = ${JSON.stringify(config.windowsAgentUpdateUrl)};
+    const isWindowsAgentDevice = /Windows|Win32|Win64/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "");
     const projectReadinessTitleEl = document.getElementById("project-readiness-title");
     const projectReadinessEl = document.getElementById("project-readiness");
     const projectReadinessTextEl = document.getElementById("project-readiness-text");
@@ -3158,8 +3163,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         || null;
       const knownConnection = readyConnection || connections[0] || null;
       const installedVersion = knownConnection?.capabilities?.client_version || "unknown";
+      const requiredAgentVersion = isWindowsAgentDevice ? latestWindowsAgentVersion : latestLocalAgentVersion;
       const updateAvailable = Boolean(knownConnection)
-        && !releaseVersionAtLeast(installedVersion, latestLocalAgentVersion);
+        && !releaseVersionAtLeast(installedVersion, requiredAgentVersion);
       localRunnerReady = localRunnerReady && !updateAvailable;
       if (localRunnerReady) reconnectRequestedAt = 0;
       const reconnectTimedOut = reconnectRequestedAt > 0 && Date.now() - reconnectRequestedAt >= 20000;
@@ -3177,7 +3183,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // retry action visible after automatic readiness polling succeeds.
       if (projectReadinessRefreshEl) projectReadinessRefreshEl.hidden = localRunnerReady || (paired && !localRunnerReady && !reconnectTimedOut);
       const statusText = updateAvailable
-        ? "Update required · Installed " + installedVersion + " · Latest " + latestLocalAgentVersion
+        ? "Update required · Installed " + installedVersion + " · Latest " + requiredAgentVersion
         : readyConnection
         ? "Ready · " + (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent")
         : ready
@@ -3193,9 +3199,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (projectReadinessEl) projectReadinessEl.dataset.state = updateAvailable ? "update" : localRunnerReady ? "ready" : paired ? "offline" : "setup";
       if (projectReadinessTitleEl) projectReadinessTitleEl.textContent = updateAvailable ? "Update required" : localRunnerReady ? "Local agent ready" : agentMissing ? "Coding agent missing" : paired ? "Local agent offline" : "Connect this computer";
       if (projectReadinessTextEl) projectReadinessTextEl.textContent = updateAvailable
-        ? "Installed " + installedVersion + " · Required " + latestLocalAgentVersion + " or newer. Update now to create or run local projects."
+        ? "Installed " + installedVersion + " · Required " + requiredAgentVersion + " or newer. Update now to create or run local projects."
         : localRunnerReady
-        ? (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent") + " · Installed " + installedVersion + " · Required " + latestLocalAgentVersion + " or newer. Your project tools run locally; model inference uses MundusX EHDA."
+        ? (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent") + " · Installed " + installedVersion + " · Required " + requiredAgentVersion + " or newer. Your project tools run locally; model inference uses MundusX EHDA."
         : agentMissing
           ? "Install Hermes or select the native MundusX Agent, then retry."
           : paired
@@ -3246,7 +3252,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     function releaseVersionAtLeast(installed, required) {
       const parse = (value) => {
         const text = String(value || "").trim();
-        const match = text.match(/^(?:(?:cli-)?v)?(\\d+)\\.(\\d+)\\.(\\d+)$/);
+        const match = text.match(/^(?:(?:cli-)?v)?(\\d+)\\.(\\d+)\\.(\\d+)(?:[-+][0-9A-Za-z.-]+)?$/);
         return match ? match.slice(1).map(Number) : null;
       };
       const current = parse(installed);
@@ -3492,10 +3498,18 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     function configureAgentRecoveryAction(updateAvailable, offline) {
       if (!projectAgentUpdateEl) return;
       const reconnect = offline && !updateAvailable;
-      projectAgentUpdateEl.href = reconnect ? "mundusx://reconnect" : harnessDownloadEl.href;
+      const releasePage = updateAvailable && isWindowsAgentDevice;
+      projectAgentUpdateEl.href = reconnect ? "mundusx://reconnect" : releasePage ? windowsAgentUpdateUrl : harnessDownloadEl.href;
       projectAgentUpdateEl.dataset.action = reconnect ? "reconnect" : "update";
-      if (reconnect) projectAgentUpdateEl.removeAttribute("download");
+      if (reconnect || releasePage) projectAgentUpdateEl.removeAttribute("download");
       else projectAgentUpdateEl.setAttribute("download", "");
+      if (releasePage) {
+        projectAgentUpdateEl.target = "_blank";
+        projectAgentUpdateEl.rel = "noopener noreferrer";
+      } else {
+        projectAgentUpdateEl.removeAttribute("target");
+        projectAgentUpdateEl.removeAttribute("rel");
+      }
     }
     projectAgentUpdateEl?.addEventListener("click", () => {
       if (projectAgentUpdateEl.dataset.action !== "reconnect") return;
