@@ -653,14 +653,25 @@ export class PostgresAuthStore {
       && input.result?.browser_verified !== true) {
       throw Object.assign(new Error("Frontend browser acceptance evidence is required"), { statusCode: 422 });
     }
-    const result = await this.pool.query(`update public.local_agent_tasks set
-      state = case when state = 'cancelled' then 'cancelled' else $3 end,
-      result = case when state = 'cancelled' then coalesce(result, $4::jsonb) else $4::jsonb end,
-      error = case when state = 'cancelled' then coalesce(error, $5) else $5 end,
-      completed_at = now(), lease_expires_at = null
-      where task_id = $1::uuid and user_id = $2::uuid
-        and (state = 'running' or (state = 'cancelled' and completed_at is null))
-      returning task_id, conversation_id, session_id, state, result, error, completed_at`,
+    const result = await this.pool.query(`with updated as (
+      update public.local_agent_tasks set
+        state = case when state = 'cancelled' then 'cancelled' else $3 end,
+        result = case when state = 'cancelled' then coalesce(result, $4::jsonb) else $4::jsonb end,
+        error = case when state = 'cancelled' then coalesce(error, $5) else $5 end,
+        completed_at = now(), lease_expires_at = null
+        where task_id = $1::uuid and user_id = $2::uuid
+          and (state = 'running' or (state = 'cancelled' and completed_at is null))
+        returning task_id, conversation_id, session_id, state, result, error, completed_at
+    ), terminal as (
+      select task_id, conversation_id, session_id, state, result, error, completed_at
+      from public.local_agent_tasks
+      where task_id = $1::uuid and user_id = $2::uuid and completed_at is not null
+        and state in ('completed', 'failed', 'cancelled')
+    )
+    select * from updated
+    union all
+    select * from terminal where not exists (select 1 from updated)
+    limit 1`,
     [taskId, userId, success ? "completed" : "failed", JSON.stringify(input.result ?? null), input.error ? String(input.error).slice(0, 4000) : null]);
     if (result.rowCount !== 1) throw Object.assign(new Error("Local agent task is not running"), { statusCode: 409 });
     return result.rows[0];
