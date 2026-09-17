@@ -3911,7 +3911,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // runner polling, and responsive UI updates may all refresh activeProject
       // while an async request is being dispatched.
       const submittedProject = projectSelectedForSubmission();
-      const mutatingProjectRequest = Boolean(submittedProject && requiresLocalProjectAction(message));
+      const conversationId = getConversationId();
+      const priorConversationTurns = readCachedConversation(conversationId);
+      const projectExecutionContinuation = Boolean(
+        submittedProject && isProjectExecutionContinuation(message, priorConversationTurns),
+      );
+      const mutatingProjectRequest = Boolean(
+        submittedProject && (requiresLocalProjectAction(message) || projectExecutionContinuation),
+      );
       const allowProjectMutation = mutatingProjectRequest && (
         projectPermissionMode(submittedProject.slug) === "full"
         || window.confirm('Allow Hermes to edit files and run commands in project "' + submittedProject.slug + '" for this task?')
@@ -3920,7 +3927,6 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
       activeHistoryLoadToken += 1;
       followLatestMessage = true;
-      const conversationId = getConversationId();
       saveHistory(message, conversationId);
       addMessage(message, "user");
       appendCachedConversationTurn(conversationId, { role: "user", content: message });
@@ -3930,7 +3936,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
-        if (submittedProject && requiresLocalProjectAction(message)) {
+        if (submittedProject && mutatingProjectRequest) {
+          const executionPrompt = projectExecutionContinuation
+            ? buildProjectExecutionContinuationPrompt(message, priorConversationTurns)
+            : message;
           await loadHarnessRunners().catch(() => []);
           const projectRuntime = preferredProjectRuntime();
           if (projectRuntime) {
@@ -3938,6 +3947,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
               runtime: projectRuntime,
               workspaceRelative: submittedProject.slug,
               allowMutations: allowProjectMutation,
+              executionPrompt,
             });
             if (!handledBySelectedRuntime) throw new Error("The selected local runtime is not connected.");
             syncNetworkRuntimeStatus(true);
@@ -3957,7 +3967,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             await openProjects({ showRunnerSetup: true, project: submittedProject });
             return;
           }
-          await runActiveProjectTask(pending, message, submittedProject, conversationId);
+          await runActiveProjectTask(pending, message, submittedProject, conversationId, executionPrompt);
           syncNetworkRuntimeStatus(true);
           return;
         }
@@ -3987,14 +3997,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
     });
 
-    async function runActiveProjectTask(pending, message, project, conversationId) {
+    async function runActiveProjectTask(pending, message, project, conversationId, executionPrompt = message) {
       if (!projectsAvailableOnDevice()) throw new Error("Projects are available on desktop.");
       const projectTemplate = inferProjectTemplate(message);
       const response = await fetch("/api/harness/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          objective: message,
+          objective: executionPrompt,
           project_slug: project.slug,
           project_template: projectTemplate,
           execution_mode: projectExecutionMode(projectTemplate),
@@ -4208,6 +4218,24 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (/^(can|could|may) i (?:ask|know|understand)\\b/i.test(value)) return false;
       if (/\\b(?:what|which) (?:changes?|files?|steps?|requirements?) (?:would|will|do|are|is)\\b/i.test(value)) return false;
       return /\\b(create|make|add|write|edit|modify|update|delete|remove|rename|move|generate|scaffold|implement|fix|correct|repair|restore|refactor|format|install|run|test|build|compile|lint|commit|checkout|merge|push|pull)\\b/i.test(value);
+    }
+
+    function isProjectExecutionContinuation(message, turns) {
+      const value = String(message || "").trim();
+      if (!/^(?:yes(?:\\s|$)|ok(?:ay)?(?:\\s|$)|sure(?:\\s|$)|go ahead\\b|proceed\\b|continue\\b|do it\\b|implement it\\b|choose\\s+(?:option\\s+)?[a-z0-9]+\\b|(?:use|select)\\s+option\\s+[a-z0-9]+\\b|option\\s+[a-z0-9]+\\b)/i.test(value)) return false;
+      const history = Array.isArray(turns) ? turns : [];
+      return history.slice(-8).some((turn) => turn?.role === "assistant" &&
+        /\\b(?:should i proceed|shall i proceed|would you like me to|which approach|which option|choose (?:an? )?option|option\\s+1|option\\s+2|next steps needed)\\b/i.test(String(turn.content || "")));
+    }
+
+    function buildProjectExecutionContinuationPrompt(message, turns) {
+      const history = (Array.isArray(turns) ? turns : [])
+        .filter((turn) => ["user", "assistant"].includes(turn?.role) && String(turn?.content || "").trim())
+        .slice(-6)
+        .map((turn) => (turn.role === "assistant" ? "Assistant" : "User") + ": " + String(turn.content).trim())
+        .join("\\n\\n")
+        .slice(-12000);
+      return "Continue the existing project task. Interpret the latest instruction using the recent conversation below. The user has already selected or approved the proposed action, so carry it out in the project now; do not restart planning or ask them to repeat the request.\\n\\nRecent project conversation:\\n" + history + "\\n\\nLatest user instruction:\\n" + String(message || "").trim();
     }
 
     async function tryLocalAgentTurn(pending, message, conversationId, options = {}) {
