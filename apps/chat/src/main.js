@@ -184,7 +184,7 @@ export function configFromEnv(env = process.env) {
       || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.80/MundusX-Setup.exe",
     latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.87",
     latestWindowsAgentVersion: (env.MUNDUSX_LATEST_WINDOWS_AGENT_VERSION ?? "").trim() || "0.1.95",
-    windowsAgentUpdateUrl: "https://github.com/mundusx/releases/releases/tag/cli-windows-v0.1.95",
+    windowsAgentUpdateUrl: "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.95/MundusX-Update.exe",
     modelOverride: (env.MUNDUSX_CHAT_MODEL ?? env.MUNDUSX_CHAT_DEFAULT_MODEL ?? "").trim(),
     agentModelProviders: parseAgentModelProviders(env),
     weatherCacheUrl: (
