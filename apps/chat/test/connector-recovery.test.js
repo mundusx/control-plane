@@ -68,7 +68,7 @@ test("Windows update opens the published release while other platforms retain th
   const context = vm.createContext({ isWindowsAgentDevice: true, windowsAgentUpdateUrl: config.windowsAgentUpdateUrl, projectAgentUpdateEl: link });
   vm.runInContext(configure, context);
   context.configureAgentRecoveryAction(true, false);
-  assert.equal(link.href, "https://github.com/mundusx/releases/releases/tag/cli-windows-v0.1.95");
+  assert.equal(link.href, "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.95/MundusX-Update.exe");
   assert.equal(link.target, "_blank");
   assert.equal(attributes.has("download"), false);
 });
