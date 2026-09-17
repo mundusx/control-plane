@@ -73,3 +73,26 @@ test("Windows update opens the published release while other platforms retain th
   assert.equal(attributes.has("download"), false);
 });
 
+test("a selected project option continues execution with its prior context", () => {
+  const html = page(configFromEnv({ MUNDUSX_HARNESS_UI_ENABLED: "true" }));
+  const start = html.indexOf("    function requiresLocalProjectAction(");
+  const end = html.indexOf("    async function tryLocalAgentTurn(");
+  const context = vm.createContext({});
+  vm.runInContext(html.slice(start, end), context);
+  const turns = [
+    { role: "user", content: "Convert this app from MongoDB for local testing." },
+    { role: "assistant", content: "Which approach do you prefer? Option 1: keep MongoDB. Option 2: migrate to Sequelize and SQLite. Should I proceed with Option 2?" },
+    { role: "user", content: "choose option 2" },
+    { role: "assistant", content: "I do not see the project request. Please clarify what you want me to plan." },
+  ];
+  assert.equal(context.isProjectExecutionContinuation("choose option 2", turns), true);
+  assert.equal(context.isProjectExecutionContinuation("what is option 2?", turns), false);
+  assert.equal(context.isProjectExecutionContinuation("choose option 2", []), false);
+  const prompt = context.buildProjectExecutionContinuationPrompt("choose option 2", turns);
+  assert.match(prompt, /Convert this app from MongoDB/);
+  assert.match(prompt, /migrate to Sequelize and SQLite/);
+  assert.match(prompt, /carry it out in the project now/);
+  assert.match(prompt, /Latest user instruction:\nchoose option 2/);
+  assert.match(html, /submittedProject && mutatingProjectRequest/);
+  assert.match(html, /executionPrompt,/);
+});
