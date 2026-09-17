@@ -89,6 +89,9 @@ test("a stopped project task holds the next writer until the connector acknowled
     const acknowledged = await store.completeLocalAgentTask(user,first.task_id,{status:"failed",error:"cancelled by user"});
     assert.equal(acknowledged.state,"cancelled");
     assert.ok(acknowledged.completed_at);
+    const repeated = await store.completeLocalAgentTask(user,first.task_id,{status:"failed",error:"retry after a lost response"});
+    assert.equal(repeated.state,"cancelled","terminal completion acknowledgements are idempotent");
+    assert.equal(repeated.error,"cancelled by user","a retry cannot replace the recorded terminal result");
     assert.equal((await store.claimLocalAgentTask(user,connection)).task_id,next.task_id);
   } finally { await db.close(); }
 });
