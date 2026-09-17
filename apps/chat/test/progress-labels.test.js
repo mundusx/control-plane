@@ -29,6 +29,24 @@ test("progress distinguishes model calls, program execution and verification",()
   assert.match(describe({type:"tool_started",metadata:{activity:"test"}}).label,/Running tests/);
   assert.match(describe({type:"tool_started",metadata:{verification:true}}).label,/verification/);
 });
+
+test("an expired worker lease replaces stale model progress and recovers after reconnect",()=>{
+  const nodes=[];
+  const element=()=>{const node={style:{},setAttribute(){},append(){},appendChild(){},replaceChildren(){}};nodes.push(node);return node;};
+  const body=element(), statuses=[];
+  const runtime=vm.createContext({document:{createElement:element},describeAgentProgress:describe,activeHistoryId:"test",setStatus(...args){statuses.push(args);}});
+  const html=page();
+  vm.runInContext(html.slice(html.indexOf("    function renderLocalAgentProgress("),html.indexOf("    async function tryLiveChatTurn(")),runtime);
+  const payload={state:"running",worker_connected:false,events:[{sequence:1131,event:{type:"model_requested"}}]};
+  runtime.renderLocalAgentProgress({querySelector:()=>body},payload,"Hermes");
+  assert.ok(nodes.some(node=>String(node.textContent).includes("Local worker disconnected")));
+  assert.ok(nodes.some(node=>String(node.textContent).includes("Reconnect the MundusX agent")));
+  assert.equal(nodes.find(node=>node.className==="agent-progress-dot").style.animation,"none");
+  assert.equal(statuses.at(-1)[0],"ready");
+  runtime.renderLocalAgentProgress({querySelector:()=>body},{...payload,worker_connected:true},"Hermes");
+  assert.equal(statuses.at(-1)[0],"working");
+  assert.equal(statuses.at(-1)[1],"Waiting for the model response");
+});
 test("failed and unknown tool results are never reported as successful",()=>{
   for (const [success,outcome] of [[false,"failed"],[null,"unknown"],[true,"succeeded"]]) {
     const result=describe({type:"tool_completed",metadata:{activity:"build",success}},true);

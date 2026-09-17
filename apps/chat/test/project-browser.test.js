@@ -42,6 +42,13 @@ test("file operations preserve coding tasks and are only claimed by capable conn
     assert.equal((await store.claimLocalAgentTask(user,current,true)).task_id,browse.task_id);
     assert.equal(await store.claimLocalAgentTask(user,current,true),null,"busy worker cannot claim another model task");
     assert.equal((await store.claimLocalAgentTask(user,current)).task_id,code.task_id);
+    assert.equal((await store.localAgentTask(user,code.task_id)).worker_connected,true);
+    await query("update local_agent_tasks set lease_expires_at=now()-interval '1 second' where task_id=$1",[code.task_id]);
+    const disconnected = await store.localAgentTask(user,code.task_id);
+    assert.equal(disconnected.worker_connected,false,"expired leases cannot appear to be live workers");
+    assert.equal(disconnected.state,"running","reading status must retain reconnect recovery eligibility");
+    await store.heartbeatLocalAgentTask(user,current,code.task_id);
+    assert.equal((await store.localAgentTask(user,code.task_id)).worker_connected,true);
     const pending = await store.createLocalAgentTask(user,{prompt:request,workspace_relative:"fe"});
     await store.createLocalAgentTask(user,{prompt:"Continue the frontend",workspace_relative:"fe"});
     assert.equal((await query("select state from local_agent_tasks where task_id=$1",[pending.task_id])).rows[0].state,"queued");
