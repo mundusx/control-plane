@@ -49,6 +49,8 @@ test("file operations preserve coding tasks and are only claimed by capable conn
     assert.equal(disconnected.state,"running","reading status must retain reconnect recovery eligibility");
     await store.heartbeatLocalAgentTask(user,current,code.task_id);
     assert.equal((await store.localAgentTask(user,code.task_id)).worker_connected,true);
+    await query("update local_agent_tasks set lease_expires_at=null where task_id=$1",[code.task_id]);
+    assert.equal((await store.claimLocalAgentTask(user,current)).task_id,code.task_id,"legacy running tasks without a lease remain reclaimable");
     const pending = await store.createLocalAgentTask(user,{prompt:request,workspace_relative:"fe"});
     await store.createLocalAgentTask(user,{prompt:"Continue the frontend",workspace_relative:"fe"});
     assert.equal((await query("select state from local_agent_tasks where task_id=$1",[pending.task_id])).rows[0].state,"queued");

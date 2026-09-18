@@ -536,7 +536,7 @@ export class PostgresAuthStore {
           where connection.connection_id = $2::uuid and connection.user_id = $1::uuid
             and connection.revoked_at is null)
         and (
-        state = 'queued' or (state = 'running' and lease_expires_at < now())
+        state = 'queued' or (state = 'running' and coalesce(lease_expires_at, '-infinity'::timestamptz) < now())
       )
         and (runtime_requested <> 'hermes' or exists (
           select 1 from public.local_agent_connections runtime_connection
