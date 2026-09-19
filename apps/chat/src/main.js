@@ -42,6 +42,12 @@ const DEFAULT_WEATHER_URL = "https://wttr.in";
 const DEFAULT_FACTUAL_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary";
 const DEFAULT_WIKIDATA_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData";
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 8192;
+const DEFAULT_AGENT_RELEASES_API_URL = "https://api.github.com/repos/mundusx/releases/releases?per_page=50";
+const DEFAULT_AGENT_RELEASE_PAGE_URL = "https://github.com/mundusx/releases/releases";
+const AGENT_RELEASE_REFRESH_MS = 15 * 60 * 1_000;
+const DEFAULT_LOCAL_AGENT_VERSION = "0.2.04";
+const MINIMUM_LOCAL_AGENT_VERSION = "0.1.87";
+const MINIMUM_WINDOWS_AGENT_VERSION = "0.1.95";
 const CONTEXT_SAFETY_TOKENS = 256;
 const MAX_HISTORY_CONTEXT_TOKENS = 2048;
 const RECENT_HISTORY_MESSAGES = 6;
@@ -181,10 +187,21 @@ export function configFromEnv(env = process.env) {
     harnessAllowedPathPrefixes: (env.MUNDUSX_HARNESS_ALLOWED_PATH_PREFIXES ?? "").trim(),
     harnessValidationProfiles: (env.MUNDUSX_HARNESS_VALIDATION_PROFILES ?? "").trim(),
     harnessRunnerDownloadUrl: (env.MUNDUSX_HARNESS_RUNNER_DOWNLOAD_URL ?? "").trim()
-      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.80/MundusX-Setup.exe",
-    latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim() || "0.1.87",
-    latestWindowsAgentVersion: (env.MUNDUSX_LATEST_WINDOWS_AGENT_VERSION ?? "").trim() || "0.1.95",
-    windowsAgentUpdateUrl: "https://github.com/mundusx/releases/releases/download/cli-windows-v0.1.95/MundusX-Update.exe",
+      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.2.04/MundusX-Setup.exe",
+    minimumLocalAgentVersion: (env.MUNDUSX_MINIMUM_LOCAL_AGENT_VERSION ?? "").trim()
+      || MINIMUM_LOCAL_AGENT_VERSION,
+    minimumWindowsAgentVersion: (env.MUNDUSX_MINIMUM_WINDOWS_AGENT_VERSION ?? "").trim()
+      || MINIMUM_WINDOWS_AGENT_VERSION,
+    latestLocalAgentVersion: (env.MUNDUSX_LATEST_LOCAL_AGENT_VERSION ?? "").trim()
+      || DEFAULT_LOCAL_AGENT_VERSION,
+    latestWindowsAgentVersion: (env.MUNDUSX_LATEST_WINDOWS_AGENT_VERSION ?? "").trim()
+      || DEFAULT_LOCAL_AGENT_VERSION,
+    windowsAgentUpdateUrl: (env.MUNDUSX_WINDOWS_AGENT_UPDATE_URL ?? "").trim()
+      || "https://github.com/mundusx/releases/releases/download/cli-windows-v0.2.04/MundusX-Update.exe",
+    localAgentReleaseUrl: (env.MUNDUSX_LOCAL_AGENT_RELEASE_URL ?? "").trim()
+      || DEFAULT_AGENT_RELEASE_PAGE_URL,
+    agentReleasesApiUrl: (env.MUNDUSX_AGENT_RELEASES_API_URL ?? "").trim()
+      || DEFAULT_AGENT_RELEASES_API_URL,
     modelOverride: (env.MUNDUSX_CHAT_MODEL ?? env.MUNDUSX_CHAT_DEFAULT_MODEL ?? "").trim(),
     agentModelProviders: parseAgentModelProviders(env),
     weatherCacheUrl: (
@@ -213,6 +230,73 @@ export function configFromEnv(env = process.env) {
       DEFAULT_TOOL_PLANNER_TIMEOUT_SECONDS,
     ),
   };
+}
+
+function parsedReleaseVersion(value) {
+  const match = String(value || "").trim().match(/^(?:cli-(?:windows|linux|macos)-v)?(\d+)\.(\d+)\.(\d+)$/);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function newerReleaseVersion(candidate, current) {
+  const next = parsedReleaseVersion(candidate);
+  const existing = parsedReleaseVersion(current);
+  if (!next) return false;
+  if (!existing) return true;
+  for (let index = 0; index < 3; index += 1) {
+    if (next[index] !== existing[index]) return next[index] > existing[index];
+  }
+  return false;
+}
+
+export async function discoverLatestAgentReleases(config, fetchImpl = fetch) {
+  try {
+    const response = await fetchImpl(config.agentReleasesApiUrl, {
+      headers: {
+        accept: "application/vnd.github+json",
+        "user-agent": "mundusx-chat-release-discovery",
+      },
+      signal: AbortSignal.timeout(4_000),
+    });
+    if (!response.ok) return config;
+    const releases = await response.json();
+    if (!Array.isArray(releases)) return config;
+    let windowsRelease = null;
+    let localRelease = null;
+    for (const release of releases) {
+      if (release?.draft || release?.prerelease) continue;
+      const tag = String(release?.tag_name || "");
+      const match = tag.match(/^cli-(windows|linux|macos)-v(\d+\.\d+\.\d+)$/);
+      if (!match) continue;
+      const candidate = { ...release, platform: match[1], version: match[2] };
+      if (candidate.platform === "windows"
+        && (!windowsRelease || newerReleaseVersion(candidate.version, windowsRelease.version))) {
+        windowsRelease = candidate;
+      }
+      if (candidate.platform !== "windows"
+        && (!localRelease || newerReleaseVersion(candidate.version, localRelease.version))) {
+        localRelease = candidate;
+      }
+    }
+    const resolved = { ...config };
+    if (windowsRelease && !newerReleaseVersion(config.latestWindowsAgentVersion, windowsRelease.version)) {
+      resolved.latestWindowsAgentVersion = windowsRelease.version;
+      const trustedAssets = Array.isArray(windowsRelease.assets) ? windowsRelease.assets.filter((asset) =>
+        String(asset?.browser_download_url || "").startsWith("https://github.com/mundusx/releases/releases/download/")) : [];
+      const updater = trustedAssets.find((asset) => asset.name === "MundusX-Update.exe");
+      const setup = trustedAssets.find((asset) => asset.name === "MundusX-Setup.exe");
+      if (updater) resolved.windowsAgentUpdateUrl = updater.browser_download_url;
+      if (setup) resolved.harnessRunnerDownloadUrl = setup.browser_download_url;
+    }
+    if (localRelease && !newerReleaseVersion(config.latestLocalAgentVersion, localRelease.version)) {
+      resolved.latestLocalAgentVersion = localRelease.version;
+      if (String(localRelease.html_url || "").startsWith(DEFAULT_AGENT_RELEASE_PAGE_URL)) {
+        resolved.localAgentReleaseUrl = localRelease.html_url;
+      }
+    }
+    return resolved;
+  } catch {
+    return config;
+  }
 }
 
 export async function submitHarnessTask(
@@ -2282,9 +2366,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const harnessRunnerStatusEl = document.getElementById("harness-runner-status");
     const harnessDownloadEl = document.getElementById("harness-download");
     const projectAgentUpdateEl = document.getElementById("project-agent-update");
+    const minimumLocalAgentVersion = ${JSON.stringify(config.minimumLocalAgentVersion)};
+    const minimumWindowsAgentVersion = ${JSON.stringify(config.minimumWindowsAgentVersion)};
     const latestLocalAgentVersion = ${JSON.stringify(config.latestLocalAgentVersion)};
     const latestWindowsAgentVersion = ${JSON.stringify(config.latestWindowsAgentVersion)};
     const windowsAgentUpdateUrl = ${JSON.stringify(config.windowsAgentUpdateUrl)};
+    const localAgentReleaseUrl = ${JSON.stringify(config.localAgentReleaseUrl)};
     const isWindowsAgentDevice = /Windows|Win32|Win64/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "");
     const projectReadinessTitleEl = document.getElementById("project-readiness-title");
     const projectReadinessEl = document.getElementById("project-readiness");
@@ -3163,10 +3250,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         || null;
       const knownConnection = readyConnection || connections[0] || null;
       const installedVersion = knownConnection?.capabilities?.client_version || "unknown";
-      const requiredAgentVersion = isWindowsAgentDevice ? latestWindowsAgentVersion : latestLocalAgentVersion;
+      const minimumAgentVersion = isWindowsAgentDevice ? minimumWindowsAgentVersion : minimumLocalAgentVersion;
+      const latestAgentVersion = isWindowsAgentDevice ? latestWindowsAgentVersion : latestLocalAgentVersion;
+      const updateRequired = Boolean(knownConnection)
+        && !releaseVersionAtLeast(installedVersion, minimumAgentVersion);
       const updateAvailable = Boolean(knownConnection)
-        && !releaseVersionAtLeast(installedVersion, requiredAgentVersion);
-      localRunnerReady = localRunnerReady && !updateAvailable;
+        && !releaseVersionAtLeast(installedVersion, latestAgentVersion);
+      localRunnerReady = localRunnerReady && !updateRequired;
       if (localRunnerReady) reconnectRequestedAt = 0;
       const reconnectTimedOut = reconnectRequestedAt > 0 && Date.now() - reconnectRequestedAt >= 20000;
       updateRunnerSetupState({ paired, ready: localRunnerReady, agentMissing });
@@ -3182,8 +3272,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // A healthy connector is authoritative. Do not leave a stale manual
       // retry action visible after automatic readiness polling succeeds.
       if (projectReadinessRefreshEl) projectReadinessRefreshEl.hidden = localRunnerReady || (paired && !localRunnerReady && !reconnectTimedOut);
-      const statusText = updateAvailable
-        ? "Update required · Installed " + installedVersion + " · Latest " + requiredAgentVersion
+      const statusText = updateRequired
+        ? "Update required · Installed " + installedVersion + " · Minimum " + minimumAgentVersion
+        : updateAvailable
+        ? "Update available · Installed " + installedVersion + " · Latest " + latestAgentVersion
         : readyConnection
         ? "Ready · " + (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent")
         : ready
@@ -3197,11 +3289,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
                 : "No computer is connected to this account yet.";
       harnessRunnerStatusEl.textContent = statusText;
       if (projectReadinessEl) projectReadinessEl.dataset.state = updateAvailable ? "update" : localRunnerReady ? "ready" : paired ? "offline" : "setup";
-      if (projectReadinessTitleEl) projectReadinessTitleEl.textContent = updateAvailable ? "Update required" : localRunnerReady ? "Local agent ready" : agentMissing ? "Coding agent missing" : paired ? "Local agent offline" : "Connect this computer";
-      if (projectReadinessTextEl) projectReadinessTextEl.textContent = updateAvailable
-        ? "Installed " + installedVersion + " · Required " + requiredAgentVersion + " or newer. Update now to create or run local projects."
+      if (projectReadinessTitleEl) projectReadinessTitleEl.textContent = updateRequired ? "Update required" : updateAvailable ? "Update available" : localRunnerReady ? "Local agent ready" : agentMissing ? "Coding agent missing" : paired ? "Local agent offline" : "Connect this computer";
+      if (projectReadinessTextEl) projectReadinessTextEl.textContent = updateRequired
+        ? "Installed " + installedVersion + " · Minimum " + minimumAgentVersion + ". Update now to create or run local projects."
+        : updateAvailable
+        ? (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent") + " · Installed " + installedVersion + " · Latest " + latestAgentVersion + ". You can continue working or update now."
         : localRunnerReady
-        ? (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent") + " · Installed " + installedVersion + " · Required " + requiredAgentVersion + " or newer. Your project tools run locally; model inference uses MundusX EHDA."
+        ? (runtime === "hermes" ? "Hermes Agent" : "MundusX Agent") + " · Installed " + installedVersion + " · Latest " + latestAgentVersion + ". Your project tools run locally; model inference uses MundusX EHDA."
         : agentMissing
           ? "Install Hermes or select the native MundusX Agent, then retry."
           : paired
@@ -3498,8 +3592,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     function configureAgentRecoveryAction(updateAvailable, offline) {
       if (!projectAgentUpdateEl) return;
       const reconnect = offline && !updateAvailable;
-      const releasePage = updateAvailable && isWindowsAgentDevice;
-      projectAgentUpdateEl.href = reconnect ? "mundusx://reconnect" : releasePage ? windowsAgentUpdateUrl : harnessDownloadEl.href;
+      const releasePage = updateAvailable;
+      projectAgentUpdateEl.href = reconnect ? "mundusx://reconnect" : isWindowsAgentDevice ? windowsAgentUpdateUrl : localAgentReleaseUrl;
       projectAgentUpdateEl.dataset.action = reconnect ? "reconnect" : "update";
       if (reconnect || releasePage) projectAgentUpdateEl.removeAttribute("download");
       else projectAgentUpdateEl.setAttribute("download", "");
@@ -14856,6 +14950,11 @@ function delay(ms) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const config = configFromEnv();
+  Object.assign(config, await discoverLatestAgentReleases(config));
+  const releaseRefresh = setInterval(() => {
+    void discoverLatestAgentReleases(config).then((discovered) => Object.assign(config, discovered));
+  }, AGENT_RELEASE_REFRESH_MS);
+  releaseRefresh.unref();
   createServerApp(config).listen(config.port, "0.0.0.0", () => {
     console.log(`MundusX chat listening on http://127.0.0.1:${config.port}`);
     console.log(`controlPlaneUrl: ${config.controlPlaneUrl}`);
