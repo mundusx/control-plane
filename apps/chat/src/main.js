@@ -2445,6 +2445,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     let readyHarnessModes = new Set();
     let localRunnerReady = false;
     let localProjectAgentReady = false;
+    let localAgentUpdateAvailable = false;
     let runnerSetupRequested = false;
     let runnerTargetProject = null;
     let runnerDownloadStarted = false;
@@ -2793,7 +2794,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         runnerPairingPollTimer = null;
         try {
           await loadHarnessRunners();
-          if (localRunnerReady) {
+          if (localRunnerReady && !localAgentUpdateAvailable) {
             runnerPairingInProgress = false;
             stopRunnerPairingPoll();
             return;
@@ -3189,6 +3190,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (!currentUser) {
         localRunnerReady = false;
         localProjectAgentReady = false;
+        localAgentUpdateAvailable = false;
         if (projectReadinessEl) {
           projectReadinessEl.hidden = false;
           projectReadinessEl.dataset.state = "offline";
@@ -3237,14 +3239,6 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         .filter((slug) => !removedProjectSlugs.includes(slug)).sort().slice(0, 100);
       localStorage.setItem(recentProjectsKey, JSON.stringify(availableProjectSlugs));
       renderProjectMenu();
-      if (ready) {
-        runnerPairingInProgress = false;
-        stopRunnerPairingPoll();
-      } else if (paired && !runnerPairingInProgress) {
-        runnerPairingInProgress = true;
-        runnerPairingExpiresAt = Date.now() + 10 * 60 * 1000;
-        pollRunnerPairing();
-      }
       const runtime = readyConnection?.capabilities?.preferred_agent
         || readyConnection?.capabilities?.agent_runtimes?.[0]
         || null;
@@ -3256,7 +3250,16 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         && !releaseVersionAtLeast(installedVersion, minimumAgentVersion);
       const updateAvailable = Boolean(knownConnection)
         && !releaseVersionAtLeast(installedVersion, latestAgentVersion);
+      localAgentUpdateAvailable = updateAvailable;
       localRunnerReady = localRunnerReady && !updateRequired;
+      if (localRunnerReady && !updateAvailable) {
+        runnerPairingInProgress = false;
+        stopRunnerPairingPoll();
+      } else if (!localRunnerReady && paired && !runnerPairingInProgress) {
+        runnerPairingInProgress = true;
+        runnerPairingExpiresAt = Date.now() + 10 * 60 * 1000;
+        pollRunnerPairing();
+      }
       if (localRunnerReady) reconnectRequestedAt = 0;
       const reconnectTimedOut = reconnectRequestedAt > 0 && Date.now() - reconnectRequestedAt >= 20000;
       updateRunnerSetupState({ paired, ready: localRunnerReady, agentMissing });
@@ -3606,12 +3609,15 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
     }
     projectAgentUpdateEl?.addEventListener("click", () => {
-      if (projectAgentUpdateEl.dataset.action !== "reconnect") return;
-      reconnectRequestedAt = Date.now();
+      const action = projectAgentUpdateEl.dataset.action;
+      if (action !== "reconnect" && action !== "update") return;
+      if (action === "reconnect") reconnectRequestedAt = Date.now();
       runnerPairingInProgress = true;
       runnerPairingExpiresAt = Date.now() + 10 * 60 * 1000;
       if (projectReadinessRefreshEl) projectReadinessRefreshEl.textContent = "Check again";
-      if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Opening MundusX to reconnect. Allow the browser prompt. If the app does not open, open MundusX from the Start menu; older installations may need an update to support browser reconnect.";
+      if (projectReadinessTextEl) projectReadinessTextEl.textContent = action === "update"
+        ? "Complete the installer. This page will detect the updated local agent automatically."
+        : "Opening MundusX to reconnect. Allow the browser prompt. If the app does not open, open MundusX from the Start menu; older installations may need an update to support browser reconnect.";
       pollRunnerPairing();
     });
     harnessDownloadEl?.addEventListener("click", () => {
