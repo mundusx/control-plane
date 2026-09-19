@@ -75,6 +75,59 @@ test("agent compatibility and latest release versions are configured separately"
   assert.equal(attributes.has("download"), false);
 });
 
+test("recovery keeps polling when known runners are still offline", async () => {
+  const code = source.slice(source.indexOf("    function pollRunnerPairing()"), source.indexOf("    async function openProjects("));
+  let scheduled;
+  let schedules = 0;
+  const context = vm.createContext({
+    stopRunnerPairingPoll() {}, runnerPairingInProgress: true,
+    runnerPairingExpiresAt: Date.now() + 600000, runnerPairingPollTimer: null,
+    localRunnerReady: false, localAgentUpdateAvailable: false,
+    loadHarnessRunners: async () => [{ ready: false, fresh: false }],
+    window: { setTimeout: (callback) => { scheduled = callback; schedules++; return schedules; } },
+  });
+  vm.runInContext(code, context);
+  context.pollRunnerPairing();
+  await scheduled();
+  assert.equal(context.runnerPairingInProgress, true);
+  assert.equal(schedules, 2);
+  context.localRunnerReady = true;
+  context.localAgentUpdateAvailable = true;
+  await scheduled();
+  assert.equal(context.runnerPairingInProgress, true);
+  assert.equal(schedules, 3);
+  context.localAgentUpdateAvailable = false;
+  await scheduled();
+  assert.equal(context.runnerPairingInProgress, false);
+  assert.equal(schedules, 3);
+});
+
+test("clicking Update now polls until the installed agent reports its new version", () => {
+  const start = source.indexOf('    projectAgentUpdateEl?.addEventListener("click"');
+  const end = source.indexOf('    harnessDownloadEl?.addEventListener("click"', start);
+  let click;
+  let polls = 0;
+  const context = vm.createContext({
+    projectAgentUpdateEl: {
+      dataset: { action: "update" },
+      addEventListener: (_event, callback) => { click = callback; },
+    },
+    reconnectRequestedAt: 0,
+    runnerPairingInProgress: false,
+    runnerPairingExpiresAt: 0,
+    projectReadinessRefreshEl: { textContent: "" },
+    projectReadinessTextEl: { textContent: "" },
+    pollRunnerPairing: () => { polls++; },
+  });
+  vm.runInContext(source.slice(start, end), context);
+  click();
+  assert.equal(context.runnerPairingInProgress, true);
+  assert.ok(context.runnerPairingExpiresAt > Date.now());
+  assert.equal(context.projectReadinessRefreshEl.textContent, "Check again");
+  assert.match(context.projectReadinessTextEl.textContent, /detect the updated local agent automatically/);
+  assert.equal(polls, 1);
+});
+
 test("release discovery advances agent versions and trusted installer URLs", async () => {
   const config = configFromEnv({});
   const discovered = await discoverLatestAgentReleases(config, async () => ({
