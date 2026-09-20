@@ -2946,6 +2946,15 @@ fn paged_node_records(
     (page_nodes, pagination)
 }
 
+fn sort_jobs_newest_first(jobs: &mut [JobRecord]) {
+    jobs.sort_by_cached_key(|job| {
+        std::cmp::Reverse((
+            job.submitted_at.parse::<u64>().ok(),
+            job.job_id.clone(),
+        ))
+    });
+}
+
 fn paged_job_records(jobs: Vec<JobRecord>, query: Option<&str>) -> (Vec<JobRecord>, Pagination) {
     let pagination = Pagination::from_query(query).with_total(jobs.len());
     let start = (pagination.page - 1) * pagination.page_size;
@@ -3445,7 +3454,7 @@ fn control_plane_operator_page(
     let registry_pagination_html =
         render_pagination_controls("/registry", query, &registry_pagination);
     let mut filtered_jobs = state.jobs.values().cloned().collect::<Vec<_>>();
-    filtered_jobs.reverse();
+    sort_jobs_newest_first(&mut filtered_jobs);
     let filtered_jobs = filter_json_items(filtered_jobs, query, "jobs");
     let (paged_jobs, jobs_pagination) = paged_job_records(filtered_jobs, query);
     let filtered_jobs_html = render_job_records(paged_jobs);
@@ -3525,6 +3534,7 @@ fn control_plane_operator_page(
             {job_detail_html}
             <section class="panel">
               <h2>Job Queue</h2>
+              <p class="meta">Newest submitted jobs first.</p>
               <p class="meta">Review who handled each request, what model/runtime was used, when it completed, and the output or error summary. Retry and cancel controls can attach here when mutating job actions are enabled.</p>
               {filtered_jobs_html}
               {jobs_pagination_html}
@@ -8492,7 +8502,7 @@ fn handle_connection_with_streams(
                 json_response("200 OK", guard.jobs_snapshot())
             } else {
                 let mut jobs = guard.jobs.values().cloned().collect::<Vec<_>>();
-                jobs.reverse();
+                sort_jobs_newest_first(&mut jobs);
                 let jobs = filter_json_items(jobs, query, "jobs");
                 json_response("200 OK", paginated_items_response(jobs, query, "jobs"))
             }
@@ -11898,6 +11908,62 @@ mod tests {
         assert!(html.contains(r#"href="/nodes?page=1&amp;page_size=10&amp;state=online""#));
         assert!(html.contains(r#"href="/nodes?page=3&amp;page_size=10&amp;state=online""#));
         assert!(html.contains(r#"href="/v1/nodes?page=1&amp;page_size=10&amp;state=online""#));
+    }
+
+    #[test]
+    fn jobs_page_orders_by_numeric_submission_time_before_pagination() {
+        let mut state = ControlPlaneState::default();
+        for (id, submitted_at) in [
+            ("z-old", "9"),
+            ("a-new", "100"),
+            ("b-new", "100"),
+            ("y-middle", "10"),
+            ("zz-invalid", "unknown"),
+        ] {
+            state.submit_job(
+                JobRequest {
+                    request_id: id.to_string(),
+                    prompt: "Sort regression".to_string(),
+                    preferred_backend: Backend::Auto,
+                    routing_mode: RoutingMode::Normal,
+                    runtime_mode: RuntimeMode::Local,
+                    execution_mode: JobExecutionMode::Single,
+                    stream: false,
+                    model: None,
+                    system_prompt: None,
+                    max_tokens: Some(128),
+                    max_tokens_source: None,
+                    temperature: None,
+                    top_p: None,
+                    seed: None,
+                },
+                submitted_at.to_string(),
+            );
+        }
+        let mut jobs = state.jobs.values().cloned().collect::<Vec<_>>();
+        crate::sort_jobs_newest_first(&mut jobs);
+        assert_eq!(
+            jobs.iter().map(|job| job.job_id.as_str()).collect::<Vec<_>>(),
+            ["b-new", "a-new", "y-middle", "z-old", "zz-invalid"]
+        );
+        for (page, expected, absent) in [
+            (1, ["b-new", "a-new"], "y-middle"),
+            (2, ["y-middle", "z-old"], "a-new"),
+        ] {
+            let query = format!("page={page}&page_size=2&status=queued");
+            let html = control_plane_operator_page(
+                &state,
+                StorageSource::LocalJsonFallback,
+                &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+                OperatorPage::Jobs,
+                Some(&query),
+            );
+            let first = html.find(&format!("/jobs/{}", expected[0])).unwrap();
+            let second = html.find(&format!("/jobs/{}", expected[1])).unwrap();
+            assert!(first < second);
+            assert!(!html.contains(&format!("/jobs/{absent}")));
+            assert!(html.contains("Newest submitted jobs first."));
+        }
     }
 
     #[test]
