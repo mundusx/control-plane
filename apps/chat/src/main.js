@@ -904,7 +904,6 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .account-advanced summary { cursor:pointer; padding:10px 8px; color:var(--muted); font-size:12px; font-weight:600; border-radius:8px; }
     .account-advanced summary:hover { background:var(--panel-2); }
     .account-advanced summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-    @media (max-width:860px) { .account-advanced { display:none; } }
     .account-menu-header {
       width: 100%;
       display: flex;
@@ -2236,7 +2235,19 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .brand-motto { margin-right:auto; display:flex; align-items:center; gap:12px; color:var(--muted-2); font-family: "Space Grotesk", system-ui, sans-serif; font-size:12px; }
     .brand-motto::after { content:"A BETTER TOMORROW"; font-family: "Space Grotesk", system-ui, sans-serif; font-size:10px; font-weight:650; letter-spacing:.14em; }
     .brand-motto-separator { width:1px; height:13px; background:var(--line-strong); }
-    @media (max-width:860px) { .shell{grid-template-columns:1fr}.brand-motto{display:none} }
+    .mobile-chat-controls,.mobile-rail-close,.mobile-rail-backdrop { display:none; }
+    @media (max-width:860px) {
+      .shell{grid-template-columns:1fr}.brand-motto{display:none}
+      .mobile-chat-controls { display:flex; align-items:center; gap:6px; }
+      .mobile-chat-controls button,.mobile-rail-close { display:grid; place-items:center; width:40px; height:40px; padding:8px; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--text); cursor:pointer; }
+      .mobile-chat-controls svg { width:20px; height:20px; }
+      .mobile-rail-close { position:absolute; top:10px; right:10px; font-size:24px; }
+      .shell.mobile-rail-open > aside { display:grid; position:fixed; inset:0 auto 0 0; z-index:30; width:min(320px,calc(100vw - 48px)); height:100dvh; padding-top:60px; box-shadow:12px 0 40px rgba(0,0,0,.2); }
+      .shell.mobile-rail-open .mobile-rail-backdrop { display:block; position:fixed; inset:0; z-index:25; border:0; background:rgba(0,0,0,.35); }
+      .workspace-nav { display:none; }
+      .history-menu-button { opacity:1; }
+      .history-context-menu { z-index:45; }
+    }
   </style>
 </head>
 <body data-auth-required="${config.auth?.required ? "true" : "false"}">
@@ -2251,7 +2262,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     </div>
   </div>
   <div class="shell" data-control-plane="${escapeHtml(config.controlPlaneUrl)}">
-    <aside>
+    <button class="mobile-rail-backdrop" id="mobile-rail-backdrop" type="button" aria-label="Close history" tabindex="-1"></button>
+    <aside id="chat-sidebar" aria-label="Chat navigation">
+      <button class="mobile-rail-close" id="mobile-rail-close" type="button" aria-label="Close history">&times;</button>
       <div class="brand-block">
         <svg class="brand-mark" viewBox="0 0 64 64" role="img" aria-label="Mercedes-Benz three-pointed star"><circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="32" cy="32" r="24" fill="none" stroke="currentColor" stroke-width=".8" opacity=".62"/><path d="M32 8.5 35 29l18.9 12.8-20.2-8.1L32 56l-1.7-22.3-20.2 8.1L29 29 32 8.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
         <div class="brand-copy">
@@ -2307,6 +2320,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     <main id="chat-main" class="is-empty-chat">
       <canvas class="mesh-canvas" id="mesh-canvas" aria-hidden="true"></canvas>
       <header>
+        <div class="mobile-chat-controls">
+          <button id="mobile-history" type="button" aria-label="Open chat history" title="History" aria-controls="chat-sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+          <button id="mobile-new-chat" type="button" aria-label="New chat" title="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
         <div class="brand-motto"><span>Mercedes-Benz</span><span class="brand-motto-separator" aria-hidden="true"></span></div>
         <div class="theme-switch" role="group" aria-label="Color theme"><button class="theme-option" id="theme-light" type="button" aria-label="Use light theme" aria-pressed="true">☀</button><button class="theme-option" id="theme-dark" type="button" aria-label="Use dark theme" aria-pressed="false">☾</button></div>
         <span class="runtime-status-sentinel" id="runtime-status" data-state="working"><span class="status-dot"></span><span id="runtime-status-text">Checking</span></span>
@@ -2357,6 +2374,22 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const historyListEl = document.getElementById("history-list");
     const historyMenuEl = document.getElementById("history-context-menu");
     const newChatEl = document.getElementById("new-chat");
+    const mobileHistoryEl = document.getElementById("mobile-history");
+    const mobileRailCloseEl = document.getElementById("mobile-rail-close");
+    function setMobileHistoryOpen(open, restoreFocus = true) {
+      document.querySelector(".shell").classList.toggle("mobile-rail-open", open);
+      mobileHistoryEl.setAttribute("aria-expanded", String(open));
+      if (open) mobileRailCloseEl.focus();
+      else if (restoreFocus) mobileHistoryEl.focus();
+    }
+    mobileHistoryEl.addEventListener("click", () => setMobileHistoryOpen(true));
+    mobileRailCloseEl.addEventListener("click", () => setMobileHistoryOpen(false));
+    document.getElementById("mobile-rail-backdrop").addEventListener("click", () => setMobileHistoryOpen(false));
+    document.getElementById("mobile-new-chat").addEventListener("click", () => newChatEl.click());
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && mobileHistoryEl.getAttribute("aria-expanded") === "true") setMobileHistoryOpen(false);
+    });
+    window.matchMedia("(max-width: 860px)").addEventListener("change", () => setMobileHistoryOpen(false, false));
     const accountBarEl = document.getElementById("account-bar");
     const guestWidgetEl = document.getElementById("guest-widget");
     const guestLoginEl = document.getElementById("guest-login");
@@ -3979,6 +4012,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     }
 
     newChatEl?.addEventListener("click", () => {
+      setMobileHistoryOpen(false, false);
       setWorkspaceDestination("chats");
       setActiveProject(null);
       pendingRunnerAction = null;
@@ -6311,6 +6345,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             row.classList.add("active");
           }
           main.addEventListener("click", async () => {
+            setMobileHistoryOpen(false);
             await loadHistoryItem(item);
           });
           const menuButton = document.createElement("button");
