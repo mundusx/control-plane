@@ -35,11 +35,12 @@ async function runReply(message, segments) {
       const request = JSON.parse(init.body);
       const index = requests.length; requests.push(request);
       assert.ok(index < segments.length, "unexpected extra generation");
-      const segment = segments[index];
+      const spec = segments[index];
+      const segment = typeof spec === "string" ? { text: spec } : spec;
       const anchor = index ? request.messages.at(-1).content.match(/CONTINUATION_ANCHOR:\n([\s\S]*?)\nEND_CONTINUATION_ANCHOR/)?.[1] ?? "" : "";
       return new Response(
-        `data: ${JSON.stringify({ id: "chatcmpl-carwash", choices: [{ delta: { content: anchor + segment }, finish_reason: null }] })}\n\n` +
-        `data: ${JSON.stringify({ id: "chatcmpl-carwash", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        `data: ${JSON.stringify({ id: "chatcmpl-carwash", choices: [{ delta: { content: (segment.raw ? "" : anchor) + segment.text }, finish_reason: null }] })}\n\n` +
+        `data: ${JSON.stringify({ id: "chatcmpl-carwash", choices: [{ delta: {}, finish_reason: segment.finish || "stop" }] })}\n\ndata: [DONE]\n\n`,
         { headers: { "Content-Type": "text/event-stream" } },
       );
     });
@@ -80,4 +81,28 @@ test("documentation recovery stops after two attempts and reports incomplete", a
   assert.equal(requests.length, 3);
   assert.equal(result.finishReason, "length");
   assert.doesNotMatch(writes, /"finish_reason":"stop"/);
+});
+
+test("rejected Swagger continuation retries before checking missing README", async () => {
+  const first = "## Project structure\nREADME.md\n## routes/cars.js\n```js\n/**\n * schema:\n *   type: object\n * /cars/{id}:\n *   put:\n *     requestBody:\n *       required: true\n *       content:";
+  const rejected = { text: "```json\n *   type: object\nSkipped Swagger lines\n```", raw: true };
+  const suffix = "\n *         application/json: {}\n */\n```\n" + readme + summary;
+  const { result, requests, writes } = await runReply(prompt, [
+    { text: first, finish: "length" }, rejected, suffix,
+  ]);
+  assert.equal(requests.length, 3);
+  assert.equal(result.content, first + suffix);
+  assert.equal(result.finishReason, "stop");
+  assert.match(requests[2].messages.at(-1).content, /first repeat CONTINUATION_ANCHOR exactly/);
+  assert.match(requests[2].messages[0].content, /first copy the latest CONTINUATION_ANCHOR exactly/);
+  assert.doesNotMatch(writes, /Skipped Swagger lines/);
+});
+
+test("repeated unsafe continuations remain bounded and preserve the original code", async () => {
+  const first = "README.md\n```js\nconst existingController = true;\nconst nextController =";
+  const rejected = { text: "```js\nconst existingController = true;\n```", raw: true };
+  const { result, requests } = await runReply(prompt, [{ text: first, finish: "length" }, rejected, rejected, rejected]);
+  assert.equal(requests.length, 4);
+  assert.equal(result.finishReason, "length");
+  assert.equal(result.content, first);
 });

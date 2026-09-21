@@ -8263,7 +8263,9 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       let reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
       // A normal provider stop can still omit the promised README or finish
       // inside it. Recover the missing documentation before publishing stop.
-      if (hooks.completeProjectDocumentation && attemptFinishReason === "stop") {
+      // A rejected continuation must reach the stalled-response retry below.
+      // Missing documentation cannot exhaust recovery when nothing was joined.
+      if (hooks.completeProjectDocumentation && attemptFinishReason === "stop" && segmentMadeProgress) {
         const gaps = projectCompletionGaps(content);
         if (gaps.length && segmentMadeProgress && !reachedContinuationLimit && documentationRepairs < 2) {
           documentationRepairs += 1;
@@ -8517,13 +8519,13 @@ function buildContinuationRequestBody(currentBody, originalMessages, content, st
           // actively confuse continuation: the model sees multiple copies of
           // the same incomplete program.  The current request and the durable
           // assistant tail below are the only state needed to continue.
-          content: `${String(entry.content ?? "").replace(/\n<conversation_history>[\s\S]*?<\/conversation_history>/, "")} Continuation override: for the latest continuation request, output only the missing suffix after the supplied assistant tail. Do not restart or reproduce the complete file from its beginning.`,
+          content: `${String(entry.content ?? "").replace(/\n<conversation_history>[\s\S]*?<\/conversation_history>/, "")} Continuation override: first copy the latest CONTINUATION_ANCHOR exactly, then output only the missing suffix after the supplied assistant tail. The anchor is required transport overlap and will be removed before display. Do not restart or reproduce the complete file from its beginning.`,
         }
       : entry,
   );
   const continuationAnchor = continuationTail.slice(-256);
   const retryInstruction = stalledAttempt > 0
-    ? ` A previous continuation restarted the answer and was discarded. This is recovery attempt ${stalledAttempt + 1}; begin with the next missing code line only.`
+    ? ` A previous continuation could not be joined safely and was discarded. This is recovery attempt ${stalledAttempt + 1}; first repeat CONTINUATION_ANCHOR exactly, then continue with the next missing text. Do not skip any lines after the anchor.`
     : "";
   return {
     ...currentBody,
