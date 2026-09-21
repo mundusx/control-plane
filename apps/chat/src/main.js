@@ -1,4 +1,5 @@
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
+import { projectCompletionGaps } from "./project-completion.js";
 import { createServer } from "node:http";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -7813,14 +7814,16 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     // first segment finishes normally, while preventing any unrecognized
     // code phrasing from surfacing a truncated answer to the browser.
     continueOnLength: true,
+    completeProjectDocumentation: looksLikeProductionCodeProjectRequest(message.toLowerCase()) &&
+      !/\b(?:code only|only (?:the )?code|no (?:explanation|prose|readme|documentation))\b/i.test(message),
     onProgress: queueAssistantCheckpoint,
     onInterrupted: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
       await queueAssistantCheckpoint({ content, completionId, force: true });
     },
-    onComplete: async ({ content, completionId }) => {
+    onComplete: async ({ content, completionId, finishReason }) => {
       if (!conversationId || !content) return;
-      await queueAssistantCheckpoint({ content, completionId, final: true });
+      await queueAssistantCheckpoint({ content, completionId, final: finishReason === "stop", force: true });
     },
   });
 }
@@ -8050,6 +8053,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let responseStarted = false;
   let requestBody = { ...body, stream: true };
   let stalledContinuationAttempts = 0;
+  let documentationRepairs = 0;
   let transientStreamRecoveries = 0;
 
   try {
@@ -8256,7 +8260,24 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         hooks.onProgress?.({ content, completionId, finishReason });
       }
       const segmentMadeProgress = content.length > segmentStartLength;
-      const reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
+      let reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
+      // A normal provider stop can still omit the promised README or finish
+      // inside it. Recover the missing documentation before publishing stop.
+      if (hooks.completeProjectDocumentation && attemptFinishReason === "stop") {
+        const gaps = projectCompletionGaps(content);
+        if (gaps.length && segmentMadeProgress && !reachedContinuationLimit && documentationRepairs < 2) {
+          documentationRepairs += 1;
+          writeResponse(": completing project documentation\n\n");
+          requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
+          requestBody.messages.at(-1).content += `\nComplete these missing deliverables only:\n${gaps.join("\n")}\nIf the assistant tail is inside a Markdown file fence, finish and close it before the Delivery summary. Do not add new features or repeat earlier files.`;
+          continue;
+        }
+        if (gaps.length) {
+          attemptFinishReason = "length";
+          finishReason = "length";
+          reachedContinuationLimit = true;
+        }
+      }
       if (
         attempt > 0 &&
         !segmentMadeProgress &&
@@ -13638,6 +13659,9 @@ export function buildChatSystemPrompt(message = "", voicePersona = "atlas", skil
         "Include the dependency manifest, environment example without secrets, persistent database configuration, data models, controllers or services, routes, request validation, centralized error handling, application entrypoint, and concise setup or seed instructions when relevant.",
         "Keep imports, exports, paths, dependency versions, model relationships, route mounting, and scripts coherent across files so the project can be copied and run.",
       );
+      if (!/\b(?:code only|only (?:the )?code|no (?:explanation|prose|readme|documentation))\b/i.test(message)) {
+        rules.push("Include README.md with installation, environment configuration, start commands, and API documentation instructions. After the final file's code fence, finish with a Delivery summary heading and concise prose describing what was delivered, how to run and check it, and remaining limitations. Never claim tests were run unless tool results demonstrate it.");
+      }
     } else {
       rules.push(
         "After the introduction, provide the complete compilable source file in a fenced code block.",
