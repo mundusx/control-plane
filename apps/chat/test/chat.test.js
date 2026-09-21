@@ -281,7 +281,7 @@ test("renders a usable chat page", () => {
   assert.match(html, /streamState\.status = "waiting"/);
   assert.match(html, /Chat · Waiting for the first response token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 90000/);
+  assert.match(html, /let firstTokenDeadline = Date\.now\(\) \+ 90000/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
   assert.match(html, /unpaintedDeltaCharacters >= 24/);
   assert.match(html, /await yieldToStreamPaint\(\)/);
@@ -4151,7 +4151,7 @@ test("native MundusX Chat streams complete projects as upstream deltas arrive", 
 
   const streaming = streamChatTurn(
     response,
-    { message: prompt, toolMode: false, executionMode: "auto", voicePersona: "marie" },
+    { message: prompt, toolMode: false, executionMode: "single", voicePersona: "marie" },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
       if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
@@ -4944,7 +4944,7 @@ test("automatic continuation waits for the exact anchor before streaming a resta
   let requestCount = 0;
   const result = await streamChatTurn(
     response,
-    { message: "create a complete booking API", historyMessages: [], toolMode: false },
+    { message: "create a complete booking API", historyMessages: [], executionMode: "single", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async () => {
       requestCount += 1;
@@ -4995,7 +4995,7 @@ test("automatic continuation resumes after an upstream socket terminates mid-res
     {
       message: "can u please create a nodejs code for CRUD api complete for Bus Ticketing",
       historyMessages: [],
-      toolMode: false,
+      executionMode: "single", toolMode: false,
     },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (_url, init = {}) => {

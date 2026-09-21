@@ -1,5 +1,7 @@
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { projectCompletionGaps } from "./project-completion.js";
+import { runPlannedResponse } from "./features/chat/planned-response.js";
+import { answerCompletionGaps } from "./features/chat/answer-completion.js";
 import { createServer } from "node:http";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -4820,7 +4822,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       let completionId = response.headers.get("x-mundusx-completion-id") || null;
       let finishReason = null;
       let sawDone = false;
-      const firstTokenDeadline = Date.now() + 90000;
+      let firstTokenDeadline = Date.now() + 90000;
+      const plannedResponseDeadline = Date.now() + 900000;
       let unpaintedDeltaCharacters = 0;
 
       const yieldToStreamPaint = () => new Promise((resolve) => {
@@ -4866,6 +4869,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         }
         const chunk = JSON.parse(data);
         if (chunk.error) throw new Error(chunk.error.message || "MundusX stream failed");
+        if (chunk.mundusx?.progress) {
+          const progress = chunk.mundusx.progress;
+          firstTokenDeadline = Math.min(plannedResponseDeadline, Date.now() + 90000);
+          streamState.progressLabel = progress.total > 0
+            ? "Working through the response: " + progress.completed + " of " + progress.total + " steps complete."
+            : "Planning the response…";
+          renderConversationStreamState(streamState);
+        }
         completionId = completionId || chunk.id || null;
         const choice = chunk.choices?.[0];
         const delta = String(choice?.delta?.content || "");
@@ -4923,7 +4934,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         status: "completed",
         output,
         job_id: completionId,
-        execution_mode: "single",
+        execution_mode: response.headers.get("x-mundusx-stream-mode") === "planned" ? "decompose" : "single",
         finish_reason: finishReason || "stop",
         stream_mode: response.headers.get("x-mundusx-stream-mode") || "live-delta",
       });
@@ -5042,7 +5053,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
       if (state.status === "waiting") {
         const body = node.querySelector(".message-body");
-        body.textContent = "MundusX received your request. Waiting for response content…";
+        body.textContent = state.progressLabel || "MundusX received your request. Waiting for response content…";
         const meta = document.createElement("div");
         meta.className = "meta";
         meta.textContent = "Chat · Waiting for the first response token";
@@ -7808,7 +7819,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     return checkpointChain;
   };
 
-  return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, {
+  const streamHooks = {
     // A provider length stop is authoritative and must never depend on the
     // wording classifier. The continuation relay adds no request when the
     // first segment finishes normally, while preventing any unrecognized
@@ -7816,6 +7827,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     continueOnLength: true,
     completeProjectDocumentation: looksLikeProductionCodeProjectRequest(message.toLowerCase()) &&
       !/\b(?:code only|only (?:the )?code|no (?:explanation|prose|readme|documentation))\b/i.test(message),
+    completionPrompt: message,
     onProgress: queueAssistantCheckpoint,
     onInterrupted: async ({ content, completionId }) => {
       if (!conversationId || !content) return;
@@ -7825,7 +7837,57 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       if (!conversationId || !content) return;
       await queueAssistantCheckpoint({ content, completionId, final: finishReason === "stop", force: true });
     },
-  });
+  };
+  if (chooseChatExecutionMode(message, body?.executionMode, codeProjectContinuation) === "decompose") {
+    return streamPlannedChatResponse(response, body, requestBody, streamHooks, config, fetchImpl);
+  }
+  return relayControlPlaneOpenAiStream(response, requestBody, config, fetchImpl, streamHooks);
+}
+
+async function streamPlannedChatResponse(response, body, requestBody, hooks, config, fetchImpl) {
+  const completionId = normalizeOpenAiCompletionId(body.requestId);
+  startOpenAiStream(response, "planned", completionId);
+  let detached = false;
+  const disconnect = () => { detached = true; };
+  response.once?.("close", disconnect);
+  let latestProgress = { completed: 0, total: 0 };
+  const progress = value => {
+    latestProgress = value;
+    if (!detached && !response.writableEnded) response.write(`data: ${JSON.stringify({ id: completionId, mundusx: { progress: value } })}\n\n`);
+  };
+  progress(latestProgress);
+  const heartbeat = setInterval(() => progress(latestProgress), 10000);
+  heartbeat.unref?.();
+  try {
+    const message = hooks.completionPrompt;
+    const request = buildGenericJobBody(message, config, {
+      requestId: completionId, executionMode: "decompose", maxTokens: requestBody.max_tokens,
+      systemPrompt: requestBody.messages.filter(entry => entry.role === "system").map(entry => entry.content).join("\n") +
+        "\nComplete every requested deliverable in the plan. Assemble the step outputs into one coherent answer. For mathematics, include the requested derivation and a final result or an explicit explanation of why no result follows. Do not claim verification that was not performed.\nConversation context: " +
+        JSON.stringify(requestBody.messages.filter(entry => entry.role !== "system").slice(0, -1)),
+    });
+    const job = await runPlannedResponse({
+      request, fetchJob: (path, init) => controlPlaneFetch(fetchImpl, config, path, init), progress,
+      timeoutMs: Math.min(900, Math.max(90, Number(body.timeoutSeconds) || 900)) * 1000,
+    });
+    const output = stripWorkerTruncationMarker(job.output);
+    const finish = inferChatFinishReason(job, summarizeChatProgress(job));
+    // Feed the assembled answer through the same continuation/completion path
+    // as direct chat, so a capped synthesis is resumed rather than discarded.
+    let first = true;
+    const plannedFetch = async (...args) => {
+      if (!first) return fetchImpl(...args);
+      first = false;
+      return new Response(`data: ${JSON.stringify({ id: completionId, choices: [{ delta: { content: output }, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ id: completionId, choices: [{ delta: {}, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+    };
+    return await relayControlPlaneOpenAiStream(response, requestBody, config, plannedFetch, { ...hooks, responseStarted: true });
+  } catch (error) {
+    if (!detached && !response.writableEnded) response.end(`data: ${JSON.stringify({ error: { message: error.message || "The planned response could not finish.", type: "mundusx_planning_error" } })}\n\ndata: [DONE]\n\n`);
+    return { content: "", completionId, finishReason: "error", error: error.message };
+  } finally {
+    clearInterval(heartbeat);
+    response.off?.("close", disconnect);
+  }
 }
 
 export async function streamOpenAiChatCompletion(response, body, config, fetchImpl = fetch) {
@@ -8050,10 +8112,10 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let content = "";
   let completionId = null;
   let finishReason = null;
-  let responseStarted = false;
+  let responseStarted = hooks.responseStarted === true;
   let requestBody = { ...body, stream: true };
   let stalledContinuationAttempts = 0;
-  let documentationRepairs = 0;
+  let completionRepairs = 0;
   let transientStreamRecoveries = 0;
 
   try {
@@ -8261,15 +8323,18 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
       const segmentMadeProgress = content.length > segmentStartLength;
       let reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
-      // A normal provider stop can still omit the promised README or finish
-      // inside it. Recover the missing documentation before publishing stop.
-      if (hooks.completeProjectDocumentation && attemptFinishReason === "stop") {
-        const gaps = projectCompletionGaps(content);
-        if (gaps.length && segmentMadeProgress && !reachedContinuationLimit && documentationRepairs < 2) {
-          documentationRepairs += 1;
-          writeResponse(": completing project documentation\n\n");
+      // A normal provider stop can still leave promised deliverables or math
+      // unfinished. Recover those omissions before publishing stop.
+      if (attemptFinishReason === "stop") {
+        const gaps = [
+          ...(hooks.completeProjectDocumentation ? projectCompletionGaps(content) : []),
+          ...answerCompletionGaps(content, hooks.completionPrompt || ""),
+        ];
+        if (gaps.length && segmentMadeProgress && !reachedContinuationLimit && completionRepairs < 2) {
+          completionRepairs += 1;
+          writeResponse(": completing missing response content\n\n");
           requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
-          requestBody.messages.at(-1).content += `\nComplete these missing deliverables only:\n${gaps.join("\n")}\nIf the assistant tail is inside a Markdown file fence, finish and close it before the Delivery summary. Do not add new features or repeat earlier files.`;
+          requestBody.messages.at(-1).content += `\nComplete these missing deliverables only:\n${gaps.join("\n")}\nDo not repeat completed parts or add unrelated scope.`;
           continue;
         }
         if (gaps.length) {
@@ -13374,6 +13439,8 @@ function countIndependentRequestSignals(lower) {
 }
 
 function looksLikeAdvancedMathRequest(lower) {
+  if (/\b(?:prove|proof|derive)\b/.test(lower) &&
+      /\b(?:theorem|convergence|series|error bound|identity|induction|equation)\b/.test(lower)) return true;
   if (!/\b(?:differentiate|derivative|integrate|integral|limit|solve|calculus)\b/.test(lower)) {
     return false;
   }

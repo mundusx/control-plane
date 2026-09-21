@@ -70,6 +70,19 @@ Skills are application-owned runtime configuration:
 
 ## Next extraction order
 
+The native chat stream routes complex requests through the control plane's
+durable `/v1/jobs` decomposition path. `features/chat/planned-response.js`
+polls the job, reports step progress, and requires every planned job to have a
+completed graph node with output before publishing the assembled answer. The
+browser receives progress heartbeats while planning, bounded to fifteen minutes.
+Simple questions and explicit single execution keep the direct streaming path.
+
+Both routes share bounded continuation for length limits and detectable missing
+content (promised project documentation and malformed mathematical endings).
+These checks detect structural omissions, not mathematical correctness or full
+semantic coverage. Failed plans surface an error; exhausted continuation remains
+partial rather than being persisted as a successfully completed answer.
+
 1. UI shell and browser state.
 2. Chat submission and job lifecycle.
 3. Deterministic tools and grounding strategies.
