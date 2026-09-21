@@ -1,24 +1,21 @@
+import { splitMarkdownCode } from "./markdown-code.js";
+
 // Check the documentation promised by a multi-file answer. This does not
 // certify that generated code works; the summary must state verification limits.
 export function projectCompletionGaps(value) {
   const text = String(value ?? "");
   if (!/\bREADME\.md\b/i.test(text)) return [];
   const prose = [];
-  let fence = null;
   let readmeSection = false;
   let readme = "";
-  for (const line of text.split(/\r?\n/)) {
-    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
-    if (fence) {
-      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
-        fence = null;
-      } else if (readmeSection) readme += line + "\n";
+  for (const part of splitMarkdownCode(text)) {
+    if (part.type === "code") {
+      if (readmeSection) readme += part.value + "\n";
       continue;
     }
-    if (marker) { fence = marker[1]; continue; }
-    prose.push(line);
-    if (/^\s{0,3}#{1,6}\s+/.test(line)) {
-      readmeSection = /\bREADME\.md\b/i.test(line);
+    prose.push(part.value);
+    for (const line of part.value.split(/\r?\n/)) {
+      if (/^\s{0,3}#{1,6}\s+/.test(line)) readmeSection = /\bREADME\.md\b/i.test(line);
     }
   }
   const gaps = [];

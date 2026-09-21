@@ -83,6 +83,17 @@ test("documentation recovery stops after two attempts and reports incomplete", a
   assert.doesNotMatch(writes, /"finish_reason":"stop"/);
 });
 
+test("nested README command fences do not trigger duplicate project generation", async () => {
+  for (const fence of ["```", "````"]) {
+    const file = "## README.md\n" + fence + "markdown\n# Setup\n```bash\nnpm install\n```\n# Run\n```bash\nnpm start\n```\n" + fence;
+    assert.deepEqual(projectCompletionGaps(file + summary), []);
+    const { result, requests } = await runReply(prompt, [file + summary]);
+    assert.equal(requests.length, 1);
+    assert.equal(result.finishReason, "stop");
+    assert.equal(result.content, file + summary);
+  }
+});
+
 test("rejected Swagger continuation retries before checking missing README", async () => {
   const first = "## Project structure\nREADME.md\n## routes/cars.js\n```js\n/**\n * schema:\n *   type: object\n * /cars/{id}:\n *   put:\n *     requestBody:\n *       required: true\n *       content:";
   const rejected = { text: "```json\n *   type: object\nSkipped Swagger lines\n```", raw: true };
