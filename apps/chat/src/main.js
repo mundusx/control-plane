@@ -1,3 +1,4 @@
+import { splitMarkdownCode } from "./markdown-code.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { projectCompletionGaps } from "./project-completion.js";
 import { createServer } from "node:http";
@@ -5462,35 +5463,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       return value.length > 0 && value.length <= 120 ? value : "";
     }
 
-    function splitMarkdownCode(text) {
-      const parts = [];
-      const fence = String.fromCharCode(96).repeat(3);
-      let index = 0;
-      while (index < text.length) {
-        const start = text.indexOf(fence, index);
-        if (start === -1) break;
-        if (start > index) {
-          parts.push({ type: "text", value: text.slice(index, start) });
-        }
-        const contentStart = start + fence.length;
-        const end = text.indexOf(fence, contentStart);
-        const raw = text.slice(contentStart, end === -1 ? text.length : end).replace(/^\\n/, "");
-        const firstBreak = raw.indexOf("\\n");
-        const firstLine = firstBreak === -1 ? raw.trim() : raw.slice(0, firstBreak).trim();
-        const hasLanguage = /^[a-zA-Z0-9_+#.-]{1,24}$/.test(firstLine);
-        parts.push({
-          type: "code",
-          language: hasLanguage ? firstLine : "code",
-          value: hasLanguage ? (firstBreak === -1 ? "" : raw.slice(firstBreak + 1)) : raw,
-        });
-        index = end === -1 ? text.length : end + fence.length;
-        if (end === -1) break;
-      }
-      if (index < text.length) {
-        parts.push({ type: "text", value: text.slice(index) });
-      }
-      return parts.length ? parts : [{ type: "text", value: text }];
-    }
+    ${splitMarkdownCode.toString()}
 
     function appendTextParagraphs(container, text) {
       if (appendStandardMarkdown(container, text)) return;
@@ -13662,7 +13635,7 @@ export function buildChatSystemPrompt(message = "", voicePersona = "atlas", skil
         "Keep imports, exports, paths, dependency versions, model relationships, route mounting, and scripts coherent across files so the project can be copied and run.",
       );
       if (!/\b(?:code only|only (?:the )?code|no (?:explanation|prose|readme|documentation))\b/i.test(message)) {
-        rules.push("Include README.md with installation, environment configuration, start commands, and API documentation instructions. After the final file's code fence, finish with a Delivery summary heading and concise prose describing what was delivered, how to run and check it, and remaining limitations. Never claim tests were run unless tool results demonstrate it.");
+        rules.push("Include README.md with installation, environment configuration, start commands, and API documentation instructions. Wrap Markdown file contents in four backticks labeled markdown so their inner three-backtick command examples remain inside the file. After the final file's code fence, finish with a Delivery summary heading and concise prose describing what was delivered, how to run and check it, and remaining limitations. Never claim tests were run unless tool results demonstrate it.");
       }
     } else {
       rules.push(

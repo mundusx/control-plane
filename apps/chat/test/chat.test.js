@@ -239,7 +239,8 @@ test("renders a usable chat page", () => {
   assert.match(html, /function progressUnit/);
   assert.match(html, /\.message-body ol/);
   assert.match(html, /\.message-body strong/);
-  assert.ok(html.includes('replace(/^\\n/, "")'));
+  assert.match(html, /function splitMarkdownCode\(value\)/);
+  assert.match(html, /marker.length >= outer.marker.length/);
   assert.ok(html.includes('raw.includes("\\n")'));
   assert.ok(html.includes('/\\b(public\\s+class'));
   assert.doesNotMatch(html, /replace\(\/\^\r?\n/);
