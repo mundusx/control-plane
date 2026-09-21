@@ -29,7 +29,7 @@ async function runReply(message, segments) {
     end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
   };
   const result = await streamChatTurn(response,
-    { message, historyMessages: [], toolMode: false, executionMode: "single" },
+    { message, historyMessages: [], toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://control.test" }),
     async (_url, init) => {
       const request = JSON.parse(init.body);
