@@ -1369,7 +1369,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
                 <div class="meta">accepted {} &middot; rejected {} &middot; last failure {}</div>
               </div>
               <div><span class="pill" style="background:{};color:{};">{}</span>{}</div>
-              <div>
+              <div data-live-key="node-state-{live_node_id}">
                 <span class="pill" style="background:{};color:{};">{}</span>
                 <div class="meta" style="margin-top:6px;">reported {}</div>
                 <div class="meta"><strong>{}</strong> &middot; {}/{} active &middot; {} free</div>
@@ -1428,7 +1428,8 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
             policy_fg,
             policy_label,
             policy_reason,
-            escape_html(&node.updated_at)
+            escape_html(&node.updated_at),
+            live_node_id = escape_html(&node.node_id)
         ));
     }
 
@@ -2023,8 +2024,8 @@ fn render_node_profile_panel(state: &ControlPlaneState, node_id: &str) -> String
             <div class="node-profile-card"><span>Trust grade</span><strong>{grade}</strong><div class="meta">score {score}/100</div></div>
             <div class="node-profile-card"><span>Total earned</span><strong>{earned:.2}</strong><div class="meta">credits</div></div>
             <div class="node-profile-card"><span>Contribution</span><strong>{contribution}%</strong><div class="meta">operator effective share</div></div>
-            <div class="node-profile-card"><span>Current work</span><strong>{current_work}</strong><div class="meta">active assignment</div></div>
-            <div class="node-profile-card"><span>Execution slots</span><strong>{active_slots}/{total_slots} active</strong><div class="meta">{slot_state} &middot; {available_slots} free</div><div class="meta">{local_slots} local &middot; {network_slots} network</div></div>
+            <div class="node-profile-card" data-live-key="profile-work"><span>Current work</span><strong>{current_work}</strong><div class="meta">active assignment</div></div>
+            <div class="node-profile-card" data-live-key="profile-slots"><span>Execution slots</span><strong>{active_slots}/{total_slots} active</strong><div class="meta">{slot_state} &middot; {available_slots} free</div><div class="meta">{local_slots} local &middot; {network_slots} network</div></div>
           </section>
           <section class="profile-sections">
             <div class="node-profile-card">
@@ -3536,8 +3537,7 @@ fn control_plane_operator_page(
               <h2>Job Queue</h2>
               <p class="meta">Newest submitted jobs first.</p>
               <p class="meta">Review who handled each request, what model/runtime was used, when it completed, and the output or error summary. Retry and cancel controls can attach here when mutating job actions are enabled.</p>
-              {filtered_jobs_html}
-              {jobs_pagination_html}
+              <div data-live-key="job-list">{filtered_jobs_html}{jobs_pagination_html}</div>
             </section>"#,
             filters = control_filter_form(page, query, &jobs_api_href),
             job_detail_html = job_detail_html
@@ -3881,8 +3881,10 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         }});
       }})();
     </script>
+    <script>{live_status_script}</script>
   </body>
 </html>"#,
+        live_status_script = include_str!("live-status.js"),
         title = page.title(),
         logo_path = CONTROL_PLANE_LOGO_PATH,
         vehicle_path = CONTROL_PLANE_VEHICLE_PATH,
@@ -5263,8 +5265,10 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         sync();
       }})();
     </script>
+    <script>{live_status_script}</script>
   </body>
 </html>"##,
+        live_status_script = include_str!("live-status.js"),
         logo_path = CONTROL_PLANE_LOGO_PATH,
         vehicle_path = CONTROL_PLANE_VEHICLE_PATH,
         recent_logs = recent_logs,
@@ -11139,6 +11143,9 @@ mod tests {
         assert!(html.contains("model readiness"));
         assert!(html.contains("local runtime ready"));
         assert!(html.contains("operator effective share"));
+        assert!(html.contains("data-live-key=\"node-state-node-1\""));
+        assert!(html.contains("data-live-key=\"profile-slots\""));
+        assert!(html.contains("function startControlPlaneLiveStatus"));
         assert!(html.contains(r#"href="/nodes/node-1""#));
         assert!(html.contains(r#"href="/nodes?node_id=node-1""#));
     }

@@ -16153,12 +16153,27 @@ mod tests {
             state.submit_job(request, "3".to_string());
         }
 
-        let claimed = (0..5)
-            .filter_map(|index| state.claim_job("node-1", format!("claim-{index}")).job)
-            .count();
-
-        assert_eq!(claimed, 5);
-        assert_eq!(state.node_slot_occupancy("node-1"), (5, 16, 11));
+        let mut claimed_ids = Vec::new();
+        for index in 0..5 {
+            let claim = state.claim_job("node-1", format!("claim-{index}")).job.unwrap();
+            claimed_ids.push(claim.job_id);
+            let active = index + 1;
+            assert_eq!(state.node_slot_occupancy("node-1"), (active, 16, 16 - active));
+            let snapshot = state.snapshot("memory");
+            assert_eq!(snapshot["assigned_job_count"], active);
+            assert_eq!(snapshot["active_parallel_slots"], active);
+        }
+        // Releasing assignments must update both counters, including 3/16.
+        for (index, id) in claimed_ids.iter().enumerate() {
+            let job = state.jobs.get_mut(id).unwrap();
+            job.status = JobStatus::Completed;
+            for step in &mut job.graph.nodes {
+                step.status = JobGraphNodeStatus::Completed;
+            }
+            let active = 4 - index;
+            assert_eq!(state.node_slot_occupancy("node-1"), (active, 16, 16 - active));
+            assert_eq!(state.snapshot("memory")["assigned_job_count"], active);
+        }
     }
 
     #[test]
