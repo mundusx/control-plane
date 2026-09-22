@@ -8,9 +8,13 @@ export function projectCompletionGaps(value) {
   const prose = [];
   let readmeSection = false;
   let readme = "";
+  let readmeEndInProse = -1;
   for (const part of splitMarkdownCode(text)) {
     if (part.type === "code") {
-      if (readmeSection) readme += part.value + "\n";
+      if (readmeSection) {
+        readme += part.value + "\n";
+        readmeEndInProse = prose.join("\n").length;
+      }
       continue;
     }
     prose.push(part.value);
@@ -25,9 +29,15 @@ export function projectCompletionGaps(value) {
     gaps.push("Finish the README setup and run instructions without repeating the completed source files.");
   }
   const outside = prose.join("\n");
-  const summary = outside.match(/^\s{0,3}#{1,6}\s+(?:Delivery summary|Completion summary|Final notes)[ \t]*\n([\s\S]*)/im);
-  const summaryBody = summary?.[1].split(/^\s{0,3}#{1,6}\s+/m)[0].trim();
-  if (!summaryBody || (summary?.index ?? -1) < outside.toLowerCase().lastIndexOf("readme.md")) {
+  // A wrap-up can be a paragraph or bullets with any heading (or none).
+  // Referring to README.md is normal; use the actual file boundary, and
+  // ignore headings/empty labels rather than requiring magic summary words.
+  const afterReadme = outside.slice(Math.max(0, readmeEndInProse)).replace(/\*\*/g, "");
+  const hasWrapUp = afterReadme.split(/\r?\n/).some((line) => {
+    const text = line.trim();
+    return !/^#{1,6}\s/.test(text) && !/:$/.test(text) && /\p{L}/u.test(text);
+  });
+  if (!hasWrapUp) {
     gaps.push("After closing all file code fences, add a Delivery summary section in normal prose: explain what was delivered, how to run and check it, and any limitations. Do not claim tests or execution occurred unless there is actual evidence.");
   }
   return gaps;
