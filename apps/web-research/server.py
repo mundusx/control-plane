@@ -11,7 +11,10 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from cache import Coordinator
+
 slots = threading.BoundedSemaphore(2)
+coordinator = Coordinator.configured()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -27,6 +30,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.path == "/cache/status":
+            token = os.environ.get("WEB_RESEARCH_TOKEN", "")
+            if not token or not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token):
+                return self.send(401, {"error": "unauthorized"})
+            try:
+                client = coordinator.client
+                connected = bool(client and client.ping())
+                persistence = client.config_get("save", "appendonly") if connected else {}
+                return self.send(200, {"redis": connected, "persistence": persistence,
+                    "semantic_ready": bool(getattr(getattr(coordinator.embed, "__self__", None), "model", None)),
+                    "active": client.zcard("research:v1:active") if connected else 0})
+            except Exception:
+                return self.send(200, {"redis": False})
         ready = all(os.environ.get(key) for key in ("WEB_RESEARCH_TOKEN", "RESEARCH_MODEL_URL", "RESEARCH_MODEL_TOKEN"))
         self.send((200 if ready else 503) if self.path == "/health" else 404,
                   {"status": ("ok" if ready else "not_configured") if self.path == "/health" else "not_found"})
@@ -49,45 +65,48 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "invalid_urls"})
         except (ValueError, AttributeError):
             return self.send(400, {"error": "invalid_request"})
-        if not slots.acquire(blocking=False):
-            return self.send(429, {"error": "busy"})
-        try:
-            with tempfile.TemporaryDirectory(prefix="research-") as profile:
-                Path(profile, "config.yaml").write_text("web:\n  backend: firecrawl\n  search_backend: ddgs\n  extract_char_limit: 10000\n", encoding="utf-8")
-                env = {**os.environ, "HERMES_HOME": profile}
-                process = subprocess.Popen([sys.executable, "/app/research.py"], stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, start_new_session=True)
-                try:
-                    output, _ = process.communicate(json.dumps(data), timeout=180)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    output, _ = process.communicate()
-                events = []
-                for line in output.splitlines():
-                    try:
-                        event = json.loads(line)
-                        if isinstance(event, dict) and event.get("event") in ("result", "retrieved"):
-                            events.append(event)
-                    except ValueError:
-                        pass
-                final = next((event for event in reversed(events) if event["event"] == "result"), None)
-                if final and not final.get("error"):
-                    return self.send(200, final)
-                partial = next((event for event in reversed(events) if event["event"] == "retrieved"), {})
-                if final and not partial:
-                    return self.send(200, final)
-                sources = partial.get("sources", [])
-                text = "Web research could not finish the analysis. Please retry."
-                if partial.get("excerpt"):
-                    text += "\n\nRetrieved content (not a completed analysis):\n\n" + partial["excerpt"]
-                if sources:
-                    text += "\n\nSources:\n" + "\n".join("- <" + source + ">" for source in sources)
-                self.send(200, {"content": text, "sources": sources, "error": "incomplete"})
-        except (OSError, ValueError):
-            self.send(503, {"error": "worker_unavailable"})
-        finally:
-            slots.release()
+        self.send(*coordinator.run(data, crawl))
 
+
+def crawl(data, timeout=180):
+    if not slots.acquire(blocking=False):
+        return 429, {"error": "busy"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="research-") as profile:
+            Path(profile, "config.yaml").write_text("web:\n  backend: firecrawl\n  search_backend: ddgs\n  extract_char_limit: 10000\n", encoding="utf-8")
+            env = {**os.environ, "HERMES_HOME": profile}
+            process = subprocess.Popen([sys.executable, "/app/research.py"], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, start_new_session=True)
+            try:
+                output, _ = process.communicate(json.dumps(data), timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                output, _ = process.communicate()
+            events = []
+            for line in output.splitlines():
+                try:
+                    event = json.loads(line)
+                    if isinstance(event, dict) and event.get("event") in ("result", "retrieved"):
+                        events.append(event)
+                except ValueError:
+                    pass
+            final = next((event for event in reversed(events) if event["event"] == "result"), None)
+            if final and not final.get("error"):
+                return 200, final
+            partial = next((event for event in reversed(events) if event["event"] == "retrieved"), {})
+            if final and not partial:
+                return 200, final
+            sources = partial.get("sources", [])
+            text = "Web research could not finish the analysis. Please retry."
+            if partial.get("excerpt"):
+                text += "\n\nRetrieved content (not a completed analysis):\n\n" + partial["excerpt"]
+            if sources:
+                text += "\n\nSources:\n" + "\n".join("- <" + source + ">" for source in sources)
+            return 200, {"content": text, "sources": sources, "error": "incomplete"}
+    except (OSError, ValueError):
+        return 503, {"error": "worker_unavailable"}
+    finally:
+        slots.release()
 
 if __name__ == "__main__":
     class DualStackServer(ThreadingHTTPServer):
