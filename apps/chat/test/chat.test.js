@@ -3376,9 +3376,9 @@ test("fails honestly when a current-web request reaches Chat without a Hermes cr
     async () => { throw new Error("current-web fallback must not call a search provider or model worker"); },
   );
 
-  assert.equal(result.tool, "web_crawler");
+  assert.equal(result.tool, "web_research");
   assert.equal(result.status, "completed");
-  assert.match(result.output, /Hermes crawler on a connected computer/);
+  assert.match(result.output, /hosted web worker is not connected/);
 });
 
 test("does not route ordinary model requests to the Hermes crawler", async () => {

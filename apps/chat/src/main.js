@@ -1,6 +1,7 @@
 import { splitMarkdownCode } from "./markdown-code.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { projectCompletionGaps } from "./project-completion.js";
+import { webResearchRequest, fetchWebResearch } from "./web-research.js";
 import { createServer } from "node:http";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -173,6 +174,8 @@ export function configFromEnv(env = process.env) {
   );
   return {
     auth: authConfigFromEnv(env),
+    webResearchUrl: (env.MUNDUSX_WEB_RESEARCH_URL ?? "").trim().replace(/\/$/, ""),
+    webResearchToken: (env.MUNDUSX_WEB_RESEARCH_TOKEN ?? "").trim(),
     port: Number(env.PORT ?? "3002"),
     controlPlaneUrl: normalizeControlPlaneOrigin(
       env.MUNDUSX_CONTROL_PLANE_URL ?? DEFAULT_CONTROL_PLANE_URL,
@@ -7680,6 +7683,34 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     })
     : Promise.resolve(null);
 
+  const research = body?.internalAgentTurn !== true && isToolModeEnabled(body)
+    ? webResearchRequest(message, historyMessages) : null;
+  if (research) {
+    const completionId = normalizeOpenAiCompletionId(body?.requestId);
+    startOpenAiStream(response, "web-research", completionId);
+    response.flushHeaders?.();
+    response.write(": researching\n\n");
+    const heartbeat = setInterval(() => {
+      if (!response.destroyed) response.write(": researching\n\n");
+    }, 10_000);
+    try {
+      const result = await fetchWebResearch(research, config, fetchImpl);
+      const content = redactSensitiveText(result.content);
+      const completion = {
+        id: completionId, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: PUBLIC_MODEL_ID,
+        choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+        mundusx: { tool: "web_research", sources: result.sources, error: result.error },
+      };
+      for (const frame of openAiSseFrames(completion, { buffered: false })) response.write(frame);
+      response.end("data: [DONE]\n\n");
+      await userPersistence;
+      await recordAssistantTurn(conversationId, config, fetchImpl, { status: "completed", output: content, tool: "web_research" });
+      return { content, completionId, finishReason: "stop", tool: "web_research" };
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
   // Keep small, deterministic lookups on the fast Chat path. This does not
   // invoke the planner, discovery, Hermes, or a recoverable background job.
   // It simply answers a focused weather question from wttr.in and emits the
@@ -8737,6 +8768,14 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   const toolMode = isToolModeEnabled(body);
   const toolMessage = message;
   const internalAgentTurn = body?.internalAgentTurn === true;
+  const research = !internalAgentTurn && toolMode ? webResearchRequest(message, body?.historyMessages) : null;
+  if (research) {
+    const result = await fetchWebResearch(research, config, fetchImpl);
+    return recordAssistantTurn(conversationId, config, fetchImpl, {
+      status: "completed", output: result.content, tool: "web_research", sources: result.sources,
+      research_error: result.error, finish_reason: "stop",
+    });
+  }
   const compoundToolPrompt = !internalAgentTurn && isMultiIntentPlanningCandidate(toolMessage);
 
   if (compoundToolPrompt) {
@@ -8822,9 +8861,6 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
       if (generalJob) {
         return recordAssistantTurn(conversationId, config, fetchImpl, generalJob);
       }
-    }
-    if (requiresHermesWebResearch(toolMessage)) {
-      return recordAssistantTurn(conversationId, config, fetchImpl, fetchWebCrawlerUnavailableJob(message));
     }
   }
 
