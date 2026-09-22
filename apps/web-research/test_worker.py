@@ -10,9 +10,33 @@ from http.server import ThreadingHTTPServer
 from server import Handler
 from public_read import PageText, read_public_page
 from research import pages
+from profiles import profile_queries, collect_profiles
 
 
 class ReaderTests(unittest.TestCase):
+    def test_profile_followup_searches_three_sources(self):
+        queries = profile_queries("what did u check linkedin", "Who is Dave Batalla?")
+        self.assertEqual(len(queries), 3)
+        self.assertTrue(all("Dave Batalla" in query for _, query in queries))
+        self.assertIn("site:linkedin.com/in/", queries[0][1])
+        self.assertIn("site:github.com", queries[1][1])
+        self.assertEqual(profile_queries("did you check linkedin?", ""), [])
+
+    def test_snippets_are_not_full_profiles_and_search_failures_stay_distinct(self):
+        def search(query, limit):
+            if "site:linkedin.com/in/" in query:
+                return json.dumps({"results": [{"url": "https://www.linkedin.com/in/example", "snippet": "Example engineer"},
+                                                {"url": "https://unrelated.test", "snippet": "Unrelated result"}]})
+            if query.endswith(" site:github.com"):
+                raise RuntimeError("provider unavailable")
+            return json.dumps({"results": []})
+        evidence, sources, coverage = collect_profiles({"message": "Find Dave Batalla on LinkedIn"}, search,
+                                                       lambda url: {"url": url, "content": "Sign in to LinkedIn"}, pages)
+        self.assertEqual(len(evidence), 1)
+        self.assertIn("search snippet only", evidence[0][1])
+        self.assertEqual(sources, ["https://www.linkedin.com/in/example"])
+        self.assertEqual([item["status"] for item in coverage], ["results_found", "search_failed", "no_results"])
+
     def test_visible_text_and_links(self):
         parser = PageText("https://example.com/")
         parser.feed('<h1>Website</h1><script>secret code</script><style>hidden</style><a href="/pricing">Plans</a>')

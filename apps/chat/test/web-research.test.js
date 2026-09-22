@@ -15,6 +15,21 @@ test("routes natural website questions and contextual follow-ups", () => {
 });
 
 const config = configFromEnv({ MUNDUSX_WEB_RESEARCH_URL: "http://worker", MUNDUSX_WEB_RESEARCH_TOKEN: "test-token" });
+test("professional follow-ups use user identity context, never an invented assistant biography", () => {
+  const result = webResearchRequest("what did u check linkedin", [
+    { role: "user", content: "Who is Dave Batalla?" },
+    { role: "assistant", content: "He is a basketball player and actor." },
+  ]);
+  assert.equal(result.researchMode, "public_profiles");
+  assert.match(result.context, /Dave Batalla/);
+  assert.doesNotMatch(result.context, /basketball|actor/);
+  assert.equal(webResearchRequest("Who is Dave Batalla?").researchMode, "public_profiles");
+  assert.equal(webResearchRequest("Find a GitHub profile for Dave Batalla").researchMode, "public_profiles");
+  assert.equal(webResearchRequest("Don't search LinkedIn for Dave Batalla"), null);
+  assert.equal(webResearchRequest("Write a GitHub API function"), null);
+  assert.equal(webResearchRequest("How do I create a GitHub repository?"), null);
+  assert.doesNotThrow(() => webResearchRequest("what did u check linkedin", null));
+});
 test("worker failures remain truthful and do not fall back to model guesses", async () => {
   assert.match((await fetchWebResearch({}, config, async () => new Response("", { status: 429 }))).content, /busy/);
   assert.match((await fetchWebResearch({}, config, async () => { throw new Error("offline"); })).content, /could not be reached/);
