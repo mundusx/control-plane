@@ -24,6 +24,8 @@ test("professional follow-ups use user identity context, never an invented assis
   assert.match(result.context, /Dave Batalla/);
   assert.doesNotMatch(result.context, /basketball|actor/);
   assert.equal(webResearchRequest("Who is Dave Batalla?").researchMode, "public_profiles");
+  assert.equal(webResearchRequest("who is dave batalla?").researchMode, "public_profiles");
+  assert.equal(webResearchRequest("OSINT Dave Batalla").researchMode, "public_profiles");
   assert.equal(webResearchRequest("Find a GitHub profile for Dave Batalla").researchMode, "public_profiles");
   assert.equal(webResearchRequest("Don't search LinkedIn for Dave Batalla"), null);
   assert.equal(webResearchRequest("Write a GitHub API function"), null);

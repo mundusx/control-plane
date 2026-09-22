@@ -7,6 +7,8 @@ export function webResearchRequest(message, history = []) {
   const inspection = /\b(?:read|summari[sz]e|review|inspect|analy[sz]e|evaluate|visit|check|compare|tell|explain|learn|offer|pricing|features|about)\b/i.test(prose);
   const codeExample = /\b(?:write|generate|implement|example|sample|regex|parse|validate|mock|unit test)\b/i.test(prose) && /\b(?:code|function|script|url|link|fetch|request|html|button|example)\b/i.test(prose);
   const profileIntent = !codeExample && !urls.length && (
+    /\bosint\b/i.test(prose) ||
+    /^(?:who is|who's)\s+(?!(?:the|a|an|our|your|my|this|that)\b)[\p{L}'’-]+(?:\s+[\p{L}'’-]+){1,3}[?.!]*$/iu.test(prose) ||
     /\b(?:check|search|find|look|research|verify|profile|osint)\b[\s\S]*\b(?:linkedin|github|professional|profiles?|person|people)\b/i.test(prose) ||
     /\b(?:linkedin|github)\b[\s\S]*\b(?:profile|for|of|about)\b/i.test(prose) ||
     /\b(?:[Ww]ho is|[Ww]ho's|[Tt]ell me about|[Rr]esearch|[Ll]ook up)\s+[A-Z][\p{L}'’-]+(?:\s+[A-Z][\p{L}'’-]+){1,3}\b/u.test(prose)
