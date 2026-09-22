@@ -10,7 +10,7 @@ from http.server import ThreadingHTTPServer
 from server import Handler
 from public_read import PageText, read_public_page
 from research import pages
-from profiles import profile_queries, collect_profiles
+from profiles import profile_queries, profile_subject, collect_profiles
 
 
 class ReaderTests(unittest.TestCase):
@@ -21,12 +21,14 @@ class ReaderTests(unittest.TestCase):
         self.assertIn("site:linkedin.com/in/", queries[0][1])
         self.assertIn("site:github.com", queries[1][1])
         self.assertEqual(profile_queries("did you check linkedin?", ""), [])
+        self.assertEqual(profile_subject("what did u check linkedin", "Who is Dave Batalla? I mean the person working on MundusX and AI."), "Dave Batalla")
 
     def test_snippets_are_not_full_profiles_and_search_failures_stay_distinct(self):
         def search(query, limit):
             if "site:linkedin.com/in/" in query:
-                return json.dumps({"results": [{"url": "https://www.linkedin.com/in/example", "snippet": "Example engineer"},
-                                                {"url": "https://unrelated.test", "snippet": "Unrelated result"}]})
+                return json.dumps({"results": [{"url": "https://www.linkedin.com/in/example", "snippet": "Dave Batalla engineer"},
+                                                {"url": "https://www.linkedin.com/in/wrong", "snippet": "Dave Bautista actor"},
+                                                {"url": "https://unrelated.test", "snippet": "Dave Batalla unrelated domain"}]})
             if query.endswith(" site:github.com"):
                 raise RuntimeError("provider unavailable")
             return json.dumps({"results": []})
