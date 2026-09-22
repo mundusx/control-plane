@@ -127,7 +127,7 @@ class Coordinator:
             deadline = time.monotonic() + 1
             while not r.set(PREFIX + "admission", ticket, nx=True, px=5000):
                 if time.monotonic() >= deadline:
-                    return crawl(data)
+                    return 429, {"error": "busy"}
                 time.sleep(0.025)
             try:
                 if vector:
@@ -164,6 +164,10 @@ class Coordinator:
                     if result:
                         return self.result(result, "shared")
                     if not r.exists(PREFIX + "owner:" + job):
+                        # Publication and owner removal are atomic, but our two reads are not.
+                        result = r.get(PREFIX + "done:" + job + ":" + str(owner_token))
+                        if result:
+                            return self.result(result, "shared")
                         return crawl(data)
                     time.sleep(0.1)
                 return 429, {"error": "busy"}
