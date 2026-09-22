@@ -10,10 +10,38 @@ from http.server import ThreadingHTTPServer
 from server import Handler
 from public_read import PageText, read_public_page
 from research import pages, biography_source
-from evidence import query_variants, collect_evidence, answer_sources
+from evidence import query_variants, collect_evidence, answer_sources, person_name, matches_person
 
 
 class ReaderTests(unittest.TestCase):
+    def test_person_lookup_includes_exact_name_linkedin_and_rejects_other_people(self):
+        request = {"message": "who is dave batalla?", "researchMode": "biography"}
+        self.assertEqual(person_name(request), "dave batalla")
+        self.assertIn('"dave batalla" site:linkedin.com/in/', query_variants(request))
+        self.assertFalse(matches_person("dave batalla", "https://en.wikipedia.org/wiki/Dave_Bautista", "Dave Bautista is an actor"))
+        self.assertFalse(matches_person("dave batalla", "https://www.linkedin.com/in/another-person", "Endorsed by Dave Batalla"))
+        def search(query, limit):
+            return json.dumps({"results": [{"url": "https://www.linkedin.com/in/dave-batalla-616b1628", "snippet": "Dave Batalla developer"}]}) if "site:linkedin.com" in query else json.dumps({"results": [{"url": "https://en.wikipedia.org/wiki/Dave_Bautista", "snippet": "Actor Dave Bautista"}]})
+        evidence = collect_evidence(request, search, lambda url: None, pages)
+        self.assertEqual(len(evidence), 1)
+        self.assertIn("linkedin.com/in/dave-batalla", evidence[0][0])
+        self.assertIn("Search snippet only", evidence[0][1])
+
+    def test_no_matching_identity_does_not_generate_a_nonexistence_claim(self):
+        from research import run
+        agent = MagicMock()
+        web_tools = types.ModuleType("tools.web_tools")
+        web_tools.web_search_tool = MagicMock(return_value='{}')
+        web_tools.web_extract_tool = MagicMock()
+        run_agent = types.ModuleType("run_agent")
+        run_agent.AIAgent = agent
+        with patch.dict(sys.modules, {"tools": types.ModuleType("tools"), "tools.web_tools": web_tools, "run_agent": run_agent}):
+            result = run({"message": "who is dave batalla?", "researchMode": "biography"})
+        self.assertEqual(result["error"], "unverified_identity")
+        self.assertIn("does not mean the person does not exist", result["content"])
+        self.assertNotIn("misspelling", result["content"])
+        agent.assert_not_called()
+
     def test_broad_queries_do_not_assume_platforms_or_known_products(self):
         self.assertEqual(query_variants({"message": "what is kimi3?"}), ["kimi3", "kimi 3 official information"])
         queries = query_variants({"message": "what is muse glimmer"})

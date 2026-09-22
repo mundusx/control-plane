@@ -35,9 +35,10 @@ def run(request):
     from tools.web_tools import web_extract_tool, web_search_tool
     from run_agent import AIAgent
     from public_read import read_public_page
-    from evidence import collect_evidence, answer_sources
+    from evidence import collect_evidence, answer_sources, person_name
     from datetime import datetime, timezone
     biography = request.get("researchMode") == "biography"
+    subject = person_name(request)
     urls = request.get("urls", [])
     raw, payload = "", {}
     if urls:
@@ -50,6 +51,8 @@ def run(request):
         retrieved = collect_evidence(request, web_search_tool, read_public_page, pages)
     sources = list(dict.fromkeys(url for url, _ in retrieved))[:12]
     if not retrieved:
+        if subject:
+            return {"content": "I couldn't verify a matching public profile for " + subject + ". That does not mean the person does not exist. Can you share their company, role, location, or a profile link?", "sources": [], "error": "unverified_identity"}
         # Hermes errors are evidence, not grounds for inventing a privacy rule.
         error_text = str(payload.get("error") or "The website or web provider returned no readable content.") if isinstance(payload, dict) else "No readable content was returned."
         if "private" in raw.lower() or "internal network" in raw.lower():
@@ -78,7 +81,7 @@ def run(request):
             pass
     agent = AIAgent(model=os.environ.get("RESEARCH_MODEL", "mundusx-agnostic"),
         base_url=os.environ["RESEARCH_MODEL_URL"], api_key=os.environ["RESEARCH_MODEL_TOKEN"],
-        provider="custom", enabled_toolsets=["web"], max_iterations=5, max_tokens=1800,
+        provider="custom", enabled_toolsets=[] if subject else ["web"], max_iterations=5, max_tokens=1800,
         run_budget_seconds=90, quiet_mode=True, skip_memory=True, skip_context_files=True,
         skip_background_review=True, save_trajectories=False, load_soul_identity=False,
         tool_complete_callback=completed_tool)
@@ -90,6 +93,9 @@ def run(request):
         "Do not claim to inspect pages or features absent from the evidence. "
         "For people, use only public professional information. A matching name alone does not establish identity. "
         "Do not merge biographies of different people or repeat an earlier unsupported biography. "
+        "For a person lookup, the provided evidence has been name-filtered after broad and LinkedIn searches. "
+        "Do not replace their name with a celebrity or declare it a misspelling. Do not assert that no such "
+        "person exists or that they are not notable. If evidence is insufficient, ask for identifying context. "
         "Keep uncertain matches separate and ask for a company, role, or profile link when identity is ambiguous. "
         "Distinguish search snippets from full pages; never claim a LinkedIn profile was read if only a snippet was returned. "
         "The sources below were retrieved NOW, not evidence that any previous answer used them. "
