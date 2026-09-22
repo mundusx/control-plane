@@ -52,6 +52,12 @@ def collect_profiles(request, search, read_page, pages):
                 # Do not inject biographies of a different namesake as evidence.
                 pattern = r"\b" + r"[\s_-]+".join(re.escape(part) for part in subject.split()) + r"\b"
                 hits = [(url, text) for url, text in hits if re.search(pattern, url + " " + text, re.I)]
+                # A name mentioned in somebody else's LinkedIn profile (e.g.
+                # endorsements) is not a matching profile for that person.
+                if category == "LinkedIn":
+                    first, last = subject.split()[0].lower(), subject.split()[-1].lower()
+                    hits = [(url, text) for url, text in hits
+                            if first in urlsplit(url).path.lower() and last in urlsplit(url).path.lower()]
             # Search engines can ignore site filters; do not label unrelated
             # results as LinkedIn or GitHub evidence.
             if category in ("LinkedIn", "GitHub"):

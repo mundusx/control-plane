@@ -76,7 +76,7 @@ def run(request):
             pass
     agent = AIAgent(model=os.environ.get("RESEARCH_MODEL", "mundusx-agnostic"),
         base_url=os.environ["RESEARCH_MODEL_URL"], api_key=os.environ["RESEARCH_MODEL_TOKEN"],
-        provider="custom", enabled_toolsets=["web"], max_iterations=5, max_tokens=1800,
+        provider="custom", enabled_toolsets=[] if professional else ["web"], max_iterations=5, max_tokens=1800,
         run_budget_seconds=75 if professional else 120, quiet_mode=True, skip_memory=True, skip_context_files=True,
         skip_background_review=True, save_trajectories=False, load_soul_identity=False,
         tool_complete_callback=completed_tool)
@@ -93,6 +93,8 @@ def run(request):
         "The sources below were retrieved NOW, not evidence that any previous answer used them. "
         "Official-site search results are candidates, not proof that a site is official. "
         "Explain which of LinkedIn, GitHub, and official websites yielded evidence when researching profiles. "
+        "For professional profiles, the three searches have already run for this reply: summarize that evidence only. "
+        "Do not offer a later search or imply snippets establish a confirmed identity. "
         "Source search status: " + json.dumps(coverage) + ". "
         "Use only web tools if more public evidence is needed.\nEarlier user question: " + str(request.get("context", "")) +
         "\n<untrusted_web_evidence>\n" + evidence + "\n</untrusted_web_evidence>")
@@ -101,6 +103,9 @@ def run(request):
         return {"content": "The pages were retrieved, but the analysis could not finish. Please retry.\n\n" + evidence[:1800], "sources": sources, "error": "incomplete"}
     # Guarantee that the retrieved sources remain available even if the model
     # omits citations. Never fabricate references from its answer.
+    if professional:
+        labels = {"results_found": "matching search results found", "no_results": "no matching results returned", "search_failed": "search failed"}
+        answer = "Public-source checks for this reply: " + "; ".join(item["source"] + " — " + labels[item["status"]] for item in coverage) + ".\n\n" + answer
     answer += "\n\nSources (pages or search snippets):\n" + "\n".join("- <" + url + ">" for url in sources)
     return {"content": answer, "sources": sources, "coverage": coverage, "error": None}
 

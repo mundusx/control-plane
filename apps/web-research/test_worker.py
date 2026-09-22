@@ -26,8 +26,9 @@ class ReaderTests(unittest.TestCase):
     def test_snippets_are_not_full_profiles_and_search_failures_stay_distinct(self):
         def search(query, limit):
             if "site:linkedin.com/in/" in query:
-                return json.dumps({"results": [{"url": "https://www.linkedin.com/in/example", "snippet": "Dave Batalla engineer"},
+                return json.dumps({"results": [{"url": "https://www.linkedin.com/in/dave-batalla-example", "snippet": "Dave Batalla engineer"},
                                                 {"url": "https://www.linkedin.com/in/wrong", "snippet": "Dave Bautista actor"},
+                                                {"url": "https://www.linkedin.com/in/another-person", "snippet": "Endorsed by Dave Batalla"},
                                                 {"url": "https://unrelated.test", "snippet": "Dave Batalla unrelated domain"}]})
             if query.endswith(" site:github.com"):
                 raise RuntimeError("provider unavailable")
@@ -36,7 +37,7 @@ class ReaderTests(unittest.TestCase):
                                                        lambda url: {"url": url, "content": "Sign in to LinkedIn"}, pages)
         self.assertEqual(len(evidence), 1)
         self.assertIn("search snippet only", evidence[0][1])
-        self.assertEqual(sources, ["https://www.linkedin.com/in/example"])
+        self.assertEqual(sources, ["https://www.linkedin.com/in/dave-batalla-example"])
         self.assertEqual([item["status"] for item in coverage], ["results_found", "search_failed", "no_results"])
 
     def test_visible_text_and_links(self):
