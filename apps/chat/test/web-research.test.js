@@ -15,6 +15,15 @@ test("routes natural website questions and contextual follow-ups", () => {
 });
 
 const config = configFromEnv({ MUNDUSX_WEB_RESEARCH_URL: "http://worker", MUNDUSX_WEB_RESEARCH_TOKEN: "test-token" });
+test("unfamiliar factual questions research without a known brand or freshness keyword", () => {
+  for (const message of ["what is kimi3?", "what is kimi 3", "what is muse glimmer", "search for muse glimmer", "explain quantum computing", "what is NovaEngine9?", "Have you heard of QubitFox?", "what are the newest battery technologies?"]) {
+    assert.equal(webResearchRequest(message).researchMode, "factual");
+  }
+  assert.equal(webResearchRequest("what is 2 + 2?"), null);
+  assert.equal(webResearchRequest("what is your name?"), null);
+  assert.equal(webResearchRequest("what is the weather in Manila today?"), null);
+  assert.equal(webResearchRequest("don't search what is kimi3?"), null);
+});
 test("professional follow-ups use user identity context, never an invented assistant biography", () => {
   const result = webResearchRequest("what did u check linkedin", [
     { role: "user", content: "Who is Dave Batalla?" },
@@ -30,7 +39,7 @@ test("professional follow-ups use user identity context, never an invented assis
   assert.equal(webResearchRequest("Find a GitHub profile for Dave Batalla").researchMode, "public_profiles");
   assert.equal(webResearchRequest("Don't search LinkedIn for Dave Batalla"), null);
   assert.equal(webResearchRequest("Write a GitHub API function"), null);
-  assert.equal(webResearchRequest("How do I create a GitHub repository?"), null);
+  assert.equal(webResearchRequest("How do I create a GitHub repository?").researchMode, "factual");
   assert.doesNotThrow(() => webResearchRequest("what did u check linkedin", null));
 });
 test("worker failures remain truthful and do not fall back to model guesses", async () => {
@@ -56,4 +65,23 @@ test("both chat paths retrieve before answering without a project or device", as
   assert.match(wire, /Retrieved answer/);
   assert.match(wire, /\[DONE\]/);
   assert.equal(calls, 2);
+});
+
+test("general question streams wait for web retrieval and never silently guess on failure", async () => {
+  for (const message of ["what is kimi 3", "what is muse glimmer"]) {
+    let calls = 0;
+    let wire = "";
+    const response = { writeHead() {}, flushHeaders() {}, write(value) { wire += value; }, end(value) { wire += value; } };
+    const result = await streamChatTurn(response, { message, toolMode: true }, config, async (url, options) => {
+      assert.equal(url, "http://worker/research");
+      assert.equal(JSON.parse(options.body).message, message);
+      assert.equal(JSON.parse(options.body).researchMode, "factual");
+      calls++;
+      return Response.json({ content: "I could not verify this because retrieval failed.", sources: [], error: "retrieval_failed" });
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.tool, "web_research");
+    assert.match(wire, /retrieval failed/);
+    assert.doesNotMatch(wire, /does not exist|mid-2024/);
+  }
 });

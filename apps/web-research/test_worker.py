@@ -10,45 +10,37 @@ from http.server import ThreadingHTTPServer
 from server import Handler
 from public_read import PageText, read_public_page
 from research import pages, biography_source
-from profiles import profile_queries, profile_subject, collect_profiles
+from evidence import query_variants, collect_evidence, answer_sources
 
 
 class ReaderTests(unittest.TestCase):
-    def test_github_mentions_are_not_profiles_or_biography_sources(self):
-        repo = "https://github.com/theneworacle/theneworacle.github.io/pull/7742"
-        self.assertFalse(biography_source(repo))
-        self.assertTrue(biography_source("https://www.wtatennis.com/players/320731/alexandra-eala"))
-        def search(query, limit):
-            return json.dumps({"results": [{"url": repo, "snippet": "Alex Eala biography"}]}) if query.endswith(" site:github.com") else '{}'
-        evidence, sources, coverage = collect_profiles({"message": "OSINT Alex Eala"}, search, lambda url: None, pages)
-        self.assertEqual(sources, [])
-        self.assertEqual(coverage[1]["status"], "no_results")
+    def test_broad_queries_do_not_assume_platforms_or_known_products(self):
+        self.assertEqual(query_variants({"message": "what is kimi3?"}), ["kimi3", "kimi 3 official information"])
+        queries = query_variants({"message": "what is muse glimmer"})
+        self.assertTrue(all("muse glimmer" in query for query in queries))
+        self.assertFalse(any("site:" in query or "github" in query or "linkedin" in query for query in queries))
+        self.assertIn("Dave Batalla", query_variants({"message": "did you check linkedin", "context": "Who is Dave Batalla?"})[0])
 
-    def test_profile_followup_searches_three_sources(self):
-        queries = profile_queries("what did u check linkedin", "Who is Dave Batalla?")
-        self.assertEqual(len(queries), 3)
-        self.assertTrue(all("Dave Batalla" in query for _, query in queries))
-        self.assertIn("site:linkedin.com/in/", queries[0][1])
-        self.assertIn("site:github.com", queries[1][1])
-        self.assertEqual(profile_queries("did you check linkedin?", ""), [])
-        self.assertEqual(profile_subject("what did u check linkedin", "Who is Dave Batalla? I mean the person working on MundusX and AI."), "Dave Batalla")
-
-    def test_snippets_are_not_full_profiles_and_search_failures_stay_distinct(self):
+    def test_broad_retrieval_reads_pages_and_preserves_snippet_labels(self):
         def search(query, limit):
-            if "site:linkedin.com/in/" in query:
-                return json.dumps({"results": [{"url": "https://www.linkedin.com/in/dave-batalla-example", "snippet": "Dave Batalla engineer"},
-                                                {"url": "https://www.linkedin.com/in/wrong", "snippet": "Dave Bautista actor"},
-                                                {"url": "https://www.linkedin.com/in/another-person", "snippet": "Endorsed by Dave Batalla"},
-                                                {"url": "https://unrelated.test", "snippet": "Dave Batalla unrelated domain"}]})
-            if query.endswith(" site:github.com"):
-                raise RuntimeError("provider unavailable")
-            return json.dumps({"results": []})
-        evidence, sources, coverage = collect_profiles({"message": "Find Dave Batalla on LinkedIn"}, search,
-                                                       lambda url: {"url": url, "content": "Sign in to LinkedIn"}, pages)
-        self.assertEqual(len(evidence), 1)
-        self.assertIn("search snippet only", evidence[0][1])
-        self.assertEqual(sources, ["https://www.linkedin.com/in/dave-batalla-example"])
-        self.assertEqual([item["status"] for item in coverage], ["results_found", "search_failed", "no_results"])
+            return json.dumps({"results": [{"url": "https://creator.test/release", "snippet": "Creator announcement"},
+                {"url": "https://news.test/report", "snippet": "Independent report"}]})
+        evidence = collect_evidence({"message": "what is NewModel9?"}, search,
+            lambda url: {"content": "Full current release notes"} if "creator" in url else None, pages)
+        self.assertEqual(len(evidence), 2)
+        self.assertIn("Full current release notes", evidence[0][1])
+        self.assertIn("Search snippet only", evidence[1][1])
+        self.assertEqual(collect_evidence({"message": "what is NewModel9?"}, lambda *a, **k: '{}', lambda url: None, pages), [])
+
+    def test_biography_excludes_github_pull_request_mentions(self):
+        url = "https://github.com/theneworacle/site/pull/7742"
+        search = lambda *a, **k: json.dumps({"results": [{"url": url, "snippet": "Alex Eala"}]})
+        self.assertEqual(collect_evidence({"message": "who is alex eala", "researchMode": "biography"}, search, lambda url: None, pages), [])
+
+    def test_final_sources_prioritize_citations_and_limit_to_three_observed_urls(self):
+        urls = [f"https://source{i}.test" for i in range(5)]
+        self.assertEqual(answer_sources("[evidence](https://source4.test) [invented](https://unknown.test)", urls), [urls[4]])
+        self.assertEqual(len(answer_sources("No links", urls)), 3)
 
     def test_visible_text_and_links(self):
         parser = PageText("https://example.com/")

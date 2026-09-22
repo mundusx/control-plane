@@ -25,6 +25,13 @@ export function webResearchRequest(message, history = []) {
   if (biographyIntent) return { message: text, urls: [], researchMode: "biography" };
   if (urls.length && (!codeExample || /\b(?:read|inspect|visit|review|analy[sz]e|evaluate)\b/i.test(prose)) &&
       (inspection || /^https?:\/\/\S+$/i.test(prose))) return { message: text, urls };
+  // Default factual questions to evidence gathering, including unfamiliar
+  // product names. Do not require a known brand or the word "latest".
+  const factual = /^(?:what\b|who\b|is\b|are\b|does\b|when\b|where\b|why\b|how\b|explain\b|tell me about|do you know|have you heard of|search\b|look up\b|research\b|find (?:information|details|sources)\b|is .+ (?:released|available|real)|has .+ (?:launched|released))\b/i.test(prose);
+  const localTask = /\b(?:weather|weaather|forecast|temperature|rain|snow|humidity|wind|calculate|equation|square root|your name|your mission|your vision|created you)\b/i.test(prose)
+    || /\b(?:this|following|above|my)\s+(?:code|function|script|error|snippet|text|paragraph|document)\b/i.test(prose)
+    || /^(?:what(?:'s| is| are))\s+(?:\d|my |this |that |your )/i.test(prose);
+  if (factual && !codeExample && !localTask) return { message: text, urls: [], researchMode: "factual" };
   const changing = /\b(?:news|prices?|stocks?|crypto|scores?|results?|matches|election|release|version|schedule|availability|traffic|status|ranking|rates?)\b/i.test(prose)
     && /\b(?:today|tonight|now|currently|latest|live|breaking|recent|this week|this month|as of)\b/i.test(prose);
   if (!codeExample && !/\b(?:weather|forecast|temperature|rain|snow|humidity|wind)\b/i.test(prose) &&
@@ -34,7 +41,7 @@ export function webResearchRequest(message, history = []) {
   const previous = [...(Array.isArray(history) ? history : [])].reverse().find(turn => turn?.role === "user");
   if (previous && /\b(?:it|its|they|their|that|this|those|more|also|pricing|features|contact)\b/i.test(prose) && !codeExample && text.length < 400) {
     const prior = webResearchRequest(previous.content);
-    if (prior?.urls.length) return { message: text, urls: prior.urls, context: String(previous.content).slice(0, 4000) };
+    if (prior) return { message: text, urls: prior.urls, researchMode: prior.researchMode, context: String(previous.content).slice(0, 4000) };
   }
   return null;
 }

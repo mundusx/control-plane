@@ -5,5 +5,5 @@ RUN git clone https://github.com/NousResearch/hermes-agent.git /opt/hermes && cd
 ENV PATH="/opt/hermes/.venv/bin:$PATH" PYTHONPATH=/opt/hermes PYTHONUNBUFFERED=1
 RUN uv pip install --python /opt/hermes/.venv/bin/python ddgs==9.16.0
 WORKDIR /app
-COPY server.py research.py public_read.py profiles.py ./
+COPY server.py research.py public_read.py evidence.py ./
 CMD ["python", "server.py"]

@@ -35,31 +35,21 @@ def run(request):
     from tools.web_tools import web_extract_tool, web_search_tool
     from run_agent import AIAgent
     from public_read import read_public_page
-    from profiles import collect_profiles, profile_queries
-    professional = request.get("researchMode") == "public_profiles"
+    from evidence import collect_evidence, answer_sources
+    from datetime import datetime, timezone
     biography = request.get("researchMode") == "biography"
-    coverage = []
-    if professional:
-        if not profile_queries(request["message"], request.get("context", "")):
-            return {"content": "Whose public profiles should I check? Please give their name and, if known, company or role so I don't confuse people with the same name.", "sources": [], "error": None}
-        retrieved, sources, coverage = collect_profiles(request, web_search_tool, read_public_page, pages)
-        raw = ""
-        payload = {}
     urls = request.get("urls", [])
-    if not professional:
+    raw, payload = "", {}
+    if urls:
         direct = [page for url in urls if (page := read_public_page(url))]
         missing = [url for url in urls if not any(page["url"] == url for page in direct)]
-        query = request["message"] + (" biography" if biography else "")
-        raw = (asyncio.run(web_extract_tool(missing, char_limit=10000)) if missing else json.dumps({"results": direct})) if urls else web_search_tool(query, limit=5)
+        raw = asyncio.run(web_extract_tool(missing, char_limit=10000)) if missing else json.dumps({"results": direct})
         payload = json.loads(raw)
         retrieved = list(dict.fromkeys(list(pages({"results": direct})) + list(pages(payload))))
-        if biography:
-            retrieved = [(url, text) for url, text in retrieved if biography_source(url)]
-        sources = list(dict.fromkeys(url for url, _ in retrieved))[:12]
+    else:
+        retrieved = collect_evidence(request, web_search_tool, read_public_page, pages)
+    sources = list(dict.fromkeys(url for url, _ in retrieved))[:12]
     if not retrieved:
-        if professional:
-            status = "; ".join(item["source"] + ": " + item["status"].replace("_", " ") for item in coverage)
-            return {"content": "I couldn't verify a matching public professional profile. " + status + ". This does not mean the person has no profile. Share a profile link, company, or role to narrow the search.", "sources": [], "coverage": coverage, "error": "retrieval_failed"}
         # Hermes errors are evidence, not grounds for inventing a privacy rule.
         error_text = str(payload.get("error") or "The website or web provider returned no readable content.") if isinstance(payload, dict) else "No readable content was returned."
         if "private" in raw.lower() or "internal network" in raw.lower():
@@ -70,7 +60,7 @@ def run(request):
             error_text = "The website or provider timed out."
         else:
             error_text = "The website or web provider returned no readable content."
-        return {"content": "I couldn't retrieve this page. " + error_text + " You can retry or provide its text.", "sources": [], "error": "retrieval_failed"}
+        return {"content": "I couldn't retrieve enough evidence to verify this. " + error_text + " You can retry or provide its text.", "sources": [], "error": "retrieval_failed"}
     evidence = "\n\n".join("Source: " + url + "\n" + text for url, text in retrieved)[:36000]
     emit({"event": "retrieved", "sources": sources, "excerpt": retrieved[0][1][:1800]})
     def completed_tool(call_id, name, args, result):
@@ -88,8 +78,8 @@ def run(request):
             pass
     agent = AIAgent(model=os.environ.get("RESEARCH_MODEL", "mundusx-agnostic"),
         base_url=os.environ["RESEARCH_MODEL_URL"], api_key=os.environ["RESEARCH_MODEL_TOKEN"],
-        provider="custom", enabled_toolsets=[] if professional else ["web"], max_iterations=5, max_tokens=1800,
-        run_budget_seconds=75 if professional else 120, quiet_mode=True, skip_memory=True, skip_context_files=True,
+        provider="custom", enabled_toolsets=["web"], max_iterations=5, max_tokens=1800,
+        run_budget_seconds=90, quiet_mode=True, skip_memory=True, skip_context_files=True,
         skip_background_review=True, save_trajectories=False, load_soul_identity=False,
         tool_complete_callback=completed_tool)
     result = agent.run_conversation(user_message=request["message"], system_message=
@@ -104,14 +94,18 @@ def run(request):
         "Distinguish search snippets from full pages; never claim a LinkedIn profile was read if only a snippet was returned. "
         "The sources below were retrieved NOW, not evidence that any previous answer used them. "
         "Official-site search results are candidates, not proof that a site is official. "
-        + ("This is an explicit professional-profile search. Explain which requested source categories yielded evidence. "
-           "The three searches have already run for this reply: summarize that evidence only. "
-           "Do not offer a later search or imply snippets establish a confirmed identity. "
-           "Source search status: " + json.dumps(coverage) + ". " if professional else
-           "Answer the actual question directly, with no source-check checklist or LinkedIn/GitHub commentary. "
-           "For biographies, prefer official subject profiles, relevant institutions and reliable biographical sources. "
-           "A repository, issue or pull request mentioning someone is not their profile. "
-           "Only state precise rankings, dates or statistics when retrieved evidence supports them. ") +
+        "Today is " + datetime.now(timezone.utc).date().isoformat() + ". "
+        "Answer directly without a search-process checklist or fixed platform categories. "
+        "Choose up to THREE relevant credible sources, favoring the actual creator, official release notes, "
+        "relevant institutions and independent reporting over aggregators or lookalike domains. "
+        "A name match, search ranking, or a site's claim to be official does not prove authority. "
+        "Cross-check uncertain or consequential factual claims using additional web searches when needed. "
+        "Your training cutoff is not today's date. Never infer that a product does not exist merely "
+        "because it is absent from memory or search results. Say what you could not verify. "
+        "Do not silently identify an ambiguous spelling: explain a likely interpretation and cite evidence. "
+        "Only state rankings, release dates, prices or statistics supported by retrieved evidence. "
+        "If sources conflict, explain the uncertainty rather than choosing a claim without support. "
+        "Cite at most three source URLs actually retrieved in this run using Markdown links. "
         "Use only web tools if more public evidence is needed.\nEarlier user question: " + str(request.get("context", "")) +
         "\n<untrusted_web_evidence>\n" + evidence + "\n</untrusted_web_evidence>")
     answer = str(result.get("final_response") or "").strip()
@@ -119,11 +113,9 @@ def run(request):
         return {"content": "The pages were retrieved, but the analysis could not finish. Please retry.\n\n" + evidence[:1800], "sources": sources, "error": "incomplete"}
     # Guarantee that the retrieved sources remain available even if the model
     # omits citations. Never fabricate references from its answer.
-    if professional:
-        labels = {"results_found": "matching search results found", "no_results": "no matching results returned", "search_failed": "search failed"}
-        answer = "Public-source checks for this reply: " + "; ".join(item["source"] + " — " + labels[item["status"]] for item in coverage) + ".\n\n" + answer
-    answer += "\n\nSources (pages or search snippets):\n" + "\n".join("- <" + url + ">" for url in sources)
-    return {"content": answer, "sources": sources, "coverage": coverage, "error": None}
+    sources = answer_sources(answer, sources)
+    answer += "\n\nSources:\n" + "\n".join("- <" + url + ">" for url in sources)
+    return {"content": answer, "sources": sources, "error": None}
 
 
 if __name__ == "__main__":
