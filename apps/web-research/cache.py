@@ -9,7 +9,7 @@ import unicodedata
 import uuid
 
 PREFIX = "research:v2:"
-TTL = 300
+TTL = 600
 LEASE = 190
 WAIT = 25
 RELEASE = "if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) end return 0"
@@ -34,7 +34,7 @@ return 0
 PUBLISH = """
 if redis.call('get',KEYS[1]) == ARGV[1] then
  redis.call('set',KEYS[2],ARGV[2],'EX',5)
- if ARGV[3] == 'yes' then redis.call('set',KEYS[3],ARGV[2],'EX',300) end
+ if ARGV[3] == 'yes' then redis.call('set',KEYS[3],ARGV[2],'EX',ARGV[4]) end
  redis.call('del',KEYS[1])
  return 1
 end
@@ -194,7 +194,7 @@ class Coordinator:
             good = status == 200 and not body.get("error") and bool(body.get("sources"))
             # Failed responses are delivered only to existing waiters, never cached for reuse.
             r.eval(PUBLISH, 3, PREFIX + "owner:" + job, PREFIX + "done:" + job + ":" + ticket,
-                   PREFIX + "result:" + job, ticket, json.dumps(completed), "yes" if good and public else "no")
+                   PREFIX + "result:" + job, ticket, json.dumps(completed), "yes" if good and public else "no", TTL)
             return status, {**body, "_research_cache": "fresh"}
         except Exception:
             # Never repeat an already completed (and possibly billable) crawl.
