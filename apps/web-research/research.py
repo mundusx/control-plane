@@ -3,6 +3,12 @@ import contextlib
 import json
 import os
 import sys
+from urllib.parse import urlsplit
+
+
+def biography_source(url):
+    host = (urlsplit(url).hostname or "").lower()
+    return not (host in ("github.com", "www.github.com") and len(urlsplit(url).path.strip("/").split("/")) > 1)
 
 
 def emit(event):
@@ -31,6 +37,7 @@ def run(request):
     from public_read import read_public_page
     from profiles import collect_profiles, profile_queries
     professional = request.get("researchMode") == "public_profiles"
+    biography = request.get("researchMode") == "biography"
     coverage = []
     if professional:
         if not profile_queries(request["message"], request.get("context", "")):
@@ -42,9 +49,12 @@ def run(request):
     if not professional:
         direct = [page for url in urls if (page := read_public_page(url))]
         missing = [url for url in urls if not any(page["url"] == url for page in direct)]
-        raw = (asyncio.run(web_extract_tool(missing, char_limit=10000)) if missing else json.dumps({"results": direct})) if urls else web_search_tool(request["message"], limit=5)
+        query = request["message"] + (" biography" if biography else "")
+        raw = (asyncio.run(web_extract_tool(missing, char_limit=10000)) if missing else json.dumps({"results": direct})) if urls else web_search_tool(query, limit=5)
         payload = json.loads(raw)
         retrieved = list(dict.fromkeys(list(pages({"results": direct})) + list(pages(payload))))
+        if biography:
+            retrieved = [(url, text) for url, text in retrieved if biography_source(url)]
         sources = list(dict.fromkeys(url for url, _ in retrieved))[:12]
     if not retrieved:
         if professional:
@@ -69,6 +79,8 @@ def run(request):
         try:
             extra = list(pages(json.loads(result) if isinstance(result, str) else result))
             for url, _ in extra:
+                if biography and not biography_source(url):
+                    continue
                 if url not in sources and len(sources) < 12:
                     sources.append(url)
             emit({"event": "retrieved", "sources": sources, "excerpt": retrieved[0][1][:1800]})
@@ -92,10 +104,14 @@ def run(request):
         "Distinguish search snippets from full pages; never claim a LinkedIn profile was read if only a snippet was returned. "
         "The sources below were retrieved NOW, not evidence that any previous answer used them. "
         "Official-site search results are candidates, not proof that a site is official. "
-        "Explain which of LinkedIn, GitHub, and official websites yielded evidence when researching profiles. "
-        "For professional profiles, the three searches have already run for this reply: summarize that evidence only. "
-        "Do not offer a later search or imply snippets establish a confirmed identity. "
-        "Source search status: " + json.dumps(coverage) + ". "
+        + ("This is an explicit professional-profile search. Explain which requested source categories yielded evidence. "
+           "The three searches have already run for this reply: summarize that evidence only. "
+           "Do not offer a later search or imply snippets establish a confirmed identity. "
+           "Source search status: " + json.dumps(coverage) + ". " if professional else
+           "Answer the actual question directly, with no source-check checklist or LinkedIn/GitHub commentary. "
+           "For biographies, prefer official subject profiles, relevant institutions and reliable biographical sources. "
+           "A repository, issue or pull request mentioning someone is not their profile. "
+           "Only state precise rankings, dates or statistics when retrieved evidence supports them. ") +
         "Use only web tools if more public evidence is needed.\nEarlier user question: " + str(request.get("context", "")) +
         "\n<untrusted_web_evidence>\n" + evidence + "\n</untrusted_web_evidence>")
     answer = str(result.get("final_response") or "").strip()

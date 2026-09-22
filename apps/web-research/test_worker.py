@@ -9,11 +9,21 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from server import Handler
 from public_read import PageText, read_public_page
-from research import pages
+from research import pages, biography_source
 from profiles import profile_queries, profile_subject, collect_profiles
 
 
 class ReaderTests(unittest.TestCase):
+    def test_github_mentions_are_not_profiles_or_biography_sources(self):
+        repo = "https://github.com/theneworacle/theneworacle.github.io/pull/7742"
+        self.assertFalse(biography_source(repo))
+        self.assertTrue(biography_source("https://www.wtatennis.com/players/320731/alexandra-eala"))
+        def search(query, limit):
+            return json.dumps({"results": [{"url": repo, "snippet": "Alex Eala biography"}]}) if query.endswith(" site:github.com") else '{}'
+        evidence, sources, coverage = collect_profiles({"message": "OSINT Alex Eala"}, search, lambda url: None, pages)
+        self.assertEqual(sources, [])
+        self.assertEqual(coverage[1]["status"], "no_results")
+
     def test_profile_followup_searches_three_sources(self):
         queries = profile_queries("what did u check linkedin", "Who is Dave Batalla?")
         self.assertEqual(len(queries), 3)

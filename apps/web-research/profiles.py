@@ -63,6 +63,10 @@ def collect_profiles(request, search, read_page, pages):
             if category in ("LinkedIn", "GitHub"):
                 domain = "linkedin.com" if category == "LinkedIn" else "github.com"
                 hits = [(url, text) for url, text in hits if urlsplit(url).hostname == domain or (urlsplit(url).hostname or "").endswith("." + domain)]
+                if category == "GitHub":
+                    # Repositories, issues and pull requests mentioning a name
+                    # are not evidence of that person's GitHub profile.
+                    hits = [(url, text) for url, text in hits if len(urlsplit(url).path.strip("/").split("/")) == 1 and urlsplit(url).path.strip("/")]
             return category, hits, "results_found" if hits else "no_results"
         except Exception:
             return category, [], "search_failed"

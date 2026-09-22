@@ -8,10 +8,8 @@ export function webResearchRequest(message, history = []) {
   const codeExample = /\b(?:write|generate|implement|example|sample|regex|parse|validate|mock|unit test)\b/i.test(prose) && /\b(?:code|function|script|url|link|fetch|request|html|button|example)\b/i.test(prose);
   const profileIntent = !codeExample && !urls.length && (
     /\bosint\b/i.test(prose) ||
-    /^(?:who is|who's)\s+(?!(?:the|a|an|our|your|my|this|that)\b)[\p{L}'’-]+(?:\s+[\p{L}'’-]+){1,3}[?.!]*$/iu.test(prose) ||
     /\b(?:check|search|find|look|research|verify|profile|osint)\b[\s\S]*\b(?:linkedin|github|professional|profiles?|person|people)\b/i.test(prose) ||
-    /\b(?:linkedin|github)\b[\s\S]*\b(?:profile|for|of|about)\b/i.test(prose) ||
-    /\b(?:[Ww]ho is|[Ww]ho's|[Tt]ell me about|[Rr]esearch|[Ll]ook up)\s+[A-Z][\p{L}'’-]+(?:\s+[A-Z][\p{L}'’-]+){1,3}\b/u.test(prose)
+    /\b(?:linkedin|github)\b[\s\S]*\b(?:profile|for|of|about)\b/i.test(prose)
   );
   if (profileIntent) {
     // User turns supply identity context. Assistant guesses are not evidence
@@ -20,6 +18,11 @@ export function webResearchRequest(message, history = []) {
     const context = userTurns.map(turn => String(turn.content || "").slice(0, 1000)).join("\n").slice(-4000);
     return { message: text, urls: [], researchMode: "public_profiles", context };
   }
+  const biographyIntent = !codeExample && !urls.length && (
+    /^(?:who is|who's)\s+(?!(?:the|a|an|our|your|my|this|that)\b)[\p{L}'’-]+(?:\s+[\p{L}'’-]+){1,3}[?.!]*$/iu.test(prose) ||
+    /\b(?:[Ww]ho is|[Ww]ho's|[Tt]ell me about|[Rr]esearch|[Ll]ook up)\s+[A-Z][\p{L}'’-]+(?:\s+[A-Z][\p{L}'’-]+){1,3}\b/u.test(prose)
+  );
+  if (biographyIntent) return { message: text, urls: [], researchMode: "biography" };
   if (urls.length && (!codeExample || /\b(?:read|inspect|visit|review|analy[sz]e|evaluate)\b/i.test(prose)) &&
       (inspection || /^https?:\/\/\S+$/i.test(prose))) return { message: text, urls };
   const changing = /\b(?:news|prices?|stocks?|crypto|scores?|results?|matches|election|release|version|schedule|availability|traffic|status|ranking|rates?)\b/i.test(prose)
