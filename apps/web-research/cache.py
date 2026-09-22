@@ -8,7 +8,7 @@ import time
 import unicodedata
 import uuid
 
-PREFIX = "research:v1:"
+PREFIX = "research:v2:"
 TTL = 300
 LEASE = 190
 WAIT = 25
@@ -43,21 +43,28 @@ return 0
 
 
 def normalized(message):
-    text = unicodedata.normalize("NFKC", message).casefold()
+    text = unicodedata.normalize("NFKC", message).casefold().replace("’", "'")
+    text = re.sub(r"\s+", " ", text).strip().rstrip("?!. ")
+    text = re.sub(r"^(who|what)'s\s+", r"\1 is ", text)
+    # A trailing underscore on a multi-word person lookup is stray punctuation.
+    # Preserve underscores in handles, URLs and technical identifiers.
+    if re.fullmatch(r"who is [^\W\d_][^\W\d_'-]*(?:['-][^\W\d_]+)*(?: [^\W\d_]+(?:['-][^\W\d_]+)*){1,3}_+", text):
+        text = text.rstrip("_")
     text = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", text)
-    return re.sub(r"\s+", " ", text).strip().rstrip("?!.")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def signature(message):
     """Conservative semantic guard: keep all topic, version and constraint words."""
     text = normalized(message)
     text = re.sub(r"^(?:please\s+)?(?:what\s+(?:is|are)|who\s+is|tell\s+me\s+about|explain|describe)\s+", "", text)
-    return " ".join(sorted(re.findall(r"\w+", text)))
+    # Keep word order and technical punctuation: C, C++, and C# differ.
+    return text
 
 
 def shareable(data):
     # Only short, standalone public discovery queries may cross user boundaries.
-    message = data["message"]
+    message = normalized(data["message"])
     return (not data.get("context") and not data.get("urls") and len(message) <= 200
             and bool(re.match(r"^(?:please\s+)?(?:what\s+(?:is|are)|who\s+is|tell\s+me\s+about|explain|describe)\b", message, re.I))
             and not re.search(r"\b(?:my|our|mine|me|us|now|today|latest|live|refresh|again|password|token|secret|email)\b|https?://|@", re.sub(r"^tell me about", "", message, flags=re.I), re.I))

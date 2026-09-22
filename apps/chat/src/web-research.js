@@ -1,6 +1,13 @@
 // Public website questions work independently of local Projects and device state.
 export function webResearchRequest(message, history = []) {
-  const text = String(message || "").trim();
+  let text = String(message || "").trim();
+  // Normalize natural person questions before routing as well as cache lookup.
+  // Do not strip underscores from handles, code, or URLs.
+  const personQuestion = text.normalize("NFKC").replace(/\s+/gu, " ")
+    .replace(/^who['’]s\s+/iu, "who is ");
+  if (/^who is [\p{L}]+(?:['’-][\p{L}]+)*(?: [\p{L}]+(?:['’-][\p{L}]+)*){1,3}_*[?.!]*$/iu.test(personQuestion)) {
+    text = personQuestion.replace(/_+(?=[?.!]*$)/u, "");
+  }
   if (!text || /\b(?:do not|don't|without|no)\s+(?:browse|browsing|search|searching|web access)\b/i.test(text)) return null;
   const prose = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`]*`/g, "");
   const urls = [...new Set((prose.match(/https?:\/\/[^\s<>"']+/gi) || []).map(url => url.replace(/[),.;!?]+$/, "")))].slice(0, 4);

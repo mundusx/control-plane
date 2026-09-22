@@ -11,7 +11,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from cache import Coordinator
+from cache import Coordinator, PREFIX
 
 slots = threading.BoundedSemaphore(2)
 coordinator = Coordinator.configured()
@@ -40,7 +40,7 @@ class Handler(BaseHTTPRequestHandler):
                 persistence = client.config_get("save", "appendonly") if connected else {}
                 return self.send(200, {"redis": connected, "persistence": persistence,
                     "semantic_ready": bool(getattr(getattr(coordinator.embed, "__self__", None), "model", None)),
-                    "active": client.zcard("research:v1:active") if connected else 0})
+                    "active": client.zcard(PREFIX + "active") if connected else 0})
             except Exception:
                 return self.send(200, {"redis": False})
         ready = all(os.environ.get(key) for key in ("WEB_RESEARCH_TOKEN", "RESEARCH_MODEL_URL", "RESEARCH_MODEL_TOKEN"))

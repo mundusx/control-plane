@@ -39,6 +39,21 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(all(item[1]["content"] == ANSWER[1]["content"] for item in results))
         self.assertEqual(self.redis.zcard(PREFIX + "active"), 0)
 
+    def test_person_punctuation_case_spacing_and_contractions_share_cache(self):
+        crawl = Mock(return_value=ANSWER)
+        for message in ["who is alex eala?", "who is alex eala_?", " WHO IS Alex   Eala__?! ", "who’s alex eala?", "ｗｈｏ is alex eala？"]:
+            self.coordinator.run({"message": message, "researchMode": "biography"}, crawl)
+        self.assertEqual(crawl.call_count, 1)
+
+    def test_normalization_does_not_erase_identity_or_technical_meaning(self):
+        for left, right in [("who is alex eala", "who is alex ealla"),
+                            ("what is C++", "what is C"), ("what is C#", "what is C"),
+                            ("what is model 3.5", "what is model 35"),
+                            ("what is user_name_", "what is user_name"),
+                            ("what is alice following bob", "what is bob following alice")]:
+            self.assertNotEqual(signature(left), signature(right))
+        self.assertEqual(signature("what’s kimi3?"), signature("what is kimi 3"))
+
     def test_semantic_match_preserves_intent_and_versions(self):
         crawl = Mock(return_value=ANSWER)
         self.coordinator.run(self.query, crawl)

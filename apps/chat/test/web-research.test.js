@@ -3,6 +3,17 @@ import assert from "node:assert/strict";
 import { webResearchRequest, fetchWebResearch } from "../src/web-research.js";
 import { streamChatTurn, submitChatTurn, configFromEnv } from "../src/main.js";
 
+test("person lookup normalizes stray trailing underscores, spacing, and contractions before routing", () => {
+  for (const message of ["who is alex eala_?", "who is alex eala__?!", "who’s alex eala?", "who   is alex   eala?", "ｗｈｏ is alex eala？"]) {
+    const request = webResearchRequest(message);
+    assert.equal(request.researchMode, "biography");
+    assert.match(request.message, /^who is alex eala[?.!]*$/u);
+  }
+  assert.equal(webResearchRequest("what is user_name_?").message, "what is user_name_?");
+  assert.equal(webResearchRequest("what is C++?").message, "what is C++?");
+  assert.equal(webResearchRequest("who is alex_eala_?").message, "who is alex_eala_?");
+});
+
 test("routes natural website questions and contextual follow-ups", () => {
   const question = "what can u tell from https://mundusx.ai/";
   assert.deepEqual(webResearchRequest(question).urls, ["https://mundusx.ai/"]);
