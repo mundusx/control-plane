@@ -6264,11 +6264,35 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         }),
         ...local.filter((item) => !remoteIds.has(item.conversationId || item.id)),
       ].slice(0, 50);
-      localStorage.setItem(historyKey, JSON.stringify(merged));
-      if (!activeHistoryId && merged.length) {
-        activeHistoryId = merged[0].conversationId || merged[0].id;
+      const retained = await retainRestorableHistory(merged);
+      const checkedIds = new Set(merged.map((item) => item.conversationId || item.id));
+      retained.unshift(...readHistory().filter((item) => !checkedIds.has(item.conversationId || item.id)));
+      localStorage.setItem(historyKey, JSON.stringify(retained));
+      if (!activeHistoryId && retained.length) {
+        activeHistoryId = retained[0].conversationId || retained[0].id;
         localStorage.setItem(conversationIdKey, activeHistoryId);
       }
+    }
+
+    async function retainRestorableHistory(items) {
+      const retained = [];
+      for (let offset = 0; offset < items.length; offset += 4) {
+        const batch = await Promise.all(items.slice(offset, offset + 4).map(async (item) => {
+          const id = item.conversationId || item.id;
+          if (readCachedConversation(id).length || conversationStreamStates.has(id)) return item;
+          try {
+            const turns = await fetchConversationMessages(id, 1);
+            if (turns.length || readCachedConversation(id).length || conversationStreamStates.has(id)) return item;
+            localStorage.removeItem(conversationCachePrefix + id);
+            return null;
+          } catch {
+            // An outage cannot prove that a conversation is empty.
+            return item;
+          }
+        }));
+        retained.push(...batch.filter(Boolean));
+      }
+      return retained;
     }
 
     function readHistory() {
@@ -6369,10 +6393,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       clearConversation();
 
       let turns = [];
+      let historyUnavailable = false;
       try {
         turns = await fetchConversationMessages(conversationId);
       } catch {
-        turns = [];
+        historyUnavailable = true;
       }
       if (loadToken !== activeHistoryLoadToken || activeHistoryId !== conversationId) return;
       if (!turns.length) {
@@ -6386,8 +6411,17 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           renderStoredTurn(turn);
         }
       } else {
-        addMessage(item.title || "Untitled conversation", "user");
-        addMessage("This conversation was not saved in the backend yet. Shallow tool results and older local-only items can only restore from this browser cache.", "assistant");
+        if (historyUnavailable) {
+          loadingHistoryConversationId = null;
+          setStatus("error", "History temporarily unavailable. Please retry.");
+          return;
+        }
+        if (!conversationStreamStates.has(conversationId)) {
+          localStorage.removeItem(conversationCachePrefix + conversationId);
+          writeHistory(readHistory().filter((entry) => (entry.conversationId || entry.id) !== conversationId));
+          newChatEl.click();
+          return;
+        }
       }
       loadingHistoryConversationId = null;
       syncNetworkRuntimeStatus(true);
@@ -6418,10 +6452,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       setEmptyChatMode(false);
     }
 
-    async function fetchConversationMessages(conversationId) {
-      const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId) + "/messages");
+    async function fetchConversationMessages(conversationId, limit = 80) {
+      const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId) + "/messages?limit=" + limit);
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
+      if (!response.ok || payload.unavailable === true || !Array.isArray(payload.messages)) {
         throw new Error(payload.error || "conversation unavailable");
       }
       return Array.isArray(payload.messages) ? payload.messages : [];
@@ -14163,6 +14197,7 @@ export async function fetchChatConversation(conversationId, config = configFromE
         conversation_id: id,
         messages: [],
         persisted: false,
+        unavailable: error.statusCode !== 404,
         reason: error.message || "conversation was not persisted",
       };
     }
