@@ -87,6 +87,7 @@ const MODEL_CONTEXT_TOKENS = 131_072;
 // be restored without rebuilding the output-cleaning and redaction pipeline.
 const CHAT_VERIFIER_ENABLED = false;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const EHDA_LOGO_PATH = resolve(MODULE_DIR, "../public/ehda-logo.png");
 const LOGO_PATH = resolve(MODULE_DIR, "../public/mundusx-logo.png");
 const MARIE_PERSONA_PATH = resolve(MODULE_DIR, "../../../docs/marie-persona.md");
 const ATLAS_PERSONA_PATH = resolve(MODULE_DIR, "../../../docs/atlas-persona.md");
@@ -2204,7 +2205,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .shell { grid-template-columns:minmax(0,268px) minmax(0,1fr); }
     aside { padding:20px 13px 16px; }
     .brand-block { gap:10px; padding:0 2px 2px; align-items:flex-start; }
-    .brand-mark { width:48px; height:48px; flex:0 0 48px; color:var(--text); filter:drop-shadow(0 2px 4px rgba(0,0,0,.08)); }
+    .brand-mark { width:48px; height:48px; flex:0 0 48px; object-fit:contain; filter:drop-shadow(0 2px 4px rgba(0,0,0,.08)); }
+    html[data-theme="dark"] .brand-mark { filter:invert(1) drop-shadow(0 2px 4px rgba(0,0,0,.08)); }
     .brand-copy { min-width:0; padding-top:1px; }
     .brand-name { font-family: "Space Grotesk", system-ui, sans-serif; font-size:17px; font-weight:500; letter-spacing:-.015em; }
     .brand-ehda { margin-top:1px; color:var(--muted); font-size:12px; font-weight:550; letter-spacing:.08em; }
@@ -2271,7 +2273,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     <aside id="chat-sidebar" aria-label="Chat navigation">
       <button class="mobile-rail-close" id="mobile-rail-close" type="button" aria-label="Close history">&times;</button>
       <div class="brand-block">
-        <svg class="brand-mark" viewBox="0 0 64 64" role="img" aria-label="Mercedes-Benz three-pointed star"><circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="32" cy="32" r="24" fill="none" stroke="currentColor" stroke-width=".8" opacity=".62"/><path d="M32 8.5 35 29l18.9 12.8-20.2-8.1L32 56l-1.7-22.3-20.2 8.1L29 29 32 8.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <img class="brand-mark" src="/assets/ehda-logo.png" width="48" height="48" alt="EHDA" />
         <div class="brand-copy">
           <div class="brand-name">Mercedes-Benz</div>
           <div class="brand-ehda">Ehda</div>
@@ -6815,6 +6817,9 @@ export function createServerApp(config = configFromEnv()) {
       }
       if (request.method === "GET" && url.pathname === "/agent/connect") {
         return sendHtml(response, runnerConnectPage(url, "agent"));
+      }
+      if (request.method === "GET" && url.pathname === "/assets/ehda-logo.png") {
+        return sendPng(response, await readFile(EHDA_LOGO_PATH));
       }
       if (request.method === "GET" && url.pathname === "/assets/mundusx-logo.png") {
         return sendPng(response, await readFile(LOGO_PATH));
