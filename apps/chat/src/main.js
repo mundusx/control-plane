@@ -3,6 +3,8 @@ import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-st
 import { projectCompletionGaps } from "./project-completion.js";
 import { webResearchRequest, fetchWebResearch } from "./web-research.js";
 import { createServer } from "node:http";
+import { MediaArtifactStore } from "./features/media/store.js";
+import { createMediaHttpController } from "./features/media/http-controller.js";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -177,6 +179,7 @@ export function configFromEnv(env = process.env) {
     auth: authConfigFromEnv(env),
     webResearchUrl: (env.MUNDUSX_WEB_RESEARCH_URL ?? "").trim().replace(/\/$/, ""),
     webResearchToken: (env.MUNDUSX_WEB_RESEARCH_TOKEN ?? "").trim(),
+    mediaDirectory: (env.MUNDUSX_MEDIA_DIR ?? "").trim(),
     port: Number(env.PORT ?? "3002"),
     controlPlaneUrl: normalizeControlPlaneOrigin(
       env.MUNDUSX_CONTROL_PLANE_URL ?? DEFAULT_CONTROL_PLANE_URL,
@@ -6793,6 +6796,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
 export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
+  const mediaStore = config.mediaStore ?? (config.mediaDirectory
+    ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
+  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, readJsonBody, sendJson });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
   const handleHarnessRequest = createHarnessHttpController({
@@ -6819,9 +6825,10 @@ export function createServerApp(config = configFromEnv()) {
     readJsonBody,
     sendJson,
   });
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (await handleMediaRequest({ request, response, url })) return;
       if (await handleGlobalSkills({ request, response, url })) return;
       const releaseLocation = releaseDownloadLocation(url.pathname);
       if (["GET", "HEAD"].includes(request.method) && releaseLocation) {
@@ -7154,10 +7161,21 @@ export function createServerApp(config = configFromEnv()) {
       }
       return sendJson(response, 404, { error: "not found" });
     } catch (error) {
+      if (response.headersSent) { response.destroy(); return; }
       const status = error.statusCode ?? 500;
       return sendJson(response, status, { error: error.message ?? "request failed" });
     }
   });
+  let mediaCleanup;
+  server.once("listening", () => {
+    if (!mediaStore) return;
+    const sweep = () => void mediaStore.cleanup().catch(() => console.error("Media cleanup failed; it will retry in 60 seconds"));
+    sweep();
+    mediaCleanup = setInterval(sweep, 60_000);
+    mediaCleanup.unref();
+  });
+  server.once("close", () => clearInterval(mediaCleanup));
+  return server;
 }
 
 export async function submitChatTurn(body, config = configFromEnv(), fetchImpl = fetch) {
