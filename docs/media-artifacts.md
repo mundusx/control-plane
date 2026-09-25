@@ -167,3 +167,44 @@ subsequent accounting version retains the metadata, job and ledger history.
 The updated ARM64 CLI was also built and installed on GX10, and its four upload
 client tests passed there. The initial transport deployed via the `ehda` Git
 branch to Railway's `chat` service; subsequent migrations run during startup.
+
+## Video queue and downloads
+
+`/video` is the signed-in video request page. Its 2/5/10-second presets use
+Wan2.2-TI2V-5B at 1280×704, 24 fps, 20 steps (49/121/241 frames).
+GX10 reference times measured at 65% contribution are 208508/535361/1212278 ms,
+priced at 4/9/21 credits respectively. This is fixed reference work, not a
+charge based on a worker's claimed runtime. There is still no customer balance
+debit. One validated completion earns the corresponding contributor reward.
+
+`POST /api/media/jobs` accepts `prompt`, `profile_id`, an optional `seed`, and
+an `idempotency_key` UUID. Normal account authentication and CSRF apply.
+`GET /api/media/jobs` and `/api/media/jobs/{id}` return only the owner's jobs.
+At most four pending requests are allowed per account. Requests wait FIFO for
+a compatible worker; each contributor has one media slot. Workers claim with
+Ed25519 device signatures, timestamp bounds and single-use nonces. Only an
+existing registered contributor whose policy allows work can claim jobs.
+Workers heartbeat 180-second leases. Expired leases retry up to three attempts;
+a stale lease cannot bind output or complete a job. Polling recovers leases after
+server restart. No worker receives an operator token or a download link.
+
+Queued/running/completed media rows use `media_` states in the existing jobs
+table so the legacy LLM restore query cannot execute them. The dedicated queue,
+immutable quote, artifact, and existing credit ledger keep durable history.
+Completion requires a fully decoded MP4 matching its quoted preset. Settlement
+is idempotent; the CLI persists a pending completion receipt to retry across a
+restart. Failed jobs earn nothing. Signed worker endpoints live under
+`/api/media/worker/{claim,heartbeat,reserve,complete,fail}`.
+
+MP4 uploads allow up to 128 MiB. FFprobe checks codec, dimensions, exact frame
+count, fps and duration; FFmpeg decodes the entire video with bounded execution.
+Railpack installs FFmpeg through `apps/chat/railpack.json`. Missing validation
+tools fail closed. Image routes and old PNG tickets retain their previous behavior.
+Video links use `/media/{id}/video.mp4?token=...`; the same no-login 48-hour policy
+and physical cleanup apply. Deletion never removes job, quote or credit records.
+
+Contributors run `opengpu media --video setup --yes`, `opengpu media --video verify`,
+then `opengpu media serve --server https://chat.mundusx.ai`. The updated node agent
+also launches the media worker for selected video contribution, after normal
+registration. Use `MUNDUSX_MEDIA_SERVER_URL` for a custom deployment. Local LLM
+batches drain before managed ComfyUI launches and can resume after it stops.

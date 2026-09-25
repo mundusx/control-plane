@@ -5,6 +5,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { httpError } from "../../shared/http-error.js";
 import { MAX_IMAGE_BYTES, validatePng } from "./png.js";
 
+import { MAX_VIDEO_BYTES, validateVideo } from "./video.js";
+
 export const RETENTION_SECONDS = 48 * 60 * 60;
 export const UPLOAD_SECONDS = 60 * 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -15,6 +17,11 @@ const matches = (secret, expected) => SECRET.test(secret ?? "") && SECRET.test(e
 const notFound = () => httpError(404, "Image not available or link expired");
 
 export function validateMetadata(input) {
+  if (input?.content_type === "video/mp4") {
+    if (!SECRET.test(input.sha256 ?? "") || !Number.isSafeInteger(input.byte_size) || input.byte_size < 1 || input.byte_size > MAX_VIDEO_BYTES ||
+        input.width !== 1280 || input.height !== 704 || ![49,121,241].includes(input.frames) || input.fps !== 24) throw httpError(400, "Invalid video preset metadata");
+    return { sha256: input.sha256, byte_size: input.byte_size, width: input.width, height: input.height, content_type: "video/mp4", frames: input.frames, fps: input.fps };
+  }
   if (!input || !SECRET.test(input.sha256 ?? "") || !Number.isSafeInteger(input.byte_size) ||
       input.byte_size < 1 || input.byte_size > MAX_IMAGE_BYTES ||
       !Number.isSafeInteger(input.width) || !Number.isSafeInteger(input.height) ||
@@ -26,11 +33,12 @@ export function validateMetadata(input) {
 }
 
 function publicRecord(row, now = Date.now()) {
-  return { artifact_id: row.artifact_id, status: row.status, content_type: "image/png",
+  return { artifact_id: row.artifact_id, status: row.status, content_type: row.content_type ?? "image/png", frames: row.frames ?? null, fps: row.fps ?? null,
     sha256: row.sha256, byte_size: row.byte_size, width: row.width, height: row.height,
     ready_at: row.ready_at, expires_at: row.expires_at, retention_seconds: RETENTION_SECONDS,
     file_deleted_at: row.file_deleted_at ?? null,
-    image_available: row.status === "ready" && !row.file_deleted_at && new Date(row.expires_at).getTime() > now };
+    media_available: row.status === "ready" && !row.file_deleted_at && new Date(row.expires_at).getTime() > now,
+    image_available: row.content_type !== "video/mp4" && row.status === "ready" && !row.file_deleted_at && new Date(row.expires_at).getTime() > now };
 }
 
 export class MediaArtifactStore {
@@ -57,9 +65,9 @@ export class MediaArtifactStore {
     } finally { client.release(); }
   }
 
-  file(id) {
+  file(id, contentType = "image/png") {
     if (!UUID.test(id ?? "")) throw notFound();
-    return join(this.directory, `${id}.png`);
+    return join(this.directory, `${id}.${contentType === "video/mp4" ? "mp4" : "png"}`);
   }
 
   async reserve(owner, input) {
@@ -81,11 +89,11 @@ export class MediaArtifactStore {
         throw httpError(429, "Image storage limit reached for this user");
       }
       await client.query(`insert into public.media_artifacts
-        (artifact_id,owner_user_id,sha256,byte_size,width,height,upload_token_hash,download_token_hash,created_at,upload_expires_at,expires_at)
-        values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)`,
-      [id, owner, metadata.sha256, metadata.byte_size, metadata.width, metadata.height, hash(uploadToken), hash(downloadToken), now, expires]);
+        (artifact_id,owner_user_id,sha256,byte_size,width,height,upload_token_hash,download_token_hash,created_at,upload_expires_at,expires_at,content_type,frames,fps)
+        values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13)`,
+      [id, owner, metadata.sha256, metadata.byte_size, metadata.width, metadata.height, hash(uploadToken), hash(downloadToken), now, expires, metadata.content_type ?? "image/png", metadata.frames ?? null, metadata.fps ?? null]);
     });
-    const downloadPath = `/media/${id}/image.png?token=${downloadToken}`;
+    const downloadPath = `/media/${id}/${metadata.content_type === "video/mp4" ? "video.mp4" : "image.png"}?token=${downloadToken}`;
     return { artifact_id: id, status: "pending", retention_seconds: RETENTION_SECONDS,
       download_path: downloadPath, preview_path: `${downloadPath}&inline=1`,
       upload_ticket: { version: 1, artifact_id: id, upload_path: `/api/media/artifacts/${id}/content`,
@@ -113,7 +121,7 @@ export class MediaArtifactStore {
       where artifact_id=$2 and owner_user_id=$3 and status='ready' and expires_at > $4 returning *`,
     [hash(token), id, owner, new Date(this.now())]);
     if (!result.rows.length) throw notFound();
-    const path = `/media/${id}/image.png?token=${token}`;
+    const path = `/media/${id}/${result.rows[0].content_type === "video/mp4" ? "video.mp4" : "image.png"}?token=${token}`;
     return { ...publicRecord(result.rows[0], this.now()), download_path: path, preview_path: `${path}&inline=1` };
   }
 
@@ -127,7 +135,7 @@ export class MediaArtifactStore {
     const row = await this.lookup(id);
     this.authorizeUpload(row, token);
     if (bytes.length !== row.byte_size || hash(bytes) !== row.sha256) throw httpError(422, "Image size or checksum does not match the upload ticket");
-    validatePng(bytes, row.width, row.height);
+    if (row.content_type !== "video/mp4") validatePng(bytes, row.width, row.height);
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const temporary = join(this.directory, `.upload-${id}-${randomBytes(16).toString("hex")}.tmp`);
     let file;
@@ -136,13 +144,14 @@ export class MediaArtifactStore {
       await file.writeFile(bytes);
       await file.sync();
       await file.close(); file = null;
+      if (row.content_type === "video/mp4") await validateVideo(temporary, row);
       return await this.transaction(async (client) => {
         const result = await client.query("select * from public.media_artifacts where artifact_id=$1 for update", [id]);
         if (!result.rows.length) throw notFound();
         const current = result.rows[0];
         this.authorizeUpload(current, token);
         if (current.status === "ready") return publicRecord(current, this.now()); // Retry cannot extend retention or overwrite bytes.
-        await rename(temporary, this.file(id));
+        await rename(temporary, this.file(id, row.content_type));
         const now = new Date(this.now()), expires = new Date(this.now() + RETENTION_SECONDS * 1000);
         const updated = await client.query(`update public.media_artifacts set status='ready', ready_at=$1, expires_at=$2
           where artifact_id=$3 returning *`, [now, expires, id]);
@@ -159,7 +168,7 @@ export class MediaArtifactStore {
     if (row.status !== "ready" || !matches(token, row.download_token_hash) || new Date(row.expires_at).getTime() <= this.now()) throw notFound();
     let file;
     try {
-      file = await open(this.file(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      file = await open(this.file(id, row.content_type), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const info = await file.stat();
       if (!info.isFile() || info.size !== row.byte_size) throw notFound();
       return { file, record: publicRecord(row, this.now()) };
@@ -172,10 +181,10 @@ export class MediaArtifactStore {
     try {
       // Row locks prevent cleanup racing a final upload/commit, including across processes.
       const removed = await this.transaction(async (client) => {
-        const result = await client.query(`select artifact_id from public.media_artifacts
+        const result = await client.query(`select artifact_id,content_type from public.media_artifacts
           where expires_at <= $1 and file_deleted_at is null order by expires_at limit 100 for update skip locked`, [new Date(this.now())]);
         for (const row of result.rows) {
-          await unlink(this.file(row.artifact_id)).catch((e) => { if (e.code !== "ENOENT") throw e; });
+          await unlink(this.file(row.artifact_id, row.content_type)).catch((e) => { if (e.code !== "ENOENT") throw e; });
           await client.query(`update public.media_artifacts set file_deleted_at=$2,
             upload_token_hash=repeat('0',64),download_token_hash=repeat('0',64) where artifact_id=$1`,
           [row.artifact_id, new Date(this.now())]);

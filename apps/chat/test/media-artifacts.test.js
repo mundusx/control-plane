@@ -33,7 +33,7 @@ async function fixture(t) {
     create table public.credits_ledger(id uuid primary key,device_id text references public.devices(node_id),job_id text references public.jobs(job_id),
       entry_type text not null,amount numeric not null,currency text not null,metadata jsonb not null,created_at timestamptz not null);
     insert into public.devices values('gx10');`);
-  for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql"]) {
+  for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql", "0040_video_jobs.sql"]) {
     const migration = await readFile(new URL(`../../../db/migrations/${name}`, import.meta.url), "utf8");
     assert.equal(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"), migration);
     await db.exec(migration);

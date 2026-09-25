@@ -1,3 +1,4 @@
+import { videoPage } from "./features/media/page.js";
 import { splitMarkdownCode } from "./markdown-code.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { projectCompletionGaps } from "./project-completion.js";
@@ -2306,9 +2307,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       <div class="guest-widget" id="guest-widget">
         <strong>Try MundusX</strong>
         <p>Explore Chat and Projects. Sign in when you want to send, save conversations, or connect your local agent.</p>
+        <a href="/video" style="display:block;margin-bottom:12px">Create a video</a>
         <button class="guest-login" id="guest-login" type="button">Log in</button>
       </div>
-      <div class="account-widget" id="account-widget" hidden>
+      <div class="account-widget" id="account-widget" hidden><a href="/video" style="display:block;margin-bottom:12px">Create a video</a>
         <div class="account-menu" id="account-menu">
           <div class="account-menu-header">
             <span class="account-avatar" data-account-avatar>MX</span>
@@ -6895,6 +6897,10 @@ export function createServerApp(config = configFromEnv()) {
           "X-Content-Type-Options": "nosniff",
         });
         return response.end();
+      }
+      if (request.method === "GET" && url.pathname === "/video") {
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        return response.end(videoPage());
       }
       if (request.method === "GET" && url.pathname === "/") {
         return sendHtml(response, page(config));

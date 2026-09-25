@@ -11,7 +11,7 @@ if (process.env.MUNDUSX_MEDIA_DIR?.trim()) {
     await client.query("begin");
     await client.query("set local lock_timeout = '15s'");
     await client.query("select pg_advisory_xact_lock(748291037)");
-    for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql"]) {
+    for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql", "0040_video_jobs.sql"]) {
       await client.query(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
     }
     await client.query("commit");
