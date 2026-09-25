@@ -1,3 +1,6 @@
+import { persistMediaChatTurn } from './features/media/chat-history.js';
+import { mediaChatIntent } from './features/media/chat-intent.js';
+import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
 import { MediaQueue } from './features/media/queue.js';
 import { MediaClientService } from './features/media/client-service.js';
 import { createMediaClientHttpController } from './features/media/client-http.js';
@@ -2269,6 +2272,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       .history-menu-button { opacity:1; }
       .history-context-menu { z-index:45; }
     }
+  ${mediaChatCss}
   </style>
 </head>
 <body data-auth-required="${config.auth?.required ? "true" : "false"}">
@@ -2311,10 +2315,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       <div class="guest-widget" id="guest-widget">
         <strong>Try MundusX</strong>
         <p>Explore Chat and Projects. Sign in when you want to send, save conversations, or connect your local agent.</p>
-        <a href="/video" style="display:block;margin-bottom:12px">Create a video</a>
         <button class="guest-login" id="guest-login" type="button">Log in</button>
       </div>
-      <div class="account-widget" id="account-widget" hidden><a href="/video" style="display:block;margin-bottom:12px">Create a video</a>
+      <div class="account-widget" id="account-widget" hidden>
         <div class="account-menu" id="account-menu">
           <div class="account-menu-header">
             <span class="account-avatar" data-account-avatar>MX</span>
@@ -4087,6 +4090,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       promptEl.focus();
     });
 
+    const mediaChatIntent = ${mediaChatIntent.toString()};
+    const mediaUi = (${installMediaChatUi.toString()})({
+      detect: mediaChatIntent, cache: appendCachedConversationTurn,
+      identity: () => currentUser?.id,
+      activeConversation: () => activeHistoryId, scroll: () => scrollChatToLatest(),
+    });
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const message = promptEl.value.trim();
@@ -4099,6 +4109,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // Freeze the selected workspace for this submission. Account refreshes,
       // runner polling, and responsive UI updates may all refresh activeProject
       // while an async request is being dispatched.
+      const mediaIntent = mediaChatIntent(message);
       const submittedProject = projectSelectedForSubmission();
       const conversationId = getConversationId();
       const priorConversationTurns = readCachedConversation(conversationId);
@@ -4106,7 +4117,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         submittedProject && isProjectExecutionContinuation(message, priorConversationTurns),
       );
       const mutatingProjectRequest = Boolean(
-        submittedProject && (requiresLocalProjectAction(message) || projectExecutionContinuation),
+        !mediaIntent && submittedProject && (requiresLocalProjectAction(message) || projectExecutionContinuation),
       );
       const allowProjectMutation = mutatingProjectRequest && (
         projectPermissionMode(submittedProject.slug) === "full"
@@ -4125,6 +4136,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
+        if (mediaIntent) {
+          await mediaUi.submit(pending, message, conversationId);
+          setStatus("ready", "Ready");
+          return;
+        }
         if (submittedProject && mutatingProjectRequest) {
           const executionPrompt = projectExecutionContinuation
             ? buildProjectExecutionContinuationPrompt(message, priorConversationTurns)
@@ -6532,7 +6548,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const node = addMessage("", role);
       const body = node.querySelector(".message-body");
       body.textContent = "";
-      if (role === "assistant" && turn.payload?.client_error) {
+      if (role === "assistant" && (turn.payload?.media_job || turn.metadata?.media_job)) {
+        mediaUi.restore(node, turn.payload?.media_job || turn.metadata.media_job, activeHistoryId);
+        return;
+      } else if (role === "assistant" && turn.payload?.client_error) {
         node.className = "message error";
         body.textContent = turn.content || "The request failed. Please retry.";
         appendRetryAction(body, turn.payload.retry_prompt);
@@ -7204,6 +7223,29 @@ export function createServerApp(config = configFromEnv()) {
         const conversationId = decodeURIComponent(url.pathname.slice("/api/conversations/".length));
         const body = await readJsonBody(request);
         return sendJson(response, 200, await authStore.updateChatConversation(request.mundusxSession.id, conversationId, body));
+      }
+      if (url.pathname === "/api/media/chat" || /^\/api\/media\/chat\/jobs\/[0-9a-f-]{36}(?:\/result)?$/.test(url.pathname)) {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, "Sign in to generate media");
+        if (request.method === "POST") authStore.requireCsrf(request, session);
+        response.setHeader("Cache-Control", "private, no-store");
+        if (url.pathname === "/api/media/chat" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const intent = mediaChatIntent(body.message);
+          if (!intent || intent.error) throw httpError(400, intent?.error || "Ask to create an image or video");
+          if (!body.conversationId) throw httpError(400, "conversationId is required");
+          await authStore.authorizeConversation(session.id, body.conversationId, true, {title:body.message});
+          const job = await mediaService.submit(session.id, {...intent,idempotency_key:body.idempotency_key});
+          // A queued job must remain recoverable even if history persistence is temporarily unavailable.
+          let historySaved = true;
+          try { await persistMediaChatTurn(mediaStore,session.id,body.conversationId,job,intent); }
+          catch (error) { if (error.statusCode === 409) throw error; historySaved = false; }
+          return sendJson(response,202,{...job,history_saved:historySaved});
+        }
+        const match = url.pathname.match(/^\/api\/media\/chat\/jobs\/([0-9a-f-]{36})(\/result)?$/);
+        if (match && request.method === "GET" && !match[2]) return sendJson(response,200,await mediaService.status(session.id,match[1]));
+        if (match && request.method === "POST" && match[2]) return sendJson(response,200,await mediaService.result(session.id,match[1]));
+        throw httpError(405,"Method not allowed");
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {
         const body = await readJsonBody(request);

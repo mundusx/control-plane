@@ -16,7 +16,7 @@ export class MediaClientService {
     if (!input || !['image', 'video'].includes(input.kind)) throw httpError(400, 'kind must be image or video');
     let profile = IMAGE_PROFILE;
     if (input.kind === 'video') {
-      const seconds = input.duration_seconds ?? 5;
+      const seconds = input.duration_seconds ?? 3;
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Video duration must be an integer from 1 to 10 seconds');
       profile = `wan22-14b-704p-${seconds * 16 + 1}f-v1`;
     } else if (input.duration_seconds !== undefined) throw httpError(400, 'duration_seconds applies only to video');

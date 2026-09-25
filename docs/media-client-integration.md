@@ -1,5 +1,21 @@
 # Image and video tools for Copilot and editor agents
 
+## MundusX Chat
+
+Ask directly in the chat composer, for example “Create a video of the ocean”
+or “Generate an image of a mountain lake.” Video defaults to 3 seconds and
+the inline card immediately states the 10-second maximum. Explicit integer
+durations from 1 to 10 are accepted; out-of-range durations are rejected.
+Questions about how generation works remain ordinary text chat.
+
+The animated mesh shows queued/generating status, then becomes an image or
+video preview with a download link. Reduced-motion preferences disable the
+animation. Saved chat messages retain the job reference and reconnect on
+reopening. You can continue sending messages while generation runs.
+
+Three-second jobs require the updated media worker; the older released worker
+advertises only 2-, 5-, and 10-second video profiles.
+
 MundusX exposes asynchronous media tools through its existing authenticated
 Streamable HTTP MCP server at `https://chat.mundusx.ai/mcp`. The same service
 has HTTP actions described in `media-openapi.json`.

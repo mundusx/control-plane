@@ -23,7 +23,7 @@ export function registerMediaTools(server, service, owner) {
     description: `Queue ${kind} generation requested by the user. Returns a job ID immediately, not a finished URL. Reuse the same UUID idempotency_key for retries of this request. Poll mundusx_get_media_job after poll_after_seconds; only claim completion when state is completed, then call mundusx_get_media_result. Never invent a URL or progress percentage.`,
     inputSchema: z.object({ prompt: z.string().min(1).max(4000), idempotency_key: z.string().uuid(),
       seed: z.number().int().min(0).max(2147483647).optional(),
-      ...(kind === 'video' ? { duration_seconds: z.number().int().min(1).max(10).default(5) } : {}) }),
+      ...(kind === 'video' ? { duration_seconds: z.number().int().min(1).max(10).default(3) } : {}) }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, wrap(input => service.submit(owner, { ...input, kind })));
   server.registerTool('mundusx_get_media_job', {

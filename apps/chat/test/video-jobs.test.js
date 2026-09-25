@@ -161,3 +161,27 @@ test('image client result delivers an expiring URL after validated output and on
  assert.equal((await service.status(f.owner,job.job_id)).state,'completed');
  assert.equal((await f.db.query('select * from credits_ledger')).rows.length,1);
 });
+
+test('chat prompts queue three-second videos and persist resumable cards behind session and CSRF checks',async t=>{
+ const f=await fixture(t),{createServerApp}=await import('../src/main.js');
+ await f.db.exec(`create table chat_conversations(conversation_id uuid primary key,last_message_at timestamptz,message_count integer default 0);
+ create table chat_messages(id serial primary key,conversation_id uuid,role text,content text,job_id text unique,metadata jsonb);`);
+ const conversationId=randomUUID();
+ const authStore={session:async req=>req.headers.cookie==='session=test'?{id:f.owner}:null,
+ requireCsrf(req){if(req.headers['x-mundusx-csrf']!=='test')throw Object.assign(new Error('CSRF'),{statusCode:403});},
+ async authorizeConversation(owner,id){assert.equal(owner,f.owner);if(id!==conversationId)throw Object.assign(new Error('Not available'),{statusCode:404});}};
+ const server=createServerApp({auth:{required:true,publicOrigin:'https://chat.example'},authStore,mediaStore:f.store,mediaAdmission:async()=>true});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
+ const origin='http://127.0.0.1:'+server.address().port,path=origin+'/api/media/chat';
+ const headers={Cookie:'session=test','Content-Type':'application/json','X-MundusX-CSRF':'test'};
+ const body={message:'Create a video of the ocean',conversationId,idempotency_key:randomUUID()};
+ assert.equal((await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).status,401);
+ assert.equal((await fetch(path,{method:'POST',headers:{Cookie:'session=test','Content-Type':'application/json'},body:JSON.stringify(body)})).status,403);
+ const response=await fetch(path,{method:'POST',headers,body:JSON.stringify(body)}),job=await response.json();
+ assert.equal(response.status,202,JSON.stringify(job));assert.equal(job.quote.frames,49);assert.equal(job.quote.fps,16);assert.equal(job.history_saved,true);
+ assert.equal((await fetch(path,{method:'POST',headers,body:JSON.stringify(body)})).status,202);
+ const messages=(await f.db.query('select * from chat_messages order by id')).rows;assert.equal(messages.length,2);assert.equal(messages[1].metadata.media_job.duration_seconds,3);
+ const status=await fetch(origin+'/api/media/chat/jobs/'+job.job_id,{headers});assert.equal(status.status,200);assert.equal((await status.json()).state,'queued');
+ const rejected=await fetch(path,{method:'POST',headers,body:JSON.stringify({...body,message:'Make a 30 second video',idempotency_key:randomUUID()})});assert.equal(rejected.status,400);
+ assert.equal((await f.db.query('select * from media_generation_jobs')).rows.length,1);
+});
