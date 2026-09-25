@@ -247,7 +247,7 @@ test("renders a usable chat page", () => {
   assert.doesNotMatch(html, /raw\.includes\("\r?\n"\)/);
   assert.match(html, /aria-label", role === "user" \? "Your message" : "MundusX response"/);
   assert.doesNotMatch(html, /avatar\.textContent = role === "user" \? "You" : "M"/);
-  assert.match(html, /aria-label="Mercedes-Benz three-pointed star"/);
+  assert.match(html, /class="brand-mark" src="\/assets\/ehda-logo\.png"[^>]+alt="EHDA"/);
   assert.match(html, /<\/aside>\s*<div class="history-context-menu"/);
   assert.match(html, /uat\.mundusx\.ai/);
   assert.match(html, /\.header-actions \{\s*display: none;/);

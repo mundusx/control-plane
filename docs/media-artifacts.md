@@ -26,9 +26,11 @@ this retention policy applies to the server copy.
 
 ## Deployment
 
-1. Apply `db/migrations/0037_media_artifacts.sql` through the existing native
-   PostgreSQL migration process. The runtime database role needs access to the
-   new table, as with the other application tables.
+1. `npm start` applies the bundled media migration before starting the web server
+   when media is enabled. Set `MUNDUSX_DATABASE_URL` to the direct native PostgreSQL
+   connection (Railway: `${{Postgres.DATABASE_URL}}`). The bundled SQL matches
+   `db/migrations/0037_media_artifacts.sql`, is idempotent, and uses a transaction
+   lock. The runtime role must have access to the new table.
 2. Mount persistent disk on the **web server** and set `MUNDUSX_MEDIA_DIR` to an
    absolute private path, for example `/var/lib/mundusx/media`. Do not place it
    under `public` or configure a reverse-proxy static alias for it.

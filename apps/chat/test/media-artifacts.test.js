@@ -26,7 +26,10 @@ const tokenOf = (path) => new URL(path, "http://localhost").searchParams.get("to
 async function fixture(t) {
   const db = new PGlite(), root = await mkdtemp(join(tmpdir(), "mundusx-media-"));
   await db.exec("create table public.users(id uuid primary key, status text not null default 'active')");
-  await db.exec(await readFile(new URL("../../../db/migrations/0037_media_artifacts.sql", import.meta.url), "utf8"));
+  const migration = await readFile(new URL("../../../db/migrations/0037_media_artifacts.sql", import.meta.url), "utf8");
+  assert.equal(await readFile(new URL("../migrations/0037_media_artifacts.sql", import.meta.url), "utf8"), migration);
+  await db.exec(migration);
+  await db.exec(migration); // Independent web startups may repeat this migration.
   const owner = randomUUID(), other = randomUUID();
   await db.query("insert into public.users(id) values($1),($2)", [owner, other]);
   // PGlite is one connection; serialize borrowed transactions like a size-one pg Pool.
