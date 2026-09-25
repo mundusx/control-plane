@@ -20,7 +20,7 @@ MundusX exposes asynchronous media tools through its existing authenticated
 Streamable HTTP MCP server at `https://chat.mundusx.ai/mcp`. The same service
 has HTTP actions described in `media-openapi.json`.
 
-This requires the media-client server update, migration 0042, persistent media
+This requires the media-client server update, migration 0043, persistent media
 storage, and an updated contributor with verified Qwen/Wan profiles. Existing
 contributors continue receiving only their advertised profiles. Jobs remain
 queued until a compatible, admitted contributor is available.
@@ -116,3 +116,7 @@ job per node and coordinates generation with the local LLM drain mechanism.
 
 Client connection and rendering must be tested in the actual tenant/editor;
 passing server protocol tests does not demonstrate an installed client session.
+
+Image requests default to Qwen Image at **832 x 480**, profile `qwen-image-fp8-832x480-v1`. The provisional price remains 4 credits pending a benchmark of this resolution. Already queued `qwen-image-fp8-1024-v1` jobs retain their original dimensions and price and can still be served by older contributors. Contributors must update and verify the new image profile before serving new requests; existing model weights are reused.
+
+Video defaults to **832 x 480 at 16 FPS**, with a 3-second default and integer durations of 1-10 seconds (`wan22-14b-480p-*f-v1`). Historical 704p jobs remain claimable by compatible workers. The provisional per-duration credit rate is retained until a GX10 benchmark validates the smaller resolution. Update the CLI and re-verify video presets before sending new-profile jobs; cached model weights are reused.
