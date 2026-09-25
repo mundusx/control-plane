@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
-import { mediaQuote, VIDEO_PROFILES } from './pricing.js';
+import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
@@ -28,6 +28,7 @@ export class MediaQueue {
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
       if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed)) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,quote:saved.quote}; }
+      if (!ACTIVE_VIDEO_PROFILES.includes(quote.profile_id)) throw httpError(422,'This video preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
       if(pending>=4) throw httpError(429,'You already have four pending video requests');
       // Media-prefixed states are excluded by the legacy LLM restore/claim query.

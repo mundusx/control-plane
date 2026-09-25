@@ -1,7 +1,7 @@
 import { pipeline } from "node:stream/promises";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { MediaQueue } from "./queue.js";
-import { mediaQuote, VIDEO_PROFILES } from "./pricing.js";
+import { mediaQuote, ACTIVE_VIDEO_PROFILES } from "./pricing.js";
 import { MediaAccounting } from "./accounting.js";
 import { httpError } from "../../shared/http-error.js";
 import { MAX_VIDEO_BYTES } from "./video.js";
@@ -90,7 +90,7 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
     // Reservation and link rotation use the existing account; downloading uses only the link.
     const session = await authStore.session(request);
     if (!session) throw httpError(401, "Sign in to create or manage an image result");
-    if (profiles && request.method === "GET") { sendJson(response, 200, {profiles: Object.keys(VIDEO_PROFILES).map(mediaQuote)}); return true; }
+    if (profiles && request.method === "GET") { sendJson(response, 200, {profiles: ACTIVE_VIDEO_PROFILES.map(mediaQuote)}); return true; }
     if (jobs) {
       if (request.method === "POST" && !jobs[1]) { authStore.requireCsrf(request, session); sendJson(response, 202, await queue.submit(session.id, await readJsonBody(request))); }
       else if (request.method === "GET" && jobs[1]) sendJson(response, 200, await queue.owned(session.id, jobs[1]));
