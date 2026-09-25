@@ -23,3 +23,19 @@ test('unavailable history throws instead of being classified as empty', async()=
  const run=runInNewContext(fn+'; fetchConversationMessages',{fetch:async()=>({ok:true,json:async()=>({messages:[],persisted:false,unavailable:true})})});
  await assert.rejects(()=>run('existing'),/conversation unavailable/);
 });
+
+
+test('history cleanup removes inaccessible entries but retains transient failures', async()=>{
+ const removed=[];
+ const run=runInNewContext(cleanup+'; retainRestorableHistory',{readCachedConversation:()=>[],conversationStreamStates:new Map(),localStorage:{removeItem:key=>removed.push(key)},conversationCachePrefix:'cache:',fetchConversationMessages:async id=>{throw Object.assign(new Error('failed'),{statusCode:id==='inaccessible'?404:503});}});
+ const result=await run([{id:'inaccessible'},{id:'outage'}]);
+ assert.deepEqual(Array.from(result,item=>item.id),['outage']);
+ assert.deepEqual(removed,['cache:inaccessible']);
+});
+
+test('history request preserves the authorization rejection status', async()=>{
+ const start=source.indexOf('    async function fetchConversationMessages(');
+ const fn=source.slice(start,source.indexOf('    function renderStoredTurn(',start));
+ const run=runInNewContext(fn+'; fetchConversationMessages',{fetch:async()=>({ok:false,status:404,json:async()=>({error:'Conversation is not available to this user'})})});
+ await assert.rejects(()=>run('stale'),e=>e.statusCode===404);
+});

@@ -6310,6 +6310,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const checkedIds = new Set(merged.map((item) => item.conversationId || item.id));
       retained.unshift(...readHistory().filter((item) => !checkedIds.has(item.conversationId || item.id)));
       localStorage.setItem(historyKey, JSON.stringify(retained));
+      if (activeHistoryId && checkedIds.has(activeHistoryId) && !retained.some((item) => (item.conversationId || item.id) === activeHistoryId)) {
+        activeHistoryId = null;
+        localStorage.removeItem(conversationIdKey);
+      }
       if (!activeHistoryId && retained.length) {
         activeHistoryId = retained[0].conversationId || retained[0].id;
         localStorage.setItem(conversationIdKey, activeHistoryId);
@@ -6327,7 +6331,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             if (turns.length || readCachedConversation(id).length || conversationStreamStates.has(id)) return item;
             localStorage.removeItem(conversationCachePrefix + id);
             return null;
-          } catch {
+          } catch (error) {
+            if (error.statusCode === 404) {
+              localStorage.removeItem(conversationCachePrefix + id);
+              return null;
+            }
             // An outage cannot prove that a conversation is empty.
             return item;
           }
@@ -6438,7 +6446,17 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       let historyUnavailable = false;
       try {
         turns = await fetchConversationMessages(conversationId);
-      } catch {
+      } catch (error) {
+        if (loadToken !== activeHistoryLoadToken || activeHistoryId !== conversationId) return;
+        if (error.statusCode === 404) {
+          // The server denied this selection. Never restore a cached copy or
+          // reuse this ID for a new message; only remove this browser's entry.
+          localStorage.removeItem(conversationCachePrefix + conversationId);
+          writeHistory(readHistory().filter((entry) => (entry.conversationId || entry.id) !== conversationId));
+          loadingHistoryConversationId = null;
+          newChatEl.click();
+          return;
+        }
         historyUnavailable = true;
       }
       if (loadToken !== activeHistoryLoadToken || activeHistoryId !== conversationId) return;
@@ -6498,7 +6516,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId) + "/messages?limit=" + limit);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.unavailable === true || !Array.isArray(payload.messages)) {
-        throw new Error(payload.error || "conversation unavailable");
+        throw Object.assign(new Error(payload.error || "conversation unavailable"), { statusCode: response.status });
       }
       return Array.isArray(payload.messages) ? payload.messages : [];
     }
