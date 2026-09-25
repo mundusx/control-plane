@@ -1,3 +1,6 @@
+import { deflateSync } from 'node:zlib';
+import { crc32 } from '../src/features/media/png.js';
+import { MediaClientService } from '../src/features/media/client-service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,sign,randomUUID,createHash} from 'node:crypto';
@@ -13,7 +16,7 @@ const profile='wan22-14b-704p-33f-v1';
 test('video metadata accepts exact old and new timing presets without mixing them',()=>{
  const metadata={content_type:'video/mp4',width:1280,height:704,sha256:'a'.repeat(64),byte_size:100};
  for(const [fps,frames] of [[24,49],[24,121],[24,241],[16,33],[16,81],[16,161]]) assert.equal(validateMetadata({...metadata,fps,frames}).frames,frames);
- for(const [fps,frames] of [[24,33],[16,49],[16,241],[24,161]]) assert.throws(()=>validateMetadata({...metadata,fps,frames}),{statusCode:400});
+ for(const [fps,frames] of [[24,33],[16,50],[16,241],[24,161]]) assert.throws(()=>validateMetadata({...metadata,fps,frames}),{statusCode:400});
 });
 async function fixture(t){
  const db=new PGlite(),root=await mkdtemp(join(tmpdir(),'mx-video-'));
@@ -21,7 +24,7 @@ async function fixture(t){
  create table devices(node_id text primary key,public_key_hex text,policy_allowed boolean default true);
  create table jobs(job_id text primary key,request_id text unique,prompt text,preferred_backend text,model text,classification jsonb,status text,assigned_node_id text references devices(node_id),submitted_at_epoch bigint,assigned_at_epoch bigint,completed_at_epoch bigint,error text);
  create table credits_ledger(id uuid primary key,device_id text references devices(node_id),job_id text references jobs(job_id),entry_type text,amount numeric,currency text,metadata jsonb,created_at timestamptz);`);
- for(const name of ['0037_media_artifacts.sql','0038_media_compute_records.sql','0040_video_jobs.sql','0041_video_14b_presets.sql']){const sql=await readFile(new URL('../../../db/migrations/'+name,import.meta.url),'utf8');await db.exec(sql);await db.exec(sql);}
+ for(const name of ['0037_media_artifacts.sql','0038_media_compute_records.sql','0040_video_jobs.sql','0041_video_14b_presets.sql','0042_media_integer_durations.sql']){const sql=await readFile(new URL('../../../db/migrations/'+name,import.meta.url),'utf8');await db.exec(sql);await db.exec(sql);}
  const owner=randomUUID(),other=randomUUID();await db.query('insert into users(id) values($1),($2)',[owner,other]);
  const key=generateKeyPairSync('ed25519');const pub=key.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('hex');
  await db.query("insert into devices(node_id,public_key_hex) values('gx10',$1),('other',$1)",[pub]);
@@ -91,7 +94,7 @@ test('HTTP video flow authenticates users and signed workers then serves an anon
  const origin='http://127.0.0.1:'+server.address().port;
  const user={Cookie:'session=test','X-MundusX-CSRF':'test','Content-Type':'application/json'};
  const presets=await (await fetch(origin+'/api/media/profiles',{headers:user})).json();
- assert.equal(presets.profiles.length,3);
+ assert.equal(presets.profiles.length,10);
  assert.ok(presets.profiles.every(p=>p.model==='Wan-AI/Wan2.2-T2V-A14B'&&p.fps===16));
  assert.equal((await fetch(origin+'/api/media/jobs')).status,401);
  assert.equal((await fetch(origin+'/api/media/worker/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
@@ -104,4 +107,57 @@ test('HTTP video flow authenticates users and signed workers then serves an anon
  const link=await (await fetch(origin+'/api/media/artifacts/'+ticket.artifact_id+'/link',{method:'POST',headers:user,body:'{}'})).json();
  const downloaded=await fetch(origin+link.download_path);assert.equal(downloaded.status,200);assert.equal(downloaded.headers.get('content-type'),'video/mp4');assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()),bytes);
  const wrong=link.download_path.replace('video.mp4','image.png');assert.equal((await fetch(origin+wrong)).status,404);
+});
+
+test('image queue reuses the media job contract and video workers cannot claim images', async t => {
+ const f=await fixture(t), profile_id='qwen-image-fp8-1024-v1';
+ const job=await f.submit({profile_id});
+ assert.equal(job.quote.operation,'text_to_image');
+ assert.equal(await f.queue.claim(f.device,[profile]),null);
+ const claim=await f.queue.claim(f.device,[profile_id]);
+ assert.equal(claim.job_id,job.job_id);
+ const ticket=await f.queue.reserve('gx10',{...claim,metadata:{sha256:'a'.repeat(64),byte_size:100}});
+ assert.equal((await f.store.lookup(ticket.artifact_id)).content_type,'image/png');
+ assert.equal(ticket.upload_ticket.width,1024);
+ await assert.rejects(f.queue.owned(f.other,job.job_id),{statusCode:404});
+});
+test('all integer video durations are priced and accepted without removing old presets',()=>{
+ for(let s=1;s<=10;s++) {
+  const frames=s*16+1,q=mediaQuote(`wan22-14b-704p-${frames}f-v1`);
+  assert.equal(q.frames,frames);
+  assert.ok(q.compute_credits>0);
+  assert.equal(validateMetadata({content_type:'video/mp4',width:1280,height:704,sha256:'a'.repeat(64),byte_size:100,frames,fps:16}).frames,frames);
+ }
+});
+
+function png(size = 8) {
+  const chunk = (kind, data) => {
+    const body = Buffer.concat([Buffer.from(kind), data]), head = Buffer.alloc(4), tail = Buffer.alloc(4);
+    head.writeUInt32BE(data.length); tail.writeUInt32BE(crc32(body));
+    return Buffer.concat([head, body, tail]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(size); header.writeUInt32BE(size, 4); header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.alloc(size * (size * 3 + 1)))), chunk("IEND", Buffer.alloc(0))]);
+}
+
+test('image client result delivers an expiring URL after validated output and one settlement',async t=>{
+ const f=await fixture(t),service=new MediaClientService(f.queue,'https://chat.example');
+ const job=await service.submit(f.owner,{kind:'image',prompt:'A teapot',idempotency_key:randomUUID()});
+ const claim=await f.queue.claim(f.device,['qwen-image-fp8-1024-v1']);
+ const bytes=png(1024),ticket=await f.queue.reserve('gx10',{...claim,metadata:{byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+ await f.store.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,bytes);
+ await f.queue.complete('gx10',{...claim,generation_ms:1000});
+ await f.queue.complete('gx10',{...claim,generation_ms:1000});
+ const result=await service.result(f.owner,job.job_id);
+ assert.equal(result.content_type,'image/png');
+ const token=new URL(result.download_url).searchParams.get('token');
+ const downloaded=await f.store.download(ticket.artifact_id,token);
+ assert.deepEqual(await downloaded.file.readFile(),bytes);await downloaded.file.close();
+ await assert.rejects(service.result(f.other,job.job_id),{statusCode:404});
+ assert.equal((await f.db.query('select * from credits_ledger')).rows.length,1);
+ f.advance(RETENTION_SECONDS*1000);await f.store.cleanup();
+ await assert.rejects(service.result(f.owner,job.job_id),{statusCode:410});
+ assert.equal((await service.status(f.owner,job.job_id)).state,'completed');
+ assert.equal((await f.db.query('select * from credits_ledger')).rows.length,1);
 });

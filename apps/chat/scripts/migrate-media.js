@@ -11,9 +11,10 @@ if (process.env.MUNDUSX_MEDIA_DIR?.trim()) {
     await client.query("begin");
     await client.query("set local lock_timeout = '15s'");
     await client.query("select pg_advisory_xact_lock(748291037)");
-    for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql", "0040_video_jobs.sql", "0041_video_14b_presets.sql"]) {
+    for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql", "0040_video_jobs.sql", "0042_media_integer_durations.sql"]) {
       // 0040 was applied atomically. Replaying its old constraint after 14B
-      // artifacts exist would reject those rows before 0041 can widen it.
+      // artifacts exist would reject those rows before the current constraint widens it.
+      // 0042 supersedes 0041; do not replay the narrower 0041 constraint.
       if (name === "0040_video_jobs.sql" && (await client.query("select to_regclass('public.media_generation_jobs') as relation")).rows[0].relation) continue;
       await client.query(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
     }

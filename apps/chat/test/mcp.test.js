@@ -108,9 +108,10 @@ test("Harness MCP rejects browser origins outside MundusX Chat", async (context)
   assert.equal(response.status, 403);
 });
 
-async function startMcpServer(context, { authStore, harnessService }) {
+async function startMcpServer(context, { authStore, harnessService, mediaService }) {
   const controller = createMcpHttpController({
     enabled: true,
+    mediaService,
     authStore,
     harnessService,
     publicOrigin: "https://chat.mundusx.ai",
@@ -129,3 +130,34 @@ async function startMcpServer(context, { authStore, harnessService }) {
   context.after(() => new Promise((resolve) => server.close(resolve)));
   return new URL(`http://127.0.0.1:${server.address().port}/mcp`);
 }
+
+test("media MCP exposes generation and polls without waiting for inference", async context => {
+  const seen = [];
+  const endpoint = await startMcpServer(context, {
+    authStore: { async mcpSession() { return { id: 'owner' }; } }, harnessService: {},
+    mediaService: {
+      profiles: () => ({ profiles: [] }),
+      submit: async (owner, input) => { seen.push({owner, input}); return {job_id:'11111111-1111-4111-8111-111111111111',state:'queued',poll_after_seconds:15}; },
+      status: async (owner, id) => ({job_id:id,state:'running',owner}),
+      result: async () => { throw Object.assign(new Error('Not completed'), {statusCode:409}); },
+    },
+  });
+  const client = new Client({name:'media-test',version:'1'});
+  await client.connect(new StreamableHTTPClientTransport(endpoint));
+  context.after(() => client.close());
+  const tools = (await client.listTools()).tools;
+  assert.equal(tools.filter(t => /media|generate_image|generate_video/.test(t.name)).length, 5);
+  const job = await client.callTool({name:'mundusx_generate_video',arguments:{prompt:'A sunset',duration_seconds:7,idempotency_key:'11111111-1111-4111-8111-111111111111'}});
+  assert.equal(job.structuredContent.state,'queued');
+  assert.equal(seen[0].owner,'owner');
+  assert.equal(seen[0].input.kind,'video');
+  assert.equal(seen[0].input.duration_seconds,7);
+  const invalid = await client.callTool({name:'mundusx_generate_video',arguments:{prompt:'A sunset',duration_seconds:11,idempotency_key:'11111111-1111-4111-8111-111111111111'}});
+  assert.equal(invalid.isError,true);
+  assert.equal(seen.length,1);
+  const status = await client.callTool({name:'mundusx_get_media_job',arguments:{job_id:job.structuredContent.job_id}});
+  assert.equal(status.structuredContent.state,'running');
+  const result = await client.callTool({name:'mundusx_get_media_result',arguments:{job_id:job.structuredContent.job_id}});
+  assert.equal(result.isError,true);
+  assert.equal(result.structuredContent.status,409);
+});

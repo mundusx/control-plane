@@ -2,7 +2,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { createHarnessMcpServer } from "./server.js";
 
-export function createMcpHttpController({ enabled, authStore, harnessService, publicOrigin, sendJson }) {
+export function createMcpHttpController({ enabled, authStore, harnessService, publicOrigin, sendJson, mediaService }) {
   return async function handleMcpRequest({ request, response, url }) {
     if (url.pathname !== "/mcp") return false;
     if (!enabled) {
@@ -29,7 +29,7 @@ export function createMcpHttpController({ enabled, authStore, harnessService, pu
       return true;
     }
 
-    const server = createHarnessMcpServer({ authStore, harnessService, session });
+    const server = createHarnessMcpServer({ authStore, harnessService, session, mediaService });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

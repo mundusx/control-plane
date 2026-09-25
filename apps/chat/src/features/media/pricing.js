@@ -26,7 +26,12 @@ export const VIDEO_PROFILES = {
   'wan22-14b-704p-81f-v1': { fps: 16, frames: 81, reference_generation_ms: 2194131, reference_estimated: true, model: 'Wan-AI/Wan2.2-T2V-A14B' },
   'wan22-14b-704p-161f-v1': { fps: 16, frames: 161, reference_generation_ms: 4361173, reference_estimated: true, model: 'Wan-AI/Wan2.2-T2V-A14B' },
 };
-export const ACTIVE_VIDEO_PROFILES = Object.keys(VIDEO_PROFILES).filter(id => id.startsWith('wan22-14b-') && VIDEO_PROFILES[id].reference_generation_ms > 0);
+// Integer 1-10 second presets use the measured 33-frame baseline.
+for (let seconds = 1; seconds <= 10; seconds++) {
+  const frames = seconds * 16 + 1, id = `wan22-14b-704p-${frames}f-v1`;
+  VIDEO_PROFILES[id] ??= { fps: 16, frames, reference_generation_ms: Math.ceil(893905 * frames / 33), reference_estimated: true, model: 'Wan-AI/Wan2.2-T2V-A14B' };
+}
+export const ACTIVE_VIDEO_PROFILES = Object.keys(VIDEO_PROFILES).filter(id => id.startsWith('wan22-14b-') && VIDEO_PROFILES[id].reference_generation_ms > 0).sort((a,b) => VIDEO_PROFILES[a].frames - VIDEO_PROFILES[b].frames);
 export function mediaQuote(profile = IMAGE_PROFILE) {
   if (profile === IMAGE_PROFILE) return imageQuote(profile);
   const preset = Object.hasOwn(VIDEO_PROFILES, profile) ? VIDEO_PROFILES[profile] : null;

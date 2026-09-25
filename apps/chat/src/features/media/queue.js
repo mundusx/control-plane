@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
-import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES } from './pricing.js';
+import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
@@ -19,7 +19,6 @@ export class MediaQueue {
   }
   async submit(owner,input) {
     const quote=mediaQuote(input.profile_id);
-    if (quote.operation!=='text_to_video') throw httpError(422,'Choose a video preset');
     if (typeof input.prompt!=='string' || !input.prompt.trim() || input.prompt.length>4000 || !uuid.test(input.idempotency_key??'')) throw httpError(400,'Expected prompt, profile_id and UUID idempotency_key');
     const seed=input.seed??42;
     if(!Number.isSafeInteger(seed)||seed<0||seed>2147483647) throw httpError(400,'Invalid seed');
@@ -28,9 +27,9 @@ export class MediaQueue {
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
       if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed)) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,quote:saved.quote}; }
-      if (!ACTIVE_VIDEO_PROFILES.includes(quote.profile_id)) throw httpError(422,'This video preset has been retired. Refresh to choose the current model.');
+      if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id)) throw httpError(422,'This video preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
-      if(pending>=4) throw httpError(429,'You already have four pending video requests');
+      if(pending>=4) throw httpError(429,'You already have four pending media requests');
       // Media-prefixed states are excluded by the legacy LLM restore/claim query.
       const id=randomUUID(), now=new Date(this.store.now());
       await db.query(`insert into public.jobs(job_id,request_id,prompt,preferred_backend,model,classification,status,submitted_at_epoch) values($1,$1,$2,'auto',$3,$4,'media_queued',$5)`,[id,task.prompt,quote.model,{operation:quote.operation,media_profile_id:quote.profile_id},Math.floor(this.store.now()/1000)]);
@@ -41,8 +40,8 @@ export class MediaQueue {
   }
   async claim(device,profiles) {
     if(!await this.admitWorker(device)) throw httpError(403,'Contributor policy does not allow work');
-    const supported=Array.isArray(profiles)?profiles.filter(x=>Object.hasOwn(VIDEO_PROFILES,x)):[];
-    if(!supported.length) throw httpError(422,'No supported video presets');
+    const supported=Array.isArray(profiles)?profiles.filter(x=>x===IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
+    if(!supported.length) throw httpError(422,'No supported media presets');
     return this.store.transaction(async db=>{
       // Serialize claims per node across processes; SKIP LOCKED distributes jobs across nodes.
       await db.query('select node_id from public.devices where node_id=$1 for update',[device.node_id]);
@@ -77,7 +76,7 @@ export class MediaQueue {
   async reserve(node,input) {
     const row=await this.store.transaction(db=>this.lease(db,node,input));
     const q=mediaQuote(row.request.profile_id);
-    const reservation=await this.store.reserve(row.owner_user_id,{...input.metadata,content_type:'video/mp4',width:q.width,height:q.height,frames:q.frames,fps:q.fps});
+    const reservation=await this.store.reserve(row.owner_user_id,{...input.metadata,content_type:q.operation==='text_to_video'?'video/mp4':'image/png',width:q.width,height:q.height,frames:q.frames,fps:q.fps});
     try { await this.store.transaction(async db=>{
       await this.lease(db,node,input);
       const record=(await db.query('select * from public.media_compute_records where job_id=$1 for update',[row.job_id])).rows[0];
@@ -97,7 +96,7 @@ export class MediaQueue {
       const row=await this.lease(db,node,input,true);
       if(row.state==='completed') return;
       const a=(await db.query(`select a.* from public.media_artifacts a join public.media_compute_records c on c.artifact_id=a.artifact_id where c.job_id=$1 and c.node_id=$2 for update of a`,[row.job_id,node])).rows[0];
-      if(!a||a.status!=='ready'||a.file_deleted_at||new Date(a.expires_at).getTime()<=this.store.now()) throw httpError(409,'Upload a valid video before completion');
+      if(!a||a.status!=='ready'||a.file_deleted_at||new Date(a.expires_at).getTime()<=this.store.now()) throw httpError(409,'Upload a valid media before completion');
       await db.query("update public.jobs set status='media_completed',completed_at_epoch=$2 where job_id=$1",[row.job_id,Math.floor(this.store.now()/1000)]);
       await db.query("update public.media_generation_jobs set state='completed',completed_at=$2 where job_id=$1",[row.job_id,new Date(this.store.now())]);
     });
@@ -105,14 +104,14 @@ export class MediaQueue {
   }
   async fail(node,input) { return this.store.transaction(async db=>{
     await this.lease(db,node,input);
-    await db.query("update public.media_generation_jobs set state='failed',error='Video generation failed',lease_until=null,completed_at=$2 where job_id=$1",[input.job_id,new Date(this.store.now())]);
-    await db.query("update public.jobs set status='media_failed',error='Video generation failed' where job_id=$1",[input.job_id]);
+    await db.query("update public.media_generation_jobs set state='failed',error='Media generation failed',lease_until=null,completed_at=$2 where job_id=$1",[input.job_id,new Date(this.store.now())]);
+    await db.query("update public.jobs set status='media_failed',error='Media generation failed' where job_id=$1",[input.job_id]);
     return {ok:true};
   }); }
   async owned(owner,id) {
     const row=(await this.store.pool.query(`select q.job_id,q.state,q.request,q.error,q.created_at,q.completed_at,c.quote,c.artifact_id,c.status as settlement_status,c.ledger_id
       from public.media_generation_jobs q join public.media_compute_records c using(job_id) where q.job_id=$1 and q.owner_user_id=$2`,[id,owner])).rows[0];
-    if(!row) throw httpError(404,'Video job not found');
+    if(!row) throw httpError(404,'Media job not found');
     if(row.artifact_id) row.artifact=await this.store.owned(row.artifact_id,owner);
     return row;
   }
