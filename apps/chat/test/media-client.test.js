@@ -14,10 +14,10 @@ test('client contract bounds durations, maps image/video profiles and does not p
     assert.equal(result.poll_after_seconds,15);
     assert.equal(result.terminal,false);
     assert.equal(result.status_url,`https://chat.example/v1/media/jobs/${id}`);
-    assert.equal(submitted.at(-1).input.profile_id,`wan22-14b-704p-${seconds*16+1}f-v1`);
+    assert.equal(submitted.at(-1).input.profile_id,`wan22-14b-480p-${seconds*16+1}f-v1`);
   }
   await service.submit('owner',{kind:'image',prompt:'test',idempotency_key:id});
-  assert.equal(submitted.at(-1).input.profile_id,'qwen-image-fp8-1024-v1');
+  assert.equal(submitted.at(-1).input.profile_id,'qwen-image-fp8-832x480-v1');
   for (const duration_seconds of [0,11,2.5,'5']) await assert.rejects(service.submit('owner',{kind:'video',duration_seconds}),{statusCode:400});
   await assert.rejects(service.submit('owner',{kind:'image',duration_seconds:5}),{statusCode:400});
 });

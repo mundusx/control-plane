@@ -10,7 +10,7 @@ import { MediaArtifactStore, RETENTION_SECONDS, UPLOAD_SECONDS } from "../src/fe
 import { crc32, validatePng, MAX_IMAGE_BYTES } from "../src/features/media/png.js";
 import { createServerApp } from "../src/main.js";
 import { MediaAccounting } from "../src/features/media/accounting.js";
-import { imageQuote, IMAGE_PROFILE } from "../src/features/media/pricing.js";
+import { imageQuote, LEGACY_IMAGE_PROFILE } from "../src/features/media/pricing.js";
 
 function png(size = 8) {
   const chunk = (kind, data) => {
@@ -190,9 +190,9 @@ test("real HTTP routes reserve with current user, upload by ticket, and download
 });
 
 async function quotedJob(f, id = randomUUID()) {
-  await f.db.query("insert into jobs values($1,'queued',null,$2)", [id, { operation: "text_to_image", media_profile_id: IMAGE_PROFILE }]);
+  await f.db.query("insert into jobs values($1,'queued',null,$2)", [id, { operation: "text_to_image", media_profile_id: LEGACY_IMAGE_PROFILE }]);
   const accounting = new MediaAccounting(f.store);
-  const quote = await accounting.quoteJob({ job_id: id, owner_user_id: f.owner, profile_id: IMAGE_PROFILE });
+  const quote = await accounting.quoteJob({ job_id: id, owner_user_id: f.owner, profile_id: LEGACY_IMAGE_PROFILE });
   assert.equal(quote.quote.compute_credits, 4);
   await f.db.query("update jobs set status='running',assigned_node_id='gx10' where job_id=$1", [id]);
   const bytes = png(1024);
@@ -204,6 +204,8 @@ async function quotedJob(f, id = randomUUID()) {
 test("fixed image quote rejects unbenchmarked profiles and does not price bytes, runtime or text", () => {
   assert.equal(imageQuote().compute_credits, Math.ceil(216337 / 60000));
   assert.equal(imageQuote().cash_price, null);
+  assert.equal(imageQuote().width, 832); assert.equal(imageQuote().height, 480);
+  assert.equal(imageQuote().calibration, "provisional_legacy_rate_pending_benchmark");
   for (const profile of ["video", "qwen-2048", "", null]) assert.throws(() => imageQuote(profile), { statusCode: 422 });
 });
 

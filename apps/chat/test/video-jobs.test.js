@@ -12,7 +12,7 @@ import {PGlite} from '@electric-sql/pglite';
 import {MediaArtifactStore,RETENTION_SECONDS,validateMetadata} from '../src/features/media/store.js';
 import {MediaQueue} from '../src/features/media/queue.js';
 import {mediaQuote} from '../src/features/media/pricing.js';
-const profile='wan22-14b-704p-33f-v1';
+const profile='wan22-14b-480p-33f-v1';
 test('video metadata accepts exact old and new timing presets without mixing them',()=>{
  const metadata={content_type:'video/mp4',width:1280,height:704,sha256:'a'.repeat(64),byte_size:100};
  for(const [fps,frames] of [[24,49],[24,121],[24,241],[16,33],[16,81],[16,161]]) assert.equal(validateMetadata({...metadata,fps,frames}).frames,frames);
@@ -24,7 +24,7 @@ async function fixture(t){
  create table devices(node_id text primary key,public_key_hex text,policy_allowed boolean default true);
  create table jobs(job_id text primary key,request_id text unique,prompt text,preferred_backend text,model text,classification jsonb,status text,assigned_node_id text references devices(node_id),submitted_at_epoch bigint,assigned_at_epoch bigint,completed_at_epoch bigint,error text);
  create table credits_ledger(id uuid primary key,device_id text references devices(node_id),job_id text references jobs(job_id),entry_type text,amount numeric,currency text,metadata jsonb,created_at timestamptz);`);
- for(const name of ['0037_media_artifacts.sql','0038_media_compute_records.sql','0040_video_jobs.sql','0041_video_14b_presets.sql','0042_media_integer_durations.sql']){const sql=await readFile(new URL('../../../db/migrations/'+name,import.meta.url),'utf8');await db.exec(sql);await db.exec(sql);}
+ for(const name of ['0037_media_artifacts.sql','0038_media_compute_records.sql','0040_video_jobs.sql','0041_video_14b_presets.sql','0042_media_integer_durations.sql','0043_video_480p.sql']){const sql=await readFile(new URL('../../../db/migrations/'+name,import.meta.url),'utf8');await db.exec(sql);await db.exec(sql);}
  const owner=randomUUID(),other=randomUUID();await db.query('insert into users(id) values($1),($2)',[owner,other]);
  const key=generateKeyPairSync('ed25519');const pub=key.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('hex');
  await db.query("insert into devices(node_id,public_key_hex) values('gx10',$1),('other',$1)",[pub]);
@@ -33,7 +33,7 @@ async function fixture(t){
  t.after(async()=>{await db.close();await rm(root,{recursive:true,force:true});});
  return {db,root,owner,other,store,queue,device,key,advance:ms=>now+=ms,submit:(extra={})=>queue.submit(owner,{profile_id:profile,prompt:'A teapot',idempotency_key:randomUUID(),...extra})};
 }
-function video(root,frames=33){const path=join(root,'fixture.mp4');execFileSync('ffmpeg',['-v','error','-y','-f','lavfi','-i','color=c=blue:s=1280x704:r=16','-frames:v',String(frames),'-c:v','libx264','-threads','2','-pix_fmt','yuv420p',path],{timeout:30000,windowsHide:true});return readFile(path);}
+function video(root,frames=33){const path=join(root,'fixture.mp4');execFileSync('ffmpeg',['-v','error','-y','-f','lavfi','-i','color=c=blue:s=832x480:r=16','-frames:v',String(frames),'-c:v','libx264','-threads','2','-pix_fmt','yuv420p',path],{timeout:30000,windowsHide:true});return readFile(path);}
 test('video queue is FIFO, idempotent, per-owner and allows one active job per contributor',async t=>{
  const f=await fixture(t),key=randomUUID();const first=await f.submit({idempotency_key:key});assert.equal((await f.submit({idempotency_key:key})).job_id,first.job_id);
  await assert.rejects(f.submit({idempotency_key:key,prompt:'different'}),{statusCode:409});
@@ -95,7 +95,7 @@ test('HTTP video flow authenticates users and signed workers then serves an anon
  const user={Cookie:'session=test','X-MundusX-CSRF':'test','Content-Type':'application/json'};
  const presets=await (await fetch(origin+'/api/media/profiles',{headers:user})).json();
  assert.equal(presets.profiles.length,10);
- assert.ok(presets.profiles.every(p=>p.model==='Wan-AI/Wan2.2-T2V-A14B'&&p.fps===16));
+ assert.ok(presets.profiles.every(p=>p.model==='Wan-AI/Wan2.2-T2V-A14B'&&p.fps===16&&p.width===832&&p.height===480));
  assert.equal((await fetch(origin+'/api/media/jobs')).status,401);
  assert.equal((await fetch(origin+'/api/media/worker/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
  const submitted=await fetch(origin+'/api/media/jobs',{method:'POST',headers:user,body:JSON.stringify({prompt:'HTTP test',profile_id:profile,idempotency_key:randomUUID()})});assert.equal(submitted.status,202);const job=await submitted.json();
@@ -110,7 +110,7 @@ test('HTTP video flow authenticates users and signed workers then serves an anon
 });
 
 test('image queue reuses the media job contract and video workers cannot claim images', async t => {
- const f=await fixture(t), profile_id='qwen-image-fp8-1024-v1';
+ const f=await fixture(t), profile_id='qwen-image-fp8-832x480-v1';
  const job=await f.submit({profile_id});
  assert.equal(job.quote.operation,'text_to_image');
  assert.equal(await f.queue.claim(f.device,[profile]),null);
@@ -118,34 +118,35 @@ test('image queue reuses the media job contract and video workers cannot claim i
  assert.equal(claim.job_id,job.job_id);
  const ticket=await f.queue.reserve('gx10',{...claim,metadata:{sha256:'a'.repeat(64),byte_size:100}});
  assert.equal((await f.store.lookup(ticket.artifact_id)).content_type,'image/png');
- assert.equal(ticket.upload_ticket.width,1024);
+ assert.equal(ticket.upload_ticket.width,832);
+ assert.equal(ticket.upload_ticket.height,480);
  await assert.rejects(f.queue.owned(f.other,job.job_id),{statusCode:404});
 });
 test('all integer video durations are priced and accepted without removing old presets',()=>{
  for(let s=1;s<=10;s++) {
-  const frames=s*16+1,q=mediaQuote(`wan22-14b-704p-${frames}f-v1`);
+  const frames=s*16+1,q=mediaQuote(`wan22-14b-480p-${frames}f-v1`);
   assert.equal(q.frames,frames);
   assert.ok(q.compute_credits>0);
   assert.equal(validateMetadata({content_type:'video/mp4',width:1280,height:704,sha256:'a'.repeat(64),byte_size:100,frames,fps:16}).frames,frames);
  }
 });
 
-function png(size = 8) {
+function png(width = 8, height = width) {
   const chunk = (kind, data) => {
     const body = Buffer.concat([Buffer.from(kind), data]), head = Buffer.alloc(4), tail = Buffer.alloc(4);
     head.writeUInt32BE(data.length); tail.writeUInt32BE(crc32(body));
     return Buffer.concat([head, body, tail]);
   };
-  const header = Buffer.alloc(13); header.writeUInt32BE(size); header.writeUInt32BE(size, 4); header[8] = 8; header[9] = 2;
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 2;
   return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk("IHDR", header),
-    chunk("IDAT", deflateSync(Buffer.alloc(size * (size * 3 + 1)))), chunk("IEND", Buffer.alloc(0))]);
+    chunk("IDAT", deflateSync(Buffer.alloc(height * (width * 3 + 1)))), chunk("IEND", Buffer.alloc(0))]);
 }
 
 test('image client result delivers an expiring URL after validated output and one settlement',async t=>{
  const f=await fixture(t),service=new MediaClientService(f.queue,'https://chat.example');
  const job=await service.submit(f.owner,{kind:'image',prompt:'A teapot',idempotency_key:randomUUID()});
- const claim=await f.queue.claim(f.device,['qwen-image-fp8-1024-v1']);
- const bytes=png(1024),ticket=await f.queue.reserve('gx10',{...claim,metadata:{byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+ const claim=await f.queue.claim(f.device,['qwen-image-fp8-832x480-v1']);
+ const bytes=png(832,480),ticket=await f.queue.reserve('gx10',{...claim,metadata:{byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
  await f.store.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,bytes);
  await f.queue.complete('gx10',{...claim,generation_ms:1000});
  await f.queue.complete('gx10',{...claim,generation_ms:1000});
@@ -184,4 +185,49 @@ test('chat prompts queue three-second videos and persist resumable cards behind 
  const status=await fetch(origin+'/api/media/chat/jobs/'+job.job_id,{headers});assert.equal(status.status,200);assert.equal((await status.json()).state,'queued');
  const rejected=await fetch(path,{method:'POST',headers,body:JSON.stringify({...body,message:'Make a 30 second video',idempotency_key:randomUUID()})});assert.equal(rejected.status,400);
  assert.equal((await f.db.query('select * from media_generation_jobs')).rows.length,1);
+});
+
+
+test('legacy image jobs stay claimable with their original dimensions and credits', async t => {
+ const f=await fixture(t), key=randomUUID(), legacy='qwen-image-fp8-1024-v1';
+ const job=await f.submit({profile_id:'qwen-image-fp8-832x480-v1',idempotency_key:key});
+ const quote=mediaQuote(legacy);
+ await f.db.query('update media_generation_jobs set request=$2 where job_id=$1',[job.job_id,{prompt:'A teapot',profile_id:legacy,seed:42}]);
+ await f.db.query('update media_compute_records set quote=$2 where job_id=$1',[job.job_id,quote]);
+ assert.equal((await f.submit({profile_id:legacy,idempotency_key:key})).job_id,job.job_id);
+ await assert.rejects(f.submit({profile_id:legacy}),{statusCode:422});
+ assert.equal(await f.queue.claim(f.device,['qwen-image-fp8-832x480-v1']),null);
+ const claim=await f.queue.claim(f.device,[legacy]);
+ assert.equal(claim.job_id,job.job_id);
+ assert.equal(claim.quote.width,1024); assert.equal(claim.quote.height,1024);
+ assert.equal(claim.quote.compute_credits,4);
+ const ticket=await f.queue.reserve('gx10',{...claim,metadata:{sha256:'a'.repeat(64),byte_size:100}});
+ assert.equal(ticket.upload_ticket.width,1024); assert.equal(ticket.upload_ticket.height,1024);
+});
+
+
+test('480p migration preserves old artifacts and can be replayed with new rows', async t => {
+ const f=await fixture(t);
+ const base={content_type:'video/mp4',sha256:'a'.repeat(64),byte_size:100};
+ for(const [width,height,fps,frames] of [[1280,704,24,49],[1280,704,16,33],[832,480,16,49]]) {
+   await f.store.reserve(f.owner,{...base,width,height,fps,frames});
+ }
+ const sql=await readFile(new URL('../../../db/migrations/0043_video_480p.sql',import.meta.url),'utf8');
+ await f.db.exec(sql);
+ assert.equal((await f.db.query('select * from media_artifacts')).rows.length,3);
+ for(const extra of [{width:832,height:480,fps:24,frames:49},{width:832,height:704,fps:16,frames:49}]) {
+   assert.throws(()=>validateMetadata({...base,...extra}),{statusCode:400});
+ }
+});
+
+test('old 704p queue jobs retain their quote and can only be claimed by matching workers', async t => {
+ const f=await fixture(t), key=randomUUID(), job=await f.submit({idempotency_key:key});
+ const legacy='wan22-14b-704p-33f-v1',quote=mediaQuote(legacy);
+ await f.db.query('update media_generation_jobs set request=$2 where job_id=$1',[job.job_id,{prompt:'A teapot',profile_id:legacy,seed:42}]);
+ await f.db.query('update media_compute_records set quote=$2 where job_id=$1',[job.job_id,quote]);
+ assert.equal((await f.submit({profile_id:legacy,idempotency_key:key})).job_id,job.job_id);
+ assert.equal(await f.queue.claim(f.device,[profile]),null);
+ const claim=await f.queue.claim(f.device,[legacy]);
+ assert.equal(claim.job_id,job.job_id);assert.equal(claim.quote.width,1280);assert.equal(claim.quote.height,704);
+ assert.equal(mediaQuote(profile).compute_credits,quote.compute_credits);
 });

@@ -20,7 +20,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
     const heading = document.createElement('strong');
     heading.textContent = item.kind === 'video' ? 'Creating your video' : 'Creating your image';
     const detail = document.createElement('p'); detail.className = 'media-chat-detail';
-    detail.textContent = item.kind === 'video' ? (item.duration_seconds || 3) + ' seconds · Maximum 10 seconds' : 'Qwen Image · 1024 × 1024';
+    detail.textContent = item.kind === 'video' ? (item.duration_seconds || 3) + ' seconds · Maximum 10 seconds' : 'Qwen Image · ' + (item.width || 832) + ' × ' + (item.height || 480);
     const status = document.createElement('p'); status.className = 'media-chat-status'; status.setAttribute('role','status');
     status.textContent = 'Submitting request…';
     card.setAttribute('aria-busy','true'); card.append(visual,heading,detail,status); body.append(card);
@@ -32,6 +32,10 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
         while (live()) {
           const job = await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id));
           if (!live()) return;
+          if (item.kind === 'image' && job.quote?.width && job.quote?.height) {
+            item.width = job.quote.width; item.height = job.quote.height;
+            detail.textContent = 'Qwen Image · ' + item.width + ' × ' + item.height;
+          }
           if (job.state === 'completed') {
             if (!job.artifact?.media_available) throw Object.assign(new Error('This download has expired. Your job and credit records are retained.'),{status:410});
             const result = await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id) + '/result', {});
