@@ -91,9 +91,9 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
 export const mediaChatCss = `
 .media-chat-card{width:min(100%,540px);display:grid;gap:12px;padding:16px;border:1px solid var(--line);border-radius:20px;background:var(--panel);overflow:hidden}
 .media-chat-card strong{font-size:16px}.media-chat-card p{margin:0}.media-chat-detail,.media-chat-status{font-size:13px;color:var(--muted);line-height:1.5}
-.media-chat-mesh{height:270px;border-radius:13px;position:relative;overflow:hidden;background:#141b32}
-.media-chat-mesh::before{content:'';position:absolute;inset:-55%;background:radial-gradient(ellipse at 28% 32%,#87b2ff 0%,transparent 42%),radial-gradient(ellipse at 76% 42%,#b394f8 0%,transparent 45%),radial-gradient(ellipse at 48% 80%,#38b9b1 0%,transparent 45%);filter:blur(22px);animation:media-mesh-drift 7s ease-in-out infinite alternate}
-.media-chat-mesh::after{content:'';position:absolute;inset:0;background-image:linear-gradient(#ffffff10 1px,transparent 1px),linear-gradient(90deg,#ffffff10 1px,transparent 1px);background-size:26px 26px;opacity:.45}
+.media-chat-mesh{height:270px;border-radius:13px;position:relative;overflow:hidden;background:#f8fafc}
+.media-chat-mesh::before{content:'';position:absolute;inset:-35%;background:radial-gradient(ellipse at 28% 32%,#dce9fa 0%,transparent 48%),radial-gradient(ellipse at 76% 42%,#ebe4f7 0%,transparent 48%),radial-gradient(ellipse at 48% 80%,#dff2ef 0%,transparent 48%);filter:blur(32px);opacity:.75;animation:media-mesh-drift 10s ease-in-out infinite alternate}
+.media-chat-mesh::after{content:'';position:absolute;inset:0;background-image:linear-gradient(#94a3b808 1px,transparent 1px),linear-gradient(90deg,#94a3b808 1px,transparent 1px);background-size:32px 32px;opacity:.4}
 @keyframes media-mesh-drift{from{transform:rotate(-10deg) translate(-3%,-2%) scale(1)}to{transform:rotate(24deg) translate(6%,3%) scale(1.15)}}
 .media-chat-still::before{animation:none}.media-chat-output{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:13px;background:#10131a}
 .media-chat-download{display:inline-block;width:fit-content;color:var(--text);font-size:14px;font-weight:600;text-decoration:underline;text-underline-offset:4px}
