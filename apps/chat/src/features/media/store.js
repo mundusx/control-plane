@@ -25,10 +25,12 @@ export function validateMetadata(input) {
   return { sha256: input.sha256, byte_size: input.byte_size, width: input.width, height: input.height };
 }
 
-function publicRecord(row) {
+function publicRecord(row, now = Date.now()) {
   return { artifact_id: row.artifact_id, status: row.status, content_type: "image/png",
     sha256: row.sha256, byte_size: row.byte_size, width: row.width, height: row.height,
-    ready_at: row.ready_at, expires_at: row.expires_at, retention_seconds: RETENTION_SECONDS };
+    ready_at: row.ready_at, expires_at: row.expires_at, retention_seconds: RETENTION_SECONDS,
+    file_deleted_at: row.file_deleted_at ?? null,
+    image_available: row.status === "ready" && !row.file_deleted_at && new Date(row.expires_at).getTime() > now };
 }
 
 export class MediaArtifactStore {
@@ -100,8 +102,8 @@ export class MediaArtifactStore {
 
   async owned(id, owner) {
     const row = await this.lookup(id);
-    if (row.owner_user_id !== owner || new Date(row.expires_at).getTime() <= this.now()) throw notFound();
-    return publicRecord(row);
+    if (row.owner_user_id !== owner) throw notFound();
+    return publicRecord(row, this.now());
   }
 
   async renewLink(id, owner) {
@@ -112,7 +114,7 @@ export class MediaArtifactStore {
     [hash(token), id, owner, new Date(this.now())]);
     if (!result.rows.length) throw notFound();
     const path = `/media/${id}/image.png?token=${token}`;
-    return { ...publicRecord(result.rows[0]), download_path: path, preview_path: `${path}&inline=1` };
+    return { ...publicRecord(result.rows[0], this.now()), download_path: path, preview_path: `${path}&inline=1` };
   }
 
   authorizeUpload(row, token) {
@@ -139,12 +141,12 @@ export class MediaArtifactStore {
         if (!result.rows.length) throw notFound();
         const current = result.rows[0];
         this.authorizeUpload(current, token);
-        if (current.status === "ready") return publicRecord(current); // Retry cannot extend retention or overwrite bytes.
+        if (current.status === "ready") return publicRecord(current, this.now()); // Retry cannot extend retention or overwrite bytes.
         await rename(temporary, this.file(id));
         const now = new Date(this.now()), expires = new Date(this.now() + RETENTION_SECONDS * 1000);
         const updated = await client.query(`update public.media_artifacts set status='ready', ready_at=$1, expires_at=$2
           where artifact_id=$3 returning *`, [now, expires, id]);
-        return publicRecord(updated.rows[0]);
+        return publicRecord(updated.rows[0], this.now());
       });
     } finally {
       await file?.close().catch(() => {});
@@ -160,7 +162,7 @@ export class MediaArtifactStore {
       file = await open(this.file(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const info = await file.stat();
       if (!info.isFile() || info.size !== row.byte_size) throw notFound();
-      return { file, record: publicRecord(row) };
+      return { file, record: publicRecord(row, this.now()) };
     } catch (error) { await file?.close(); if (error.code === "ENOENT" || error.code === "ELOOP") throw notFound(); throw error; }
   }
 
@@ -171,10 +173,12 @@ export class MediaArtifactStore {
       // Row locks prevent cleanup racing a final upload/commit, including across processes.
       const removed = await this.transaction(async (client) => {
         const result = await client.query(`select artifact_id from public.media_artifacts
-          where expires_at <= $1 order by expires_at limit 100 for update skip locked`, [new Date(this.now())]);
+          where expires_at <= $1 and file_deleted_at is null order by expires_at limit 100 for update skip locked`, [new Date(this.now())]);
         for (const row of result.rows) {
           await unlink(this.file(row.artifact_id)).catch((e) => { if (e.code !== "ENOENT") throw e; });
-          await client.query("delete from public.media_artifacts where artifact_id=$1", [row.artifact_id]);
+          await client.query(`update public.media_artifacts set file_deleted_at=$2,
+            upload_token_hash=repeat('0',64),download_token_hash=repeat('0',64) where artifact_id=$1`,
+          [row.artifact_id, new Date(this.now())]);
         }
         return result.rows.length;
       });

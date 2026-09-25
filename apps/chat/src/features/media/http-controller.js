@@ -1,17 +1,33 @@
 import { pipeline } from "node:stream/promises";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { imageQuote } from "./pricing.js";
+import { MediaAccounting } from "./accounting.js";
 import { httpError } from "../../shared/http-error.js";
 import { MAX_IMAGE_BYTES } from "./png.js";
 
-export function createMediaHttpController({ store, authStore, readJsonBody, sendJson }) {
+export function createMediaHttpController({ store, authStore, operatorToken, readJsonBody, sendJson }) {
+  const accounting = store ? new MediaAccounting(store) : null;
   return async function handleMedia({ request, response, url }) {
+    const price = url.pathname === "/api/media/quote";
+    const compute = url.pathname.match(/^\/api\/media\/computations\/([^/]+)$/);
+    const internal = url.pathname.match(/^\/api\/media\/accounting\/(quote|bind|settle)$/);
     const api = url.pathname.match(/^\/api\/media\/artifacts(?:\/([0-9a-f-]{36})(?:\/(content|link))?)?$/);
     const download = url.pathname.match(/^\/media\/([0-9a-f-]{36})\/image\.png$/);
-    if (!api && !download) return false;
+    if (!api && !download && !price && !compute && !internal) return false;
     response.setHeader("Cache-Control", "private, no-store, max-age=0");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
     if (!store) throw httpError(503, "Image storage is not configured");
+    if (internal) {
+      const digest = (value) => createHash("sha256").update(String(value)).digest();
+      const supplied = String(request.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!operatorToken || !timingSafeEqual(digest(supplied), digest(operatorToken))) throw httpError(401, "Dispatcher authorization required");
+      if (request.method !== "POST") throw httpError(405, "Method not allowed");
+      const method = { quote: "quoteJob", bind: "bindArtifact", settle: "settle" }[internal[1]];
+      sendJson(response, 200, await accounting[method](await readJsonBody(request)));
+      return true;
+    }
 
     // These two capability routes deliberately precede the browser login/CSRF gate.
     if (download && ["GET", "HEAD"].includes(request.method)) {
@@ -60,6 +76,14 @@ export function createMediaHttpController({ store, authStore, readJsonBody, send
     // Reservation and link rotation use the existing account; downloading uses only the link.
     const session = await authStore.session(request);
     if (!session) throw httpError(401, "Sign in to create or manage an image result");
+    if (price && request.method === "GET") {
+      sendJson(response, 200, imageQuote(url.searchParams.get("profile_id") ?? undefined));
+      return true;
+    }
+    if (compute && request.method === "GET") {
+      sendJson(response, 200, await accounting.owned(decodeURIComponent(compute[1]), session.id));
+      return true;
+    }
     if (request.method === "POST") authStore.requireCsrf(request, session);
     if (api && !api[1] && request.method === "POST") {
       sendJson(response, 201, await store.reserve(session.id, await readJsonBody(request)));

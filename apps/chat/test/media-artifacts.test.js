@@ -9,16 +9,18 @@ import { PGlite } from "@electric-sql/pglite";
 import { MediaArtifactStore, RETENTION_SECONDS, UPLOAD_SECONDS } from "../src/features/media/store.js";
 import { crc32, validatePng, MAX_IMAGE_BYTES } from "../src/features/media/png.js";
 import { createServerApp } from "../src/main.js";
+import { MediaAccounting } from "../src/features/media/accounting.js";
+import { imageQuote, IMAGE_PROFILE } from "../src/features/media/pricing.js";
 
-function png() {
+function png(size = 8) {
   const chunk = (kind, data) => {
     const body = Buffer.concat([Buffer.from(kind), data]), head = Buffer.alloc(4), tail = Buffer.alloc(4);
     head.writeUInt32BE(data.length); tail.writeUInt32BE(crc32(body));
     return Buffer.concat([head, body, tail]);
   };
-  const header = Buffer.alloc(13); header.writeUInt32BE(8); header.writeUInt32BE(8, 4); header[8] = 8; header[9] = 2;
+  const header = Buffer.alloc(13); header.writeUInt32BE(size); header.writeUInt32BE(size, 4); header[8] = 8; header[9] = 2;
   return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk("IHDR", header),
-    chunk("IDAT", deflateSync(Buffer.alloc(8 * 25))), chunk("IEND", Buffer.alloc(0))]);
+    chunk("IDAT", deflateSync(Buffer.alloc(size * (size * 3 + 1)))), chunk("IEND", Buffer.alloc(0))]);
 }
 const metadata = (bytes = png()) => ({ sha256: createHash("sha256").update(bytes).digest("hex"), byte_size: bytes.length, width: 8, height: 8 });
 const tokenOf = (path) => new URL(path, "http://localhost").searchParams.get("token");
@@ -26,10 +28,17 @@ const tokenOf = (path) => new URL(path, "http://localhost").searchParams.get("to
 async function fixture(t) {
   const db = new PGlite(), root = await mkdtemp(join(tmpdir(), "mundusx-media-"));
   await db.exec("create table public.users(id uuid primary key, status text not null default 'active')");
-  const migration = await readFile(new URL("../../../db/migrations/0037_media_artifacts.sql", import.meta.url), "utf8");
-  assert.equal(await readFile(new URL("../migrations/0037_media_artifacts.sql", import.meta.url), "utf8"), migration);
-  await db.exec(migration);
-  await db.exec(migration); // Independent web startups may repeat this migration.
+  await db.exec(`create table public.devices(node_id text primary key);
+    create table public.jobs(job_id text primary key,status text not null,assigned_node_id text references public.devices(node_id),classification jsonb not null);
+    create table public.credits_ledger(id uuid primary key,device_id text references public.devices(node_id),job_id text references public.jobs(job_id),
+      entry_type text not null,amount numeric not null,currency text not null,metadata jsonb not null,created_at timestamptz not null);
+    insert into public.devices values('gx10');`);
+  for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql"]) {
+    const migration = await readFile(new URL(`../../../db/migrations/${name}`, import.meta.url), "utf8");
+    assert.equal(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"), migration);
+    await db.exec(migration);
+    await db.exec(migration); // Independent web startups may repeat this migration.
+  }
   const owner = randomUUID(), other = randomUUID();
   await db.query("insert into public.users(id) values($1),($2)", [owner, other]);
   // PGlite is one connection; serialize borrowed transactions like a size-one pg Pool.
@@ -47,7 +56,7 @@ async function fixture(t) {
   return { db, root, owner, other, store, pool, advance: (ms) => { now += ms; } };
 }
 
-test("private upload survives restart; ready PNG downloads using link only; expiry deletes bytes and row", async (t) => {
+test("private upload survives restart; expiry deletes bytes but retains owner history", async (t) => {
   const f = await fixture(t), bytes = png();
   const reservation = await f.store.reserve(f.owner, metadata());
   const id = reservation.artifact_id, token = tokenOf(reservation.download_path);
@@ -70,7 +79,10 @@ test("private upload survives restart; ready PNG downloads using link only; expi
   assert.ok(await stat(f.store.file(id))); // Access expires even before the cleanup sweep.
   assert.equal(await f.store.cleanup(), 1);
   await assert.rejects(stat(f.store.file(id)), { code: "ENOENT" });
-  assert.equal((await f.db.query("select * from media_artifacts")).rows.length, 0);
+  assert.equal((await f.db.query("select * from media_artifacts")).rows.length, 1);
+  assert.equal((await f.store.owned(id, f.owner)).image_available, false);
+  assert.ok((await f.store.owned(id, f.owner)).file_deleted_at);
+  assert.equal(await f.store.cleanup(), 0);
 });
 
 test("upload tickets are scoped, expire, and cannot publish malformed images", async (t) => {
@@ -175,4 +187,98 @@ test("real HTTP routes reserve with current user, upload by ticket, and download
   assert.equal(response.status, 200); assert.match(response.headers.get("content-disposition"), /^inline/);
   f.advance(RETENTION_SECONDS * 1000);
   response = await fetch(base + reservation.download_path); assert.equal(response.status, 404);
+});
+
+async function quotedJob(f, id = randomUUID()) {
+  await f.db.query("insert into jobs values($1,'queued',null,$2)", [id, { operation: "text_to_image", media_profile_id: IMAGE_PROFILE }]);
+  const accounting = new MediaAccounting(f.store);
+  const quote = await accounting.quoteJob({ job_id: id, owner_user_id: f.owner, profile_id: IMAGE_PROFILE });
+  assert.equal(quote.quote.compute_credits, 4);
+  await f.db.query("update jobs set status='running',assigned_node_id='gx10' where job_id=$1", [id]);
+  const bytes = png(1024);
+  const reservation = await f.store.reserve(f.owner, { ...metadata(bytes), width: 1024, height: 1024 });
+  await accounting.bindArtifact({ job_id: id, artifact_id: reservation.artifact_id, node_id: "gx10" });
+  return { accounting, id, reservation, bytes };
+}
+
+test("fixed image quote rejects unbenchmarked profiles and does not price bytes, runtime or text", () => {
+  assert.equal(imageQuote().compute_credits, Math.ceil(216337 / 60000));
+  assert.equal(imageQuote().cash_price, null);
+  for (const profile of ["video", "qwen-2048", "", null]) assert.throws(() => imageQuote(profile), { statusCode: 422 });
+});
+
+test("completed image earns exactly four credits once; expiry preserves job, quote and ledger", async (t) => {
+  const f = await fixture(t), j = await quotedJob(f);
+  await f.store.upload(j.reservation.artifact_id, j.reservation.upload_ticket.upload_token, j.bytes);
+  await f.db.query("update jobs set status='completed' where job_id=$1", [j.id]);
+  const [first, retry] = await Promise.all([
+    j.accounting.settle({ job_id: j.id, generation_ms: 216337 }),
+    j.accounting.settle({ job_id: j.id, generation_ms: 999999 }),
+  ]);
+  assert.equal(first.ledger_id, retry.ledger_id);
+  const before = (await f.db.query("select * from credits_ledger")).rows;
+  assert.equal(before.length, 1); assert.equal(Number(before[0].amount), 4);
+  assert.equal(before[0].device_id, "gx10");
+  const jobBefore = (await f.db.query("select * from jobs")).rows;
+  const computationBefore = await j.accounting.owned(j.id, f.owner);
+  await assert.rejects(j.accounting.owned(j.id, f.other), { statusCode: 404 });
+  f.advance(RETENTION_SECONDS * 1000);
+  await f.store.cleanup();
+  await assert.rejects(stat(f.store.file(j.reservation.artifact_id)), { code: "ENOENT" });
+  assert.deepEqual((await f.db.query("select * from credits_ledger")).rows, before);
+  assert.deepEqual((await f.db.query("select * from jobs")).rows, jobBefore);
+  assert.deepEqual(await j.accounting.owned(j.id, f.owner), computationBefore);
+  assert.equal((await new MediaAccounting(f.store).settle({ job_id: j.id, generation_ms: 1 })).ledger_id, first.ledger_id);
+  assert.equal((await f.db.query("select * from credits_ledger")).rows.length, 1);
+});
+
+test("failed jobs, pending uploads, wrong contributors and legacy rewards cannot earn media credits", async (t) => {
+  const f = await fixture(t), j = await quotedJob(f);
+  await assert.rejects(j.accounting.bindArtifact({ job_id: j.id, artifact_id: j.reservation.artifact_id, node_id: "imposter" }), { statusCode: 409 });
+  await assert.rejects(j.accounting.settle({ job_id: j.id, generation_ms: 1 }), { statusCode: 409 });
+  await f.db.query("update jobs set status='completed' where job_id=$1", [j.id]);
+  await assert.rejects(j.accounting.settle({ job_id: j.id, generation_ms: 1 }), { statusCode: 409 });
+  await f.store.upload(j.reservation.artifact_id, j.reservation.upload_ticket.upload_token, j.bytes);
+  await f.db.query("update jobs set status='failed' where job_id=$1", [j.id]);
+  await assert.rejects(j.accounting.settle({ job_id: j.id, generation_ms: 1 }), { statusCode: 409 });
+  await f.db.query("update jobs set status='completed' where job_id=$1", [j.id]);
+  await f.db.query("insert into credits_ledger values($1,'gx10',$2,'job_reward',1,'credits','{}',now())", [randomUUID(), j.id]);
+  await assert.rejects(j.accounting.settle({ job_id: j.id, generation_ms: 1 }), { statusCode: 409 });
+  assert.equal((await f.db.query("select * from credits_ledger")).rows.length, 1);
+});
+
+test("settlement rollback cannot leave a paid ledger without its receipt", async (t) => {
+  const f = await fixture(t), j = await quotedJob(f);
+  await f.store.upload(j.reservation.artifact_id, j.reservation.upload_ticket.upload_token, j.bytes);
+  await f.db.query("update jobs set status='completed' where job_id=$1", [j.id]);
+  const connect = f.pool.connect.bind(f.pool);
+  f.pool.connect = async () => {
+    const client = await connect(), query = client.query;
+    client.query = (sql, params) => {
+      if (sql.includes("set status='settled'")) throw new Error("simulated settlement failure");
+      return query(sql, params);
+    };
+    return client;
+  };
+  await assert.rejects(j.accounting.settle({ job_id: j.id, generation_ms: 10 }), /simulated settlement failure/);
+  assert.equal((await f.db.query("select * from credits_ledger")).rows.length, 0);
+  f.pool.connect = connect;
+  assert.equal((await j.accounting.settle({ job_id: j.id, generation_ms: 10 })).status, "settled");
+});
+
+test("accounting endpoints require dispatcher authority; user quote and history require login", async (t) => {
+  const f = await fixture(t);
+  const server = createServerApp({ mediaStore: f.store, operatorToken: "private-dispatcher-secret", authStore: {
+    async session(req) { return req.headers["x-test-user"] ? { id: f.owner } : null; }, requireCsrf() {},
+  } });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (const action of ["quote", "bind", "settle"]) {
+    const r = await fetch(`${base}/api/media/accounting/${action}`, { method: "POST", headers: { "x-test-user": "yes" }, body: "{}" });
+    assert.equal(r.status, 401);
+  }
+  assert.equal((await fetch(`${base}/api/media/quote`)).status, 401);
+  const r = await fetch(`${base}/api/media/quote`, { headers: { "x-test-user": "yes" } });
+  assert.equal(r.status, 200); assert.equal((await r.json()).compute_credits, 4);
 });

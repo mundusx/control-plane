@@ -6798,7 +6798,7 @@ export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
   const mediaStore = config.mediaStore ?? (config.mediaDirectory
     ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
-  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, readJsonBody, sendJson });
+  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
   const handleHarnessRequest = createHarnessHttpController({

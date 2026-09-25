@@ -12,8 +12,11 @@ GET and HEAD refuse access even if cleanup has not yet run. Successful retries
 and refreshed links never extend this deadline. Active downloads are terminated
 when their deadline is reached. Responses disable caching and indexing.
 
-The server sweeps expired rows/files on startup and every 60 seconds, up to 100
-records per sweep. Under normal load, physical deletion follows expiry within
+The server sweeps expired files on startup and every 60 seconds, up to 100
+records per sweep. Metadata remains with `file_deleted_at` set; token hashes are
+cleared. Jobs, computation quotes/receipts and credit ledger entries do not expire.
+The owner's status endpoint continues to return history with `image_available: false`.
+Under normal load, physical deletion follows expiry within
 one minute; a backlog, database outage, filesystem error or stopped server delays
 physical deletion. It retries after failures and on restart. Pending reservations
 expire after one hour. Abandoned temporary upload files are removed after two
@@ -29,7 +32,7 @@ this retention policy applies to the server copy.
 1. `npm start` applies the bundled media migration before starting the web server
    when media is enabled. Set `MUNDUSX_DATABASE_URL` to the direct native PostgreSQL
    connection (Railway: `${{Postgres.DATABASE_URL}}`). The bundled SQL matches
-   `db/migrations/0037_media_artifacts.sql`, is idempotent, and uses a transaction
+   `db/migrations/0037_media_artifacts.sql` and `0038_media_compute_records.sql`, is idempotent, and uses a transaction
    lock. The runtime role must have access to the new table.
 2. Mount persistent disk on the **web server** and set `MUNDUSX_MEDIA_DIR` to an
    absolute private path, for example `/var/lib/mundusx/media`. Do not place it
@@ -92,11 +95,53 @@ uploads per process, 64 unexpired reservations/results and 256 MiB per user.
 The service refuses new reservations when less than 512 MiB plus the requested
 size remains on the volume. SVG, video and arbitrary file downloads are rejected.
 
+## Computation and credits
+
+The initial versioned rate (`image-compute-v1`) is **4 compute credits and 4
+contributor reward credits** for one `qwen-image-fp8-1024-v1` output: original
+Qwen-Image FP8, 1024×1024, 30 steps. Calibration is provisional, based on one
+216,337 ms GX10 generation: `ceil(216337 / 60000) = 4`. This is a chosen reference
+compute-minute credit rate, not a cash price or a measured equivalence to LLM
+text credits. Slower hardware, runtime overhead, waiting, upload, retries and
+contribution percentage never inflate the reward. Actual generation time is
+kept as telemetry. Higher resolutions, editing and video remain unpriced and
+are rejected; benchmark and version those presets before enabling them.
+
+`GET /api/media/quote?profile_id=qwen-image-fp8-1024-v1` returns the rate to a
+signed-in user. `GET /api/media/computations/{job_id}` returns the owner's durable
+quote and settlement, including after the image expires. No customer balance
+is debited; the existing credit system is contributor rewards. Cash pricing
+requires a separate policy.
+
+Trusted dispatcher integration uses `Authorization: Bearer <operator token>`:
+
+1. POST `/api/media/accounting/quote` with `job_id`, `owner_user_id`, `profile_id`
+   before execution. The existing job must be queued and its classification
+   must contain `operation: text_to_image` and the matching `media_profile_id`.
+   The immutable quote is saved in native PostgreSQL, separate from the file.
+2. After generation, create the owner's artifact reservation and POST
+   `/api/media/accounting/bind` with `job_id`, `artifact_id`, `node_id` before
+   uploading. Binding requires the assigned contributor, owner and dimensions
+   to match. An ordinary user upload cannot create a computation or earn credits.
+3. Upload and validate the PNG. Record successful job completion through the
+   media dispatcher, then POST `/api/media/accounting/settle` with `job_id` and
+   measured `generation_ms`. This requires both the completed assigned job and
+   a ready, unexpired artifact. It atomically appends one `job_reward` to the
+   existing `credits_ledger` and stores the settlement receipt. Retries return
+   the same receipt, including after file deletion. Failed, cancelled or
+   incomplete jobs earn nothing. An existing reward causes reconciliation to
+   be required instead of issuing another reward.
+
+Never give dispatcher credentials to contributors or browsers. The media
+dispatcher must bypass the LLM text reward path and must not submit image jobs
+to the legacy LLM scheduler. These endpoints do not create, schedule or execute
+jobs. The legacy LLM formula is unchanged.
+
 ## Integration boundary and validation
 
 This is the result transport layer for generated images. The distributed image
 job scheduler and its user-facing generation flow are still separate work; this
-change does not mark jobs complete, charge users, or enable image dispatch. When
+change does not mark jobs complete, debit users, or enable image dispatch. When
 that layer is connected, it must allocate the reservation for the recorded job
 owner, deliver only the scoped upload ticket to the assigned worker, and return
 the download link only to the requester. Never put worker tickets in shared job
@@ -105,7 +150,9 @@ listings. Image generation is not claimed complete until upload succeeds.
 Tests exercise the actual PostgreSQL SQL using PGlite plus filesystem and HTTP:
 ownership, no-login downloads, expiry at 48 hours, physical deletion, restart,
 token rotation, scoped uploads, concurrent retries, database failure recovery,
-PNG validation and quotas. The contributor has separate upload-client tests.
+PNG validation, quotas, fixed quotes, dispatcher authorization, exactly-once
+settlement, rollback and preservation of jobs/credits after file expiry.
+The contributor has separate upload-client tests.
 Run `pnpm --filter @mundusx/chat test` and
 `python -m unittest discover -s workers/media -p 'test_*.py'` in the contributor
 repository. A deployment still needs a mounted volume, applied migration and
@@ -115,7 +162,8 @@ Development verification on 2026-09-25: the real GX10 output (849135 bytes,
 SHA-256 `64c98dea7a3ae44cf5c66e5287c6be3e9ae016c191fde9c11e8d88eb227a41b8`)
 was uploaded by the compiled Windows CLI through a loopback web server using
 the PostgreSQL test engine. The no-login download was byte-identical. Advancing
-the test clock by 48 hours denied access and cleanup removed the file and row.
+the test clock by 48 hours denied access and cleanup removed the file. The
+subsequent accounting version retains the metadata, job and ledger history.
 The updated ARM64 CLI was also built and installed on GX10, and its four upload
-client tests passed there. No public web-server deployment or live database
-migration has been performed by this change yet.
+client tests passed there. The initial transport deployed via the `ehda` Git
+branch to Railway's `chat` service; subsequent migrations run during startup.
