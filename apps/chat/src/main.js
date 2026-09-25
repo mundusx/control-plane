@@ -5,6 +5,7 @@ import { projectCompletionGaps } from "./project-completion.js";
 import { webResearchRequest, fetchWebResearch } from "./web-research.js";
 import { createServer } from "node:http";
 import { MediaArtifactStore } from "./features/media/store.js";
+import { mediaAdmission } from "./features/media/admission.js";
 import { createMediaHttpController } from "./features/media/http-controller.js";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -6857,7 +6858,7 @@ export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
   const mediaStore = config.mediaStore ?? (config.mediaDirectory
     ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
-  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson });
+  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config) });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
   const handleHarnessRequest = createHarnessHttpController({

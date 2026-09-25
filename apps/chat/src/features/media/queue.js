@@ -5,7 +5,7 @@ import { httpError } from '../../shared/http-error.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export class MediaQueue {
-  constructor(store) { this.store=store; this.accounting=new MediaAccounting(store); }
+  constructor(store, admitWorker = async device => device.policy_allowed === true) { this.store=store; this.accounting=new MediaAccounting(store); this.admitWorker=admitWorker; }
   async authenticate(request, path, body) {
     const h=request.headers, node=String(h['x-mundusx-node-id']??''), timestamp=String(h['x-mundusx-timestamp']??''), signature=String(h['x-mundusx-signature']??'');
     if (!/^\d{10}$/.test(timestamp) || Math.abs(Number(timestamp)*1000-this.store.now())>120000 || !/^[0-9a-f]{128}$/.test(signature) || !uuid.test(body?._nonce??'')) throw httpError(401,'Invalid worker signature');
@@ -39,7 +39,7 @@ export class MediaQueue {
     });
   }
   async claim(device,profiles) {
-    if(!device.policy_allowed) throw httpError(403,'Contributor policy does not allow work');
+    if(!await this.admitWorker(device)) throw httpError(403,'Contributor policy does not allow work');
     const supported=Array.isArray(profiles)?profiles.filter(x=>Object.hasOwn(VIDEO_PROFILES,x)):[];
     if(!supported.length) throw httpError(422,'No supported video presets');
     return this.store.transaction(async db=>{

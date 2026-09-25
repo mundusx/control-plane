@@ -69,7 +69,7 @@ test('video prices use fixed benchmark work and reject arbitrary profiles',()=>{
 test('HTTP video flow authenticates users and signed workers then serves an anonymous download',async t=>{
  const f=await fixture(t);const {createServerApp}=await import('../src/main.js');
  const authStore={session:async req=>req.headers.cookie==='session=test'?{id:f.owner}:null,requireCsrf(req){if(req.headers['x-mundusx-csrf']!=='test')throw Object.assign(new Error('CSRF'),{statusCode:403});}};
- const server=createServerApp({auth:{required:true},authStore,mediaStore:f.store});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
+ const server=createServerApp({auth:{required:true},authStore,mediaStore:f.store,mediaAdmission:async device=>device.policy_allowed===true});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
  const origin='http://127.0.0.1:'+server.address().port;
  const user={Cookie:'session=test','X-MundusX-CSRF':'test','Content-Type':'application/json'};
  assert.equal((await fetch(origin+'/api/media/jobs')).status,401);
