@@ -64,7 +64,7 @@ test('MP4 validation rejects corrupt files and a mismatched frame preset',async 
  const a=await f.store.reserve(f.owner,metadata);await assert.rejects(f.store.upload(a.artifact_id,a.upload_ticket.upload_token,bytes),{statusCode:422});
  const corrupt=Buffer.from('not video');const b=await f.store.reserve(f.owner,{...metadata,byte_size:corrupt.length,sha256:createHash('sha256').update(corrupt).digest('hex')});await assert.rejects(f.store.upload(b.artifact_id,b.upload_ticket.upload_token,corrupt),{statusCode:422});
 });
-test('video prices use fixed benchmark work and reject arbitrary profiles',()=>{assert.equal(mediaQuote('wan22-5b-704p-121f-v1').compute_credits,9);assert.throws(()=>mediaQuote('unbenchmarked'),{statusCode:422});});
+test('video prices use fixed benchmark work and reject arbitrary profiles',()=>{assert.equal(mediaQuote('wan22-5b-704p-121f-v1').compute_credits,9);for (const unsupported of ['unbenchmarked', '__proto__', 'constructor']) assert.throws(()=>mediaQuote(unsupported),{statusCode:422});});
 
 test('HTTP video flow authenticates users and signed workers then serves an anonymous download',async t=>{
  const f=await fixture(t);const {createServerApp}=await import('../src/main.js');

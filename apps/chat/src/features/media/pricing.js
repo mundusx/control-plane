@@ -24,7 +24,7 @@ export const VIDEO_PROFILES = {
 };
 export function mediaQuote(profile = IMAGE_PROFILE) {
   if (profile === IMAGE_PROFILE) return imageQuote(profile);
-  const preset = VIDEO_PROFILES[profile];
+  const preset = Object.hasOwn(VIDEO_PROFILES, profile) ? VIDEO_PROFILES[profile] : null;
   if (!preset) throw httpError(422, 'Media profile is not benchmarked or priced');
   return { pricing_version: 'video-compute-v1', profile_id: profile, operation: 'text_to_video', model: 'Wan-AI/Wan2.2-TI2V-5B',
     width: 1280, height: 704, steps: 20, frames: preset.frames, fps: 24, duration_seconds: preset.frames/24,
