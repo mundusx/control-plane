@@ -1997,6 +1997,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .auth-google[aria-disabled="true"] { pointer-events:none; opacity:.5; }
     .auth-google svg { width:20px; height:20px; flex:0 0 auto; }
     .auth-privacy { font-size:12px; }
+    .auth-method[hidden], .auth-google[hidden], .auth-privacy[hidden] { display:none !important; }
+    .auth-password { display:grid; gap:12px; }
+    .auth-password label { display:grid; gap:6px; font-size:13px; text-align:left; }
+    .auth-password input { width:100%; box-sizing:border-box; padding:12px; border:1px solid var(--line-strong); border-radius:10px; }
+    .auth-password button { min-height:46px; border:0; border-radius:10px; background:var(--gradient); color:white; font-weight:700; cursor:pointer; }
+    .auth-divider { text-align:center; font-size:12px; color:var(--muted); }
     .auth-message { min-height: 20px; font-size: 13px; color: var(--muted); }
     .account-widget[hidden] { display:none; }
     .repository-path { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
@@ -2266,8 +2272,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       <button class="auth-close" id="auth-close" type="button" aria-label="Close sign-in">&times;</button>
       <div class="auth-brand"><span>Ehda</span></div>
       <div><h1 id="auth-title">Continue your chat</h1><p>Sign in to send your message and keep your conversations synced.</p></div>
-      <a class="auth-google" id="auth-google" href="/api/auth/google/start?return_to=/"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.6 0-4.81-1.76-5.6-4.13H3.06v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.4 13.93A6 6 0 0 1 6.09 12c0-.67.11-1.32.31-1.93V7.45H3.06A10 10 0 0 0 2 12c0 1.61.39 3.14 1.06 4.55l3.34-2.62Z"/><path fill="#EA4335" d="M12 5.94c1.47 0 2.79.51 3.83 1.5l2.87-2.88A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.94 5.45l3.34 2.62c.79-2.37 3-4.13 5.6-4.13Z"/></svg><span>Continue with Google</span></a>
-      <p class="auth-privacy">Google verifies your identity. Your Google password is never shared with MundusX.</p>
+      <form id="auth-password" class="auth-password auth-method" hidden>
+        <label>Username<input id="auth-username" name="username" autocomplete="username" required maxlength="128" /></label>
+        <label>Password<input id="auth-password-input" name="password" type="password" autocomplete="current-password" required maxlength="1024" /></label>
+        <button id="auth-password-submit" type="submit">Sign in</button>
+      </form>
+      <div id="auth-divider" class="auth-divider auth-method" hidden>or</div>
+      <a class="auth-google" id="auth-google" hidden href="/api/auth/google/start?return_to=/"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.6 0-4.81-1.76-5.6-4.13H3.06v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.4 13.93A6 6 0 0 1 6.09 12c0-.67.11-1.32.31-1.93V7.45H3.06A10 10 0 0 0 2 12c0 1.61.39 3.14 1.06 4.55l3.34-2.62Z"/><path fill="#EA4335" d="M12 5.94c1.47 0 2.79.51 3.83 1.5l2.87-2.88A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.94 5.45l3.34 2.62c.79-2.37 3-4.13 5.6-4.13Z"/></svg><span>Continue with Google</span></a>
+      <p id="auth-google-privacy" class="auth-privacy" hidden>Google verifies your identity. Your Google password is never shared with MundusX.</p>
       <div class="auth-message" id="auth-message" aria-live="polite"></div>
     </div>
   </div>
@@ -2294,7 +2306,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       <div class="guest-widget" id="guest-widget">
         <strong>Try MundusX</strong>
         <p>Explore Chat and Projects. Sign in when you want to send, save conversations, or connect your local agent.</p>
-        <button class="guest-login" id="guest-login" type="button">Log in with Google</button>
+        <button class="guest-login" id="guest-login" type="button">Log in</button>
       </div>
       <div class="account-widget" id="account-widget" hidden>
         <div class="account-menu" id="account-menu">
@@ -2438,6 +2450,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const authGateEl = document.getElementById("auth-gate");
     const authMessageEl = document.getElementById("auth-message");
     const authGoogleEl = document.getElementById("auth-google");
+    const authPasswordEl = document.getElementById("auth-password");
+    const authUsernameEl = document.getElementById("auth-username");
+    const authPasswordInputEl = document.getElementById("auth-password-input");
+    const authPasswordSubmitEl = document.getElementById("auth-password-submit");
     const authCloseEl = document.getElementById("auth-close");
     const accountWidgetEl = document.getElementById("account-widget");
     const accountSettingsEl = document.getElementById("account-settings");
@@ -2713,6 +2729,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     async function bootstrapAuthentication() {
       const providers = await nativeFetch("/api/auth/providers").then((value) => value.json()).catch(() => ({}));
       authGoogleEl?.setAttribute("aria-disabled", String(!providers.google));
+      authGoogleEl.hidden = !providers.google;
+      authPasswordEl.hidden = !providers.hard_user;
+      document.getElementById("auth-divider").hidden = !(providers.google && providers.hard_user);
+      document.getElementById("auth-google-privacy").hidden = !providers.google;
       try {
         const response = await nativeFetch("/api/auth/session");
         if (!response.ok) throw new Error("Sign in required");
@@ -2766,15 +2786,34 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         accountWidgetEl.hidden = true;
         guestWidgetEl.hidden = false;
         updateRunnerSetupState();
-        authMessageEl.textContent = providers.google ? "" : "Google sign-in is not configured yet.";
+        authMessageEl.textContent = providers.google || providers.hard_user ? "" : "Sign-in is currently unavailable. Contact the administrator.";
         authGateEl.hidden = true;
       }
     }
 
     function openAuthentication() {
       authGateEl.hidden = false;
-      authGoogleEl?.focus();
+      if (!authPasswordEl.hidden) authUsernameEl?.focus();
+      else if (!authGoogleEl.hidden) authGoogleEl?.focus();
     }
+
+    authPasswordEl?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      authPasswordSubmitEl.disabled = true;
+      authMessageEl.textContent = "Signing in…";
+      try {
+        const response = await nativeFetch("/api/auth/hard-user/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: authUsernameEl.value, password: authPasswordInputEl.value }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Sign-in failed");
+        authPasswordInputEl.value = "";
+        authMessageEl.textContent = "";
+        await bootstrapAuthentication();
+      } catch (error) { authMessageEl.textContent = error.message || "Sign-in failed"; }
+      finally { authPasswordInputEl.value = ""; authPasswordSubmitEl.disabled = false; }
+    });
 
     function closeAuthentication() {
       authGateEl.hidden = true;
@@ -3239,7 +3278,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           projectReadinessEl.dataset.state = "offline";
         }
         if (projectReadinessTitleEl) projectReadinessTitleEl.textContent = "Sign in to connect a local project";
-        if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Use Google sign-in, then MundusX can check only your own connected devices.";
+        if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Sign in, then MundusX can check only your own connected devices.";
         if (projectRunnerSetupEl) projectRunnerSetupEl.hidden = true;
         updateProjectCreateAvailability();
         return [];
@@ -3694,7 +3733,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (!localRunnerReady) {
         harnessResultEl.textContent = currentUser
           ? "A connected local coding agent is required before creating this project."
-          : "Sign in with Google before connecting a local project.";
+          : "Sign in before connecting a local project.";
         if (!currentUser) openAuthentication();
         return;
       }
@@ -6715,8 +6754,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     <p id="message">Checking the runner connection…</p>
     <div class="device" id="device" hidden></div>
     <button id="approve" hidden>Approve this computer</button>
-    <a class="button" id="sign-in" hidden>Sign in with Google</a>
-    <p class="hint" id="auth-hint" hidden>This browser is not signed in. You can safely authenticate here even if MundusX is open in another browser.</p>
+    <a class="button" id="sign-in" target="_blank" rel="noopener" hidden>Sign in</a>
+    <p class="hint" id="auth-hint" hidden>Sign in in the new tab, then return here and reload to approve this computer.</p>
   </main>
   <script>
     const sessionId = ${JSON.stringify(sessionId)};
@@ -6732,7 +6771,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const approve = document.getElementById("approve");
     const signIn = document.getElementById("sign-in");
     const authHint = document.getElementById("auth-hint");
-    signIn.href = "/api/auth/google/start?return_to=" + encodeURIComponent(location.pathname + location.search);
+    signIn.href = "/";
     let csrfToken = "";
     async function json(url, options) {
       const response = await fetch(url, options);
@@ -6782,7 +6821,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         approve.textContent = "Try again";
         if (String(error.message).includes("Authentication required")) {
           approve.hidden = true;
-          signIn.textContent = "Re-authenticate with Google";
+          signIn.textContent = "Sign in again";
           signIn.hidden = false;
           authHint.hidden = false;
         }
@@ -6988,6 +7027,9 @@ export function createServerApp(config = configFromEnv()) {
       }
       if (request.method === "GET" && url.pathname === "/api/auth/providers") {
         return sendJson(response, 200, authStore.providers());
+      }
+      if (request.method === "POST" && url.pathname === "/api/auth/hard-user/login") {
+        return sendJson(response, 200, await authStore.loginHardUser(request, response, await readJsonBody(request)));
       }
       if (request.method === "GET" && url.pathname === "/api/auth/session") {
         const session = await authStore.session(request);

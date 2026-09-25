@@ -563,7 +563,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /Administrators control Global Skills/);
   assert.match(html, /Hermes selects available tools/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
-  assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
+  assert.match(html, /id="guest-login"[^>]*>Log in<\/button>/);
   assert.match(html, /guestLoginEl\?\.addEventListener\("click", openAuthentication\)/);
   assert.match(html, /guestWidgetEl\.hidden = true/);
   assert.doesNotMatch(workspaceNav, />Agents<|>Nodes</);
