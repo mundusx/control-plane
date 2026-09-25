@@ -1748,6 +1748,8 @@ pub const OFFICIAL_MODELS: &[(&str, &str)] = &[
     ("Qwen/Qwen2.5-32B-Instruct-AWQ", "Qwen 2.5 32B AWQ"),
     ("Qwen/Qwen2.5-72B-Instruct-AWQ", "Qwen 2.5 72B AWQ"),
     ("Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen3 Coder 30B-A3B"),
+    ("RedHatAI/Muse-Glimmer-30B-FP8-block", "Muse Glimmer 30B FP8"),
+    ("meta-models/Muse-Glimmer-30B", "Muse Glimmer 30B BF16"),
 ];
 
 pub fn official_model_names() -> Vec<String> {

@@ -9114,6 +9114,49 @@ mod tests {
     }
 
     #[test]
+    fn muse_variants_are_admitted_and_routed_with_model_policy_enabled() {
+        for model in ["meta-models/Muse-Glimmer-30B", "RedHatAI/Muse-Glimmer-30B-FP8-block"] {
+            let mut state = ControlPlaneState::default();
+            state.admission_policy.enforce_model_policy = true;
+            state.register(vllm_registration("node-muse"));
+            let mut heartbeat = ready_vllm_heartbeat("node-muse", "1");
+            heartbeat.worker_health.model_name = Some(model.to_string());
+            let node = state.heartbeat(heartbeat, "1".to_string());
+            assert!(node.policy_allowed, "{model}: {:?}", node.policy_reason);
+            let mut request = classification_request("Say hello");
+            request.model = Some(model.to_string());
+            state.submit_job(request, "2".to_string());
+            assert!(state.claim_job("node-muse", "3".to_string()).job.is_some(), "{model}");
+        }
+    }
+
+    #[test]
+    fn muse_catalog_addition_preserves_explicit_operator_restrictions() {
+        let mut policy = AdmissionPolicy::default();
+        policy.enforce_model_policy = true;
+        policy.allowed_models = vec!["Qwen/Qwen3-Coder-30B-A3B-Instruct".to_string()];
+        // Existing persisted lists must not silently expand on deserialization.
+        let policy: AdmissionPolicy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        for (model, expected) in [
+            ("Qwen/Qwen3-Coder-30B-A3B-Instruct", true),
+            ("meta-models/Muse-Glimmer-30B", false),
+            ("RedHatAI/Muse-Glimmer-30B-FP8-block", false),
+        ] {
+            let mut health = healthy_worker_health("1");
+            health.model_name = Some(model.to_string());
+            let (allowed, reason) = evaluate_admission_policy(
+                true, None, &policy, Backend::Vllm,
+                crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK,
+                100_000, &health,
+            );
+            assert_eq!(allowed, expected, "{model}: {reason:?}");
+            if !expected {
+                assert!(reason.unwrap().contains("denied by operator model policy"));
+            }
+        }
+    }
+
+    #[test]
     fn admission_policy_blocks_underpowered_cuda_node() {
         let mut state = ControlPlaneState::default();
         state.register(cuda_registration("node-cuda"));
