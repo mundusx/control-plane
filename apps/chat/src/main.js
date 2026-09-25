@@ -1,3 +1,6 @@
+import { MediaQueue } from './features/media/queue.js';
+import { MediaClientService } from './features/media/client-service.js';
+import { createMediaClientHttpController } from './features/media/client-http.js';
 import { videoPage } from "./features/media/page.js";
 import { splitMarkdownCode } from "./markdown-code.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
@@ -6858,6 +6861,8 @@ export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
   const mediaStore = config.mediaStore ?? (config.mediaDirectory
     ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
+  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config)) : null, config.auth?.publicOrigin);
+  const handleMediaClientRequest = createMediaClientHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
   const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config) });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
@@ -6868,6 +6873,7 @@ export function createServerApp(config = configFromEnv()) {
     sendJson,
   });
   const handleMcpRequest = createMcpHttpController({
+    mediaService,
     enabled: config.mcpEnabled,
     authStore,
     harnessService,
@@ -6888,6 +6894,7 @@ export function createServerApp(config = configFromEnv()) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (await handleMediaClientRequest({ request, response, url })) return;
       if (await handleMediaRequest({ request, response, url })) return;
       if (await handleGlobalSkills({ request, response, url })) return;
       const releaseLocation = releaseDownloadLocation(url.pathname);

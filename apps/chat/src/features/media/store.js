@@ -21,7 +21,7 @@ export function validateMetadata(input) {
     if (!SECRET.test(input.sha256 ?? "") || !Number.isSafeInteger(input.byte_size) || input.byte_size < 1 || input.byte_size > MAX_VIDEO_BYTES ||
         input.width !== 1280 || input.height !== 704 ||
         !((input.fps === 24 && [49,121,241].includes(input.frames)) ||
-          (input.fps === 16 && [33,81,161].includes(input.frames)))) throw httpError(400, "Invalid video preset metadata");
+          (input.fps === 16 && Number.isInteger(input.frames) && input.frames >= 17 && input.frames <= 161 && (input.frames - 1) % 16 === 0))) throw httpError(400, "Invalid video preset metadata");
     return { sha256: input.sha256, byte_size: input.byte_size, width: input.width, height: input.height, content_type: "video/mp4", frames: input.frames, fps: input.fps };
   }
   if (!input || !SECRET.test(input.sha256 ?? "") || !Number.isSafeInteger(input.byte_size) ||

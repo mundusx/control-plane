@@ -1,3 +1,4 @@
+import { registerMediaTools } from '../media/mcp.js';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
@@ -10,7 +11,7 @@ const localTaskIdSchema = z.string().uuid("task_id is invalid");
 const projectSlugSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80);
 const gitActionSchema = z.enum(["init", "clone", "commit", "fetch", "update_fast_forward", "create_branch", "set_github_remote", "push"]);
 
-export function createHarnessMcpServer({ authStore, harnessService, session }) {
+export function createHarnessMcpServer({ authStore, harnessService, session, mediaService }) {
   if (!authStore || !harnessService || !session?.id) {
     throw new TypeError("MCP server requires authenticated Harness dependencies");
   }
@@ -18,6 +19,8 @@ export function createHarnessMcpServer({ authStore, harnessService, session }) {
   const server = new McpServer({ name: "mundusx-harness", version: "1.0.0" }, {
     instructions: "MundusX project and Harness tools are user-scoped. Never claim a file, Git operation, patch, merge, deployment, or validation changed until task evidence reports it. Remote merge, UAT deployment, and production deployment require separate authority.",
   });
+
+  if (mediaService) registerMediaTools(server, mediaService, session.id);
 
   server.registerTool("mundusx_list_projects", {
     title: "List MundusX projects",

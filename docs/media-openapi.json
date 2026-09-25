@@ -1,0 +1,345 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MundusX media generation",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://chat.mundusx.ai"
+    }
+  ],
+  "security": [
+    {
+      "userToken": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "userToken": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "MediaJob": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "status_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "poll_after_seconds": {
+            "type": "integer",
+            "nullable": true
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "quote": {
+            "type": "object",
+            "properties": {
+              "compute_credits": {
+                "type": "integer"
+              },
+              "model": {
+                "type": "string"
+              },
+              "profile_id": {
+                "type": "string"
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "MediaResult": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "download_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "preview_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      },
+      "MediaProfiles": {
+        "type": "object",
+        "properties": {
+          "asynchronous": {
+            "type": "boolean"
+          },
+          "file_retention_seconds": {
+            "type": "integer"
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "profile_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "compute_credits": {
+                  "type": "integer"
+                },
+                "operation": {
+                  "type": "string"
+                },
+                "frames": {
+                  "type": "integer"
+                },
+                "fps": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/v1/media/profiles": {
+      "get": {
+        "operationId": "listMediaProfiles",
+        "summary": "List generation profiles and compute-credit estimates",
+        "responses": {
+          "200": {
+            "description": "Media job or result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaProfiles"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected (400/401/404/409/410/422/429/503)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/jobs": {
+      "post": {
+        "operationId": "submitMediaJob",
+        "summary": "Queue generation and return immediately; poll status next",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "prompt",
+                  "idempotency_key"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "image",
+                      "video"
+                    ]
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  },
+                  "idempotency_key": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Reuse for retries of the same request"
+                  },
+                  "duration_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Video only; defaults to 5"
+                  },
+                  "seed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Media job or result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected (400/401/404/409/410/422/429/503)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/jobs/{job_id}": {
+      "get": {
+        "operationId": "getMediaJob",
+        "summary": "Check state; wait poll_after_seconds before polling again",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media job or result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected (400/401/404/409/410/422/429/503)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/jobs/{job_id}/result": {
+      "post": {
+        "operationId": "getMediaResult",
+        "summary": "Get URLs for a completed result; rotates the previous link",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media job or result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected (400/401/404/409/410/422/429/503)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
