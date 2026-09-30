@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {streamOpenAiChatCompletion, configFromEnv} from '../src/main.js';
+import {SENSITIVE_INFORMATION_POLICY} from '../src/shared/sensitive-information-policy.js';
 const config=configFromEnv({MUNDUSX_CONTROL_PLANE_URL:'https://gateway.test'});
 function output(){const r=new EventEmitter();r.writableEnded=false;r.chunks=[];r.writeHead=()=>{};r.flushHeaders=()=>{};r.write=v=>r.chunks.push(v);r.end=v=>{if(v)r.chunks.push(v);r.writableEnded=true;};return r;}
 const frame=delta=>'data: '+JSON.stringify({id:'chatcmpl-test',choices:[{delta,finish_reason:null}]})+'\n\n';
@@ -12,7 +13,7 @@ test('code streams before completion and preserves messages and tool chunks',asy
  await tick();source.enqueue(new TextEncoder().encode(frame({content:'public class App {'})));await tick();
  assert.match(r.chunks.join(''),/public class App/);assert.equal(r.writableEnded,false);
  source.enqueue(new TextEncoder().encode(frame({tool_calls:[{index:0,id:'call1',type:'function',function:{name:'read_file',arguments:'{}'}}]})+'data: [DONE]\n\n'));source.close();await task;
- assert.deepEqual(sent.messages,messages);assert.deepEqual(sent.tools,tools);assert.match(r.chunks.join(''),/read_file/);
+ assert.deepEqual(sent.messages,[{role:'system',content:SENSITIVE_INFORMATION_POLICY},...messages]);assert.deepEqual(sent.tools,tools);assert.match(r.chunks.join(''),/read_file/);
 });
 test('client disconnect cancels pending upstream body',async()=>{
  let signal,cancelled=false;const r=output();const task=streamOpenAiChatCompletion(r,{messages:[{role:'user',content:'Create a complete program'}]},config,async(_url,init)=>{signal=init.signal;return new Response(new ReadableStream({cancel(){cancelled=true;}}));});await tick();r.emit('close');await task;assert.equal(signal.aborted,true);assert.equal(cancelled,true);assert.equal(r.listenerCount('close'),0);

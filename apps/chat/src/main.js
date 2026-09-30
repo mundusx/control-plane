@@ -1,3 +1,4 @@
+import { SENSITIVE_INFORMATION_POLICY, protectedSystemPrompt, protectedMessages } from './shared/sensitive-information-policy.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
 import { mediaChatIntent } from './features/media/chat-intent.js';
 import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
@@ -7423,7 +7424,7 @@ export async function submitHermesToolCompletion(body, config = configFromEnv(),
   ].join("\n");
   const turn = {
     message: routerPrompt,
-    systemPrompt: systemContext || "You are the model inside a bounded coding agent.",
+    systemPrompt: protectedSystemPrompt(systemContext || "You are the model inside a bounded coding agent."),
     internalAgentTurn: true,
     executionMode: "single",
     toolMode: false,
@@ -8049,7 +8050,7 @@ export async function relayControlPlaneOpenAiStream(
   hooks = {},
 ) {
   if (hooks.continueOnLength === true && hooks.publicOpenAi !== true) {
-    return relayProjectContinuationStream(response, body, config, fetchImpl, hooks);
+    return relayProjectContinuationStream(response, { ...body, messages: protectedMessages(body.messages) }, config, fetchImpl, hooks);
   }
   const headers = {
     Accept: "text/event-stream",
@@ -8068,7 +8069,7 @@ export async function relayControlPlaneOpenAiStream(
     signal: controller.signal,
     method: "POST",
     headers,
-    body: JSON.stringify({ ...body, stream: true }),
+    body: JSON.stringify({ ...body, messages: protectedMessages(body.messages), stream: true }),
   });
   if (!upstream.ok) {
     const text = await upstream.text();
@@ -9270,7 +9271,7 @@ function buildGenericJobBody(message, config, options = {}) {
     runtime_mode: "local",
     execution_mode: executionMode,
     stream: false,
-    system_prompt: options.systemPrompt ?? buildChatSystemPrompt(message, options.voicePersona),
+    system_prompt: protectedSystemPrompt(options.systemPrompt ?? buildChatSystemPrompt(message, options.voicePersona)),
     max_tokens: inferMaxTokens(
       message,
       options.maxTokens,
@@ -10661,6 +10662,7 @@ async function submitToolPlannerJob(message, config, fetchImpl) {
 
 function buildToolPlannerSystemPrompt() {
   return [
+    SENSITIVE_INFORMATION_POLICY,
     "You are the MundusX tool planner.",
     "You do not answer the user. You split multi-intent prompts and choose the correct execution path for each intent.",
     "Return strict JSON only, with this shape:",
@@ -13810,6 +13812,7 @@ export function buildChatSystemPrompt(message = "", voicePersona = "atlas", skil
   const lower = String(message).toLowerCase();
   const productionCodeProject = looksLikeProductionCodeProjectRequest(lower);
   const rules = [
+    SENSITIVE_INFORMATION_POLICY,
     `You are ${personaName}, the MundusX assistant.`,
     `Today's UTC date is ${new Date().toISOString().slice(0, 10)}. Your training cutoff is not the current date.`,
     "Do not claim a product, model, release or event does not exist merely because it is missing from your training knowledge. Without current evidence, state that you cannot verify it.",
