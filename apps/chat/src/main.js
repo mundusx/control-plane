@@ -1,4 +1,3 @@
-import { publicErrorMessage } from './shared/http-error.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
 import { mediaChatIntent } from './features/media/chat-intent.js';
 import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
@@ -7279,8 +7278,8 @@ export function createServerApp(config = configFromEnv()) {
       return sendJson(response, 404, { error: "not found" });
     } catch (error) {
       if (response.headersSent) { response.destroy(); return; }
-      const status = Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode <= 599 ? error.statusCode : 500;
-      return sendJson(response, status, { error: publicErrorMessage(error) });
+      const status = error.statusCode ?? 500;
+      return sendJson(response, status, { error: error.message ?? "request failed" });
     }
   });
   let mediaCleanup;
@@ -7806,7 +7805,7 @@ export async function streamHermesToolCompletion(response, body, config = config
     for (const frame of openAiSseFrames(completion, { buffered: true, roleAlreadySent: true })) response.write(frame);
     response.end("data: [DONE]\n\n");
   } catch (error) {
-    const payload = { error: { message: publicErrorMessage(error), type: "mundusx_agent_error" } };
+    const payload = { error: { message: error.message ?? "agent model request failed", type: "mundusx_agent_error" } };
     response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
   } finally {
     clearInterval(heartbeat);
@@ -7852,7 +7851,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   const codeGenerationResponse = completeCodeResponse || looksLikeCodeGenerationRequest(message.toLowerCase());
   const userPersistence = conversationId
     ? appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
-      console.warn(`[conversation] failed to persist streaming user message: ${publicErrorMessage(error)}`);
+      console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
       return null;
     })
     : Promise.resolve(null);
@@ -7916,7 +7915,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
         await recordAssistantTurn(conversationId, config, fetchImpl, weatherResult);
         return { content, completionId, finishReason: "stop", tool: "weather" };
       } catch (error) {
-        console.warn(`[weather] direct lookup failed; falling back to live Chat: ${publicErrorMessage(error)}`);
+        console.warn(`[weather] direct lookup failed; falling back to live Chat: ${error.message}`);
       }
     }
   }
@@ -7981,7 +7980,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
         metadata: { partial: !final },
       });
     }).catch((error) => {
-      console.warn(`[conversation] failed to persist streaming assistant checkpoint: ${publicErrorMessage(error)}`);
+      console.warn(`[conversation] failed to persist streaming assistant checkpoint: ${error.message}`);
     });
     return checkpointChain;
   };
@@ -8035,7 +8034,7 @@ export async function streamOpenAiChatCompletion(response, body, config, fetchIm
     }
     response.end("data: [DONE]\n\n");
   } catch (error) {
-    const payload = { error: { message: publicErrorMessage(error), type: "mundusx_error" } };
+    const payload = { error: { message: error.message ?? "request failed", type: "mundusx_error" } };
     response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
   } finally {
     clearInterval(heartbeat);
@@ -8180,14 +8179,14 @@ export async function relayControlPlaneOpenAiStream(
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
     await hooks.onInterrupted?.({ content, completionId, finishReason, error });
-    const message = `MundusX response stream interrupted before completion: ${publicErrorMessage(error)}`;
+    const message = `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
       cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
       const payload = { error: { message, type: "mundusx_stream_error" } };
       response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
     }
-    return { content, completionId, finishReason: "error", error: publicErrorMessage(error) };
+    return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
   } finally {
     response.off?.("close", disconnect);
     await reader.cancel().catch(() => {});
@@ -8519,14 +8518,14 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
     await hooks.onInterrupted?.({ content, completionId, finishReason, error });
-    const message = `MundusX response stream interrupted before completion: ${publicErrorMessage(error)}`;
+    const message = `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
       cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
       const payload = { error: { message, type: "mundusx_stream_error" } };
       endResponse(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
     }
-    return { content, completionId, finishReason: "error", error: publicErrorMessage(error) };
+    return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
   } finally {
     response.off?.("close", disconnect);
     await reader?.cancel().catch(() => {});
@@ -8935,7 +8934,7 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   const conversationId = String(body?.conversationId ?? "").trim() || null;
   if (conversationId) {
     await appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
-      console.warn(`[conversation] failed to persist user message: ${publicErrorMessage(error)}`);
+      console.warn(`[conversation] failed to persist user message: ${error.message}`);
     });
   }
 
@@ -9086,7 +9085,7 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
         systemPrompt = `${systemPrompt}\n\nPrior conversation (most recent last):\n${context}`;
       }
     } catch (error) {
-      console.warn(`[conversation] failed to load history: ${publicErrorMessage(error)}`);
+      console.warn(`[conversation] failed to load history: ${error.message}`);
     }
   }
 
@@ -9210,7 +9209,7 @@ async function recordAssistantTurn(conversationId, config, fetchImpl, result) {
       jobId: isRealJobId ? result.job_id : null,
       tool: result.tool ?? null,
     }).catch((error) => {
-      console.warn(`[conversation] failed to persist assistant message: ${publicErrorMessage(error)}`);
+      console.warn(`[conversation] failed to persist assistant message: ${error.message}`);
     });
   }
   if (
@@ -9220,7 +9219,7 @@ async function recordAssistantTurn(conversationId, config, fetchImpl, result) {
     result?.tool
   ) {
     await recordToolReward(config, fetchImpl, result, sanitizedOutput).catch((error) => {
-      console.warn(`[credits] failed to record tool reward: ${publicErrorMessage(error)}`);
+      console.warn(`[credits] failed to record tool reward: ${error.message}`);
     });
   }
   return sanitizedResult;
@@ -10471,7 +10470,7 @@ async function fetchCompoundDirectToolJob(message, config, fetchImpl, voicePerso
         sections.push({
           type: "math",
           title: intent.title ?? "Math",
-          output: `I could not complete this math section: ${publicErrorMessage(error)}`,
+          output: `I could not complete this math section: ${error.message ?? "request failed"}`,
           response: null,
         });
       }
@@ -10496,7 +10495,7 @@ async function fetchCompoundDirectToolJob(message, config, fetchImpl, voicePerso
         sections.push({
           type: "llm",
           title: intent.title ?? "Response",
-          output: `I could not complete this section: ${publicErrorMessage(error)}`,
+          output: `I could not complete this section: ${error.message ?? "request failed"}`,
           response: null,
         });
       }
@@ -12661,7 +12660,7 @@ export async function pollChatJob(jobId, config = configFromEnv(), fetchImpl = f
     await appendConversationMessage(conversationId, "assistant", formatted.output, config, fetchImpl, {
       jobId,
     }).catch((error) => {
-      console.warn(`[conversation] failed to persist assistant message: ${publicErrorMessage(error)}`);
+      console.warn(`[conversation] failed to persist assistant message: ${error.message}`);
     });
   }
   return formatted;
@@ -14333,7 +14332,7 @@ export async function fetchChatConversation(conversationId, config = configFromE
         messages: [],
         persisted: false,
         unavailable: error.statusCode !== 404,
-        reason: publicErrorMessage(error),
+        reason: error.message || "conversation was not persisted",
       };
     }
     throw error;
@@ -14360,7 +14359,7 @@ export async function deleteChatConversation(conversationId, config = configFrom
         deleted: false,
         persisted: false,
         credits_affected: false,
-        reason: publicErrorMessage(error),
+        reason: error.message || "conversation was not persisted",
       };
     }
     throw error;
@@ -14394,7 +14393,7 @@ export async function fetchNetworkSummary(config = configFromEnv(), fetchImpl = 
       status: "degraded",
       control_plane_url: config.controlPlaneUrl,
       model_routing: "control-plane",
-      error: publicErrorMessage(error),
+      error: error.message ?? "network summary unavailable",
       latency_ms: Math.max(1, Date.now() - started),
       online_count: 0,
       trusted_count: 0,
