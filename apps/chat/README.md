@@ -235,3 +235,7 @@ and falls back to the Control Plane when no connector is online. Apply migration
 `0026_local_agent_bridge.sql`, create a token under Account > MCP connections,
 and run `mundusx connect --workspace .`. See
 `docs/mundusx-local-agent-bridge.md` for the security and protocol contract.
+
+## External chat API keys
+
+Set `MUNDUSX_CHAT_API_KEYS` on both public services to require Bearer keys for OpenAI-compatible chat clients. See [configuration, rollout and revocation](../../docs/chat-api-keys.md).
