@@ -55,3 +55,7 @@ MVP administrative actions:
 - update routing, privacy, fallback, or retention configuration
 
 Every mutating admin action must emit audit metadata with actor, role, action, target, previous value, new value, reason, and timestamp. Node policy override and fallback records already carry operator-facing reason fields; future admin-console endpoints should preserve those fields instead of replacing them with dashboard-only state.
+
+## External chat API keys
+
+Set `MUNDUSX_CHAT_API_KEYS` on both public services to require Bearer keys for OpenAI-compatible chat clients. See [configuration, rollout and revocation](../../docs/chat-api-keys.md).
