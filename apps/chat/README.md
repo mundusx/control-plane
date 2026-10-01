@@ -278,3 +278,6 @@ Node 22, load the file explicitly (keep it out of Git):
 node --env-file=.env scripts/migrate-hard-user.js
 node --env-file=.env src/main.js
 ```
+## External chat API keys
+
+Set `MUNDUSX_CHAT_API_KEYS` on both public services to require Bearer keys for OpenAI-compatible chat clients. See [configuration, rollout and revocation](../../docs/chat-api-keys.md).

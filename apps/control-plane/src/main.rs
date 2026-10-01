@@ -1,3 +1,4 @@
+mod chat_api_keys;
 mod native_stream;
 mod global_skills;
 mod chat_gateway;
@@ -6818,6 +6819,28 @@ fn handle_connection_with_streams(
 
     let request = parse_request(&request_text);
     let (clean_path, query) = split_path_and_query(&request.path);
+
+    if chat_api_keys::protected(&request.method, clean_path) {
+        let raw = std::env::var("MUNDUSX_CHAT_API_KEYS").ok();
+        let failure = match chat_api_keys::parse(raw.as_deref()) {
+            Ok(None) => None,
+            Ok(Some(keys)) => {
+                let identity = chat_api_keys::authenticate(
+                    header_value(&request.headers, "authorization"), &keys, operator_auth_token().as_deref(),
+                );
+                if identity.is_some() { None } else {
+                    Some(("401 Unauthorized", "A valid API key is required", "invalid_api_key"))
+                }
+            }
+            Err(_) => Some(("503 Service Unavailable", "Chat API key configuration is invalid", "api_key_configuration_error")),
+        };
+        if let Some((status, message, code)) = failure {
+            let _ = stream.write_all(json_response(status, serde_json::json!({
+                "error": { "message": message, "type": "authentication_error", "code": code }
+            })).as_bytes());
+            return;
+        }
+    }
 
     if let Some(response) = admin_login::handle(&request.method, clean_path, query, &request.headers) {
         let _ = stream.write_all(response.as_bytes());
