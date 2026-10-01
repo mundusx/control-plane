@@ -1,3 +1,4 @@
+import { parseChatApiKeys, authenticateChatApiKey } from "./chat-api-keys.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { createServer } from "node:http";
 import { handleAdminLogin } from "./features/admin-login.js";
@@ -170,6 +171,7 @@ export function configFromEnv(env = process.env) {
     String(env.MUNDUSX_HARNESS_UI_ENABLED ?? "").trim().toLowerCase(),
   );
   return {
+    chatApiKeys: parseChatApiKeys(env.MUNDUSX_CHAT_API_KEYS),
     auth: authConfigFromEnv(env),
     port: Number(env.PORT ?? "3002"),
     controlPlaneUrl: normalizeControlPlaneOrigin(
@@ -6899,6 +6901,16 @@ export function createServerApp(config = configFromEnv()) {
       if (request.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
         return sendOpenAiJson(response, 204, null);
       }
+      if (url.pathname.startsWith("/v1/")) {
+        const identity = authenticateChatApiKey(request.headers.authorization, config.chatApiKeys);
+        if (!identity) {
+          response.setHeader("WWW-Authenticate", "Bearer");
+          return sendOpenAiJson(response, 401, {
+            error: { message: "A valid API key is required", type: "authentication_error", code: "invalid_api_key" },
+          });
+        }
+        request.mundusxApiKeyId = identity.id;
+      }
       if (request.method === "GET" && url.pathname === "/v1/models") {
         return sendOpenAiJson(response, 200, openAiModelsResponse());
       }
@@ -6910,6 +6922,7 @@ export function createServerApp(config = configFromEnv()) {
           headers: {
             "Content-Type": "application/json",
             ...(resumeToken ? { "X-MundusX-Resume-Token": resumeToken } : {}),
+            ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
           },
           body: "{}",
         });
