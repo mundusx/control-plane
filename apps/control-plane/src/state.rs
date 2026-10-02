@@ -71,6 +71,8 @@ pub(crate) struct ContextDemand {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ControlPlaneState {
     #[serde(default)]
+    pub model_catalog: crate::model_catalog::Catalog,
+    #[serde(default)]
     pub admission_policy: AdmissionPolicy,
     pub nodes: BTreeMap<String, NodeRecord>,
     pub jobs: BTreeMap<String, JobRecord>,
