@@ -1148,6 +1148,19 @@ fn topology_node_tone(node: &NodeRecord) -> &'static str {
     }
 }
 
+fn node_last_seen(updated_at: &str) -> String {
+    let Some(timestamp) = updated_at.parse::<u64>().ok().filter(|value| *value > 0) else {
+        return "Not received".to_string();
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    if timestamp > now { return "Timestamp ahead of server clock".to_string(); }
+    let age = now - timestamp;
+    if age < 60 { format!("{age}s ago") }
+    else if age < 3600 { format!("{}m ago", age / 60) }
+    else if age < 86400 { format!("{}h {}m ago", age / 3600, (age % 3600) / 60) }
+    else { format!("{}d ago", age / 86400) }
+}
+
 fn render_node_classification(node: &NodeRecord) -> String {
     let advertised = node.capabilities.as_ref();
     let live = node
@@ -1210,13 +1223,37 @@ fn render_node_classification(node: &NodeRecord) -> String {
             "unavailable"
         }
     });
+    let mut models = live.map(|profile| profile.models.iter().collect::<Vec<_>>()).unwrap_or_default();
+    if models.is_empty() {
+        if let Some(model) = advertised.and_then(|profile| profile.active_model.as_ref()) {
+            models.push(model);
+        }
+    }
+    let memory = live.and_then(|profile| profile.physical_memory_mb)
+        .or_else(|| advertised.and_then(|profile| profile.physical_memory_mb))
+        .map(|mb| format!("{:.1} GiB RAM", f64::from(mb) / 1024.0))
+        .unwrap_or_else(|| "memory not reported".to_string());
+    let model_html = if models.is_empty() {
+        r#"<div class="meta">Awaiting model advertisement; task suitability unknown</div>"#.to_string()
+    } else {
+        models.iter().map(|model| {
+            let tasks = if model.task_capabilities.is_empty() {
+                "task skills not reported".to_string()
+            } else { model.task_capabilities.join(", ") };
+            let context = model.context_tokens.map(|tokens| format!("{tokens} tokens"))
+                .unwrap_or_else(|| "not reported".to_string());
+            format!(r#"<div class="meta"><strong>Model:</strong> {}<br>Advertised tasks: {}<br>Context: {} &middot; tools: {} &middot; vision: {} &middot; embeddings: {}</div>"#,
+                escape_html(&model.name), escape_html(&tasks), escape_html(&context),
+                if model.supports_tools { "advertised" } else { "not advertised" },
+                if model.supports_vision { "advertised" } else { "not advertised" },
+                if model.supports_embeddings { "advertised" } else { "not advertised" })
+        }).collect::<Vec<_>>().join("")
+    };
     format!(
-        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">location: contributor / outbound</div><div class="meta">capacity: {capacity} &middot; runtime: {runtime}</div><div class="meta">can do: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></div>"#,
-        node_type = escape_html(node_type),
-        capacity = escape_html(capacity),
-        runtime = escape_html(runtime),
-        roles = escape_html(&roles),
-        tools = escape_html(&tools),
+        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
+        node_type = escape_html(node_type), memory = escape_html(&memory),
+        capacity = escape_html(capacity), runtime = escape_html(runtime),
+        roles = escape_html(&roles), tools = escape_html(&tools),
         authority = escape_html(&authority),
     )
 }
@@ -1313,7 +1350,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
         let power = format!(
             "{} • {} • {}",
             node.power_source,
-            if node.on_battery { "battery" } else { "AC" },
+            if node.on_battery { "battery" } else if node.power_source == "unknown" { "power not reported" } else { "AC" },
             battery
         );
         let worker_health = node
@@ -1331,7 +1368,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
                     health.notes.join(" • ")
                 };
                 format!(
-                    r#"<div class="meta">worker: {} • model dir {} • model {} • {} • runtime {} • checked {} • llama-cli {} • BLAS {}</div><div class="meta">{}</div>"#,
+                    r#"<details><summary class="meta">Last worker diagnostics</summary><div class="meta">worker: {} • model dir {} • model {} • {} • runtime {} • checked {} • llama-cli {} • BLAS {}</div><div class="meta">{}</div></details>"#,
                     if health.healthy { "healthy" } else { "degraded" },
                     escape_html(model_dir),
                     escape_html(model_name),
@@ -1343,7 +1380,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
                     escape_html(&notes)
                 )
             })
-            .unwrap_or_else(|| r#"<div class="meta">worker: unknown</div>"#.to_string());
+            .unwrap_or_else(|| r#"<div class="meta">Worker health not received</div>"#.to_string());
         let classification = render_node_classification(&node);
         let policy_reason = node
             .policy_reason
@@ -1356,7 +1393,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
               <div>
                 <a class="inline-link" href="/nodes/{}"><strong>{}</strong></a>
                 <div class="meta">fingerprint {}</div>
-                <div class="meta">cap {}% • {} GPU% free</div>
+                <div class="meta">contribution limit {}% • last reported {} GPU% free</div>
               </div>
               <div>
                 <div>{}</div>
@@ -1365,14 +1402,14 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
               <div>
                 <span class="pill" style="background:{};color:{};">{}</span>
                 <div class="meta">{}</div>
-                <span class="pill" style="background:{};color:{};margin-top:6px;">grade {} &middot; {}/100 &middot; {}</span>
+                <span class="pill" style="background:{};color:{};margin-top:6px;">{}</span>
                 <div class="meta">completed {} &middot; failed {} &middot; consecutive failures {}</div>
                 <div class="meta">accepted {} &middot; rejected {} &middot; last failure {}</div>
               </div>
               <div><span class="pill" style="background:{};color:{};">{}</span>{}</div>
               <div data-live-key="node-state-{live_node_id}">
                 <span class="pill" style="background:{};color:{};">{}</span>
-                <div class="meta" style="margin-top:6px;">reported {}</div>
+                <div class="meta" style="margin-top:6px;">last reported {}</div>
                 <div class="meta"><strong>{}</strong> &middot; {}/{} active &middot; {} free</div>
                 <div class="meta">{} local &middot; {} network</div>
               </div>
@@ -1399,9 +1436,11 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
             escape_html(&node.identity_trust_path),
             grade_bg,
             grade_fg,
-            trust_grade(node.trust.score),
-            node.trust.score,
-            escape_html(grade_label),
+            if node.trust.completed_jobs + node.trust.failed_jobs == 0 {
+                "Unrated &middot; no completed task history".to_string()
+            } else {
+                format!("grade {} &middot; {}/100 &middot; {}", trust_grade(node.trust.score), node.trust.score, escape_html(grade_label))
+            },
             node.trust.completed_jobs,
             node.trust.failed_jobs,
             node.trust.consecutive_failures,
@@ -1429,7 +1468,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
             policy_fg,
             policy_label,
             policy_reason,
-            escape_html(&node.updated_at),
+            escape_html(&node_last_seen(&node.updated_at)),
             live_node_id = escape_html(&node.node_id)
         ));
     }
@@ -1495,7 +1534,7 @@ fn render_registry_records(nodes: Vec<NodeRecord>) -> String {
             accepted = node.trust.accepted_results,
             rejected = node.trust.rejected_results,
             policy_reason = escape_html(policy_reason),
-            updated_at = escape_html(&node.updated_at),
+            updated_at = escape_html(&node_last_seen(&node.updated_at)),
             reported_state = escape_html(&node.reported_state.to_string()),
         ));
     }
@@ -2022,7 +2061,7 @@ fn render_node_profile_panel(state: &ControlPlaneState, node_id: &str) -> String
           </div>
           {new_node_empty_state}
           <section class="node-profile-grid" aria-label="Node profile metrics">
-            <div class="node-profile-card"><span>Trust grade</span><strong>{grade}</strong><div class="meta">score {score}/100</div></div>
+            <div class="node-profile-card"><span>Trust grade</span><strong>{reputation}</strong><div class="meta">Execution reputation, not model skill</div></div>
             <div class="node-profile-card"><span>Total earned</span><strong>{earned:.2}</strong><div class="meta">credits</div></div>
             <div class="node-profile-card"><span>Contribution</span><strong>{contribution}%</strong><div class="meta">operator effective share</div></div>
             <div class="node-profile-card" data-live-key="profile-work"><span>Current work</span><strong>{current_work}</strong><div class="meta">active assignment</div></div>
@@ -2083,11 +2122,12 @@ fn render_node_profile_panel(state: &ControlPlaneState, node_id: &str) -> String
         </section>"#,
         hostname = escape_html(&node.hostname),
         backend = escape_html(&node.backend.to_string()),
-        updated_at = escape_html(&node.updated_at),
+        updated_at = escape_html(&node_last_seen(&node.updated_at)),
         node_query = escape_query_value(&node.node_id),
         new_node_empty_state = new_node_empty_state,
-        grade = trust_grade(node.trust.score),
-        score = node.trust.score,
+        reputation = if node.trust.completed_jobs + node.trust.failed_jobs == 0 {
+            "Unrated — no completed task history".to_string()
+        } else { format!("{} · {}/100", trust_grade(node.trust.score), node.trust.score) },
         earned = total_earned,
         contribution = node.contribution_percent,
         current_work = escape_html(&current_work),
@@ -11219,6 +11259,8 @@ mod tests {
             health.capabilities.supported_tools = vec!["repository".to_string()];
             health.capabilities.models = vec![ModelCapability {
                 name: "test-model".to_string(),
+                task_capabilities: vec!["large_coding".to_string()],
+                context_tokens: Some(32768),
                 warm: true,
                 ..ModelCapability::default()
             }];
@@ -11244,10 +11286,14 @@ mod tests {
 
         assert!(html.contains("grade A &middot; 95/100 &middot; high trust"));
         assert!(html.contains("grade F &middot; 20/100 &middot; poor trust"));
-        assert!(html.contains("grade C &middot; 50/100 &middot; new"));
+        assert!(html.contains("Unrated &middot; no completed task history"));
         assert!(html.contains("inference contributor"));
-        assert!(html.contains("capacity: standard &middot; runtime: warm"));
-        assert!(html.contains("can do: chat, coding"));
+        assert!(html.contains("capacity tier: standard (not machine count)"));
+        assert!(html.contains("last reported runtime: warm"));
+        assert!(html.contains("Model:</strong> test-model"));
+        assert!(html.contains("Advertised tasks: large_coding"));
+        assert!(html.contains("Context: 32768 tokens"));
+        assert!(html.contains("advertised roles: chat, coding"));
         assert!(html.contains("declared tools: repository"));
         assert!(html.contains("authority:</strong> inference only; no filesystem authority"));
         assert!(html.contains("completed 8 &middot; failed 0 &middot; consecutive failures 0"));
