@@ -1635,10 +1635,10 @@ impl ControlPlaneState {
     ) -> &'static str {
         if let Some(role) = Self::graph_node_role(job, active_graph_node_id) {
             return match role {
-                NodeRole::Coding => match job.scheduling_requirements.context_size {
-                    ContextSize::Small => "small_coding",
-                    ContextSize::Medium => "medium_coding",
-                    ContextSize::Large => "large_coding",
+                NodeRole::Coding => match job.classification.complexity {
+                    RequestComplexity::Low => "small_coding",
+                    RequestComplexity::Medium => "medium_coding",
+                    RequestComplexity::High => "large_coding",
                 },
                 NodeRole::Reducer | NodeRole::Synthesizer => "synthesizer",
                 NodeRole::ChunkAnalysis => "research",
@@ -1649,10 +1649,10 @@ impl ControlPlaneState {
             };
         }
         match job.scheduling_requirements.task_type {
-            RequestTaskType::Coding => match job.scheduling_requirements.context_size {
-                ContextSize::Small => "small_coding",
-                ContextSize::Medium => "medium_coding",
-                ContextSize::Large => "large_coding",
+            RequestTaskType::Coding => match job.classification.complexity {
+                RequestComplexity::Low => "small_coding",
+                RequestComplexity::Medium => "medium_coding",
+                RequestComplexity::High => "large_coding",
             },
             RequestTaskType::Document
                 if job.scheduling_requirements.context_size != ContextSize::Small =>
@@ -1723,6 +1723,12 @@ impl ControlPlaneState {
                 .collect()
         });
         let primary = Self::required_model_capability(job, active_graph_node_id);
+        let coding_tier = matches!(primary, "small_coding" | "medium_coding" | "large_coding");
+        if coding_tier && !requirements.iter().any(|value| value.capability == "coding") {
+            requirements.push(CapabilityRequirement {
+                capability: "coding".to_string(), weight: 100, minimum_score: 60, required: true,
+            });
+        }
         if !requirements
             .iter()
             .any(|value| value.capability.eq_ignore_ascii_case(primary))
@@ -1731,7 +1737,10 @@ impl ControlPlaneState {
                 capability: primary.to_string(),
                 weight: 100,
                 minimum_score: 60,
-                required: true,
+                // Automatically inferred coding tiers are ranking preferences,
+                // not measured model limits. Explicit requirements above remain
+                // authoritative; context/output limits are checked separately.
+                required: !coding_tier,
             });
         }
         requirements
@@ -9688,6 +9697,42 @@ mod tests {
     }
 
     #[test]
+    fn coding_output_budget_does_not_create_a_hard_specialist_requirement() {
+        let mut state = ready_state();
+        let mut heartbeat = ready_heartbeat("node-1", "2");
+        heartbeat.worker_health.streaming_supported = true;
+        heartbeat.worker_health.capabilities.models = vec![ModelCapability {
+            name: "muse-glimmer".into(), active: true, context_tokens: Some(90_000),
+            output_capacity_mode: Some("context_window".into()),
+            roles: vec![NodeRole::Chat, NodeRole::Coding],
+            task_capabilities: vec!["chat".into(), "small_coding".into()],
+            ..Default::default()
+        }];
+        state.heartbeat(heartbeat, "2".into());
+        let mut request = classification_request("create me a code in nodejs CRUD API student model\n/no_think");
+        request.model = None;
+        request.stream = true;
+        request.max_tokens = Some(6_144);
+        let mut job = state.submit_job(request, "3".into());
+        assert_eq!(job.classification.complexity, RequestComplexity::Low);
+        assert_eq!(job.classification.context_size, ContextSize::Large);
+        assert_eq!(ControlPlaneState::required_model_capability(&job, None), "small_coding");
+        let node = state.nodes.get("node-1").unwrap();
+        let model = &node.worker_health.as_ref().unwrap().capabilities.models[0];
+        assert!(ControlPlaneState::model_can_run_job(node, model, &job, None));
+        job.classification.complexity = RequestComplexity::High;
+        assert!(ControlPlaneState::model_can_run_job(node, model, &job, None));
+        let mut too_small = model.clone();
+        too_small.context_tokens = Some(4_096);
+        assert!(!ControlPlaneState::model_can_run_job(node, &too_small, &job, None));
+        job.scheduling_requirements.capability_requirements.push(CapabilityRequirement {
+            capability: "large_coding".into(), weight: 100, minimum_score: 60, required: true,
+        });
+        assert!(!ControlPlaneState::model_can_run_job(node, model, &job, None));
+        assert!(state.claim_job("node-1", "4".into()).job.is_some());
+    }
+
+    #[test]
     fn compact_low_complexity_code_keeps_small_context_with_a_1536_token_output_budget() {
         let mut request = classification_request("give me a code in java magic square 3x3");
         request.stream = true;
@@ -15534,9 +15579,11 @@ mod tests {
         request.execution_mode = JobExecutionMode::Decompose;
         state.submit_job(request, "5".to_string());
         let requirements = state.jobs["job-1"].scheduling_requirements.clone();
+        let classification = state.jobs["job-1"].classification.clone();
         for id in ["history-slow", "history-fast"] {
             let history = state.jobs.get_mut(id).unwrap();
             history.scheduling_requirements = requirements.clone();
+            history.classification = classification.clone();
             history.graph.nodes[0].id = format!("{id}.implementation");
             history.graph.nodes[0].name = "Implementation".into();
             history.graph.nodes[0].responsibility = "implementation".into();
