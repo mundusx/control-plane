@@ -5799,6 +5799,7 @@ fn requires_operator_auth(method: &str, path: &str) -> bool {
             | ("GET", "/v1/status")
             | ("GET", "/v1/planner/status")
             | ("GET", "/v1/nodes")
+            | ("GET", "/v1/nodes/capabilities")
             | ("GET", "/v1/admission-policy")
             | ("POST", "/v1/admission-policy")
             | ("POST", "/v1/nodes/policy-override")
@@ -8173,6 +8174,11 @@ fn handle_connection_with_streams(
                 json_response("200 OK", paginated_items_response(nodes, query, "nodes"))
             }
         }
+        ("GET", "/v1/nodes/capabilities") => {
+            let guard = state.lock().expect("state lock");
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            json_response("200 OK", guard.node_capability_directory(now))
+        }
         ("GET", "/v1/admission-policy") => {
             let policy = state.lock().expect("state lock").admission_policy.clone();
             json_response("200 OK", serde_json::to_value(policy).expect("policy json"))
@@ -8320,6 +8326,14 @@ fn handle_connection_with_streams(
                     "404 Not Found",
                     serde_json::json!({ "error": "job not found" }),
                 ),
+            }
+        }
+        ("GET", path) if path.starts_with("/v1/jobs/") && path.ends_with("/candidates") => {
+            let job_id = path.trim_start_matches("/v1/jobs/").trim_end_matches("/candidates");
+            let guard = state.lock().expect("state lock");
+            match guard.job_candidates(job_id) {
+                Some(candidates) => json_response("200 OK", candidates),
+                None => json_response("404 Not Found", serde_json::json!({"error":"job not found"})),
             }
         }
         ("GET", path) if path.starts_with("/v1/jobs/") => {
