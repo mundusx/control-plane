@@ -26,7 +26,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -53,7 +57,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -77,7 +85,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -101,7 +113,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -125,7 +141,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -149,7 +169,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -173,7 +197,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -197,7 +225,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -221,7 +253,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "macos"
+        ]
       }
     },
     {
@@ -245,7 +280,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "macos"
+        ]
       }
     },
     {
@@ -269,7 +307,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "macos"
+        ]
       }
     },
     {
@@ -293,7 +334,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "macos"
+        ]
       }
     },
     {
@@ -317,7 +361,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "macos"
+        ]
       }
     },
     {
@@ -341,7 +388,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -365,7 +416,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -389,7 +444,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -413,7 +472,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -437,7 +500,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -461,7 +528,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -485,7 +556,11 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "windows",
+          "linux"
+        ]
       }
     },
     {
@@ -509,7 +584,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -533,7 +611,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -557,7 +638,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -581,7 +665,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -605,7 +692,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -629,7 +719,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -653,7 +746,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -677,7 +773,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -702,7 +801,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -726,7 +828,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -750,7 +855,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -774,7 +882,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -798,7 +909,10 @@
           ],
           "supports_vision": false,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -823,7 +937,10 @@
           ],
           "supports_vision": true,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     },
     {
@@ -848,7 +965,10 @@
           ],
           "supports_vision": true,
           "supports_embeddings": false
-        }
+        },
+        "supported_os": [
+          "linux"
+        ]
       }
     }
   ]
