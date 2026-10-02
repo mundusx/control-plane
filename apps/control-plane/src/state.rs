@@ -2375,30 +2375,12 @@ impl ControlPlaneState {
         decision
     }
 
-    fn best_scheduler_decision_for_job(&self, job: &JobRecord) -> SchedulerDecision {
-        let active_graph_node_id = job
-            .graph_execution_enabled
-            .then(|| next_ready_graph_node_id(&job.graph))
-            .flatten();
-        let context_demand = Self::context_demand_for_job(job, active_graph_node_id.as_deref());
-        let best_advertised_context = self
-            .nodes
-            .values()
-            .filter_map(|node| node.worker_health.as_ref())
-            .flat_map(|health| {
-                health
-                    .capabilities
-                    .models
-                    .iter()
-                    .filter_map(|model| model.context_tokens)
-                    .chain(health.capabilities.max_context_tokens)
-            })
-            .max()
-            .unwrap_or_default();
+    fn ranked_candidates_for_job(&self, job: &JobRecord) -> Vec<SchedulerDecision> {
+        let active_graph_node_id = job.graph_execution_enabled.then(|| next_ready_graph_node_id(&job.graph)).flatten();
         let (ready_m_exists, ready_cuda_exists, ready_vllm_exists) =
             self.available_backend_flags_for_job(job, active_graph_node_id.as_deref());
 
-        self.nodes
+        let mut candidates: Vec<SchedulerDecision> = self.nodes
             .values()
             .filter(|node| {
                 let active_graph_node_id = if job.graph_execution_enabled {
@@ -2428,13 +2410,87 @@ impl ControlPlaneState {
                 } else {
                     None
                 };
-                self.scheduler_score(node, job, active_graph_node_id.as_deref())
+                let mut decision = self.scheduler_score(node, job, active_graph_node_id.as_deref());
+                if graph_node_is_merge(&job.graph, active_graph_node_id.as_deref()) {
+                    apply_reducer_scheduler_score(&mut decision, node);
+                }
+                decision
             })
-            .max_by(|left, right| {
-                left.score
-                    .cmp(&right.score)
-                    .then_with(|| right.node_id.cmp(&left.node_id))
+            .collect();
+        candidates.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.node_id.cmp(&right.node_id)));
+        candidates
+    }
+
+    pub fn job_candidates(&self, job_id: &str) -> Option<serde_json::Value> {
+        let job = self.jobs.get(job_id)?;
+        let candidates = if self.job_can_be_claimed(job) { self.ranked_candidates_for_job(job) } else { Vec::new() };
+        let candidates = candidates.into_iter().map(|decision| {
+            let step = job.graph_execution_enabled.then(|| next_ready_graph_node_id_for_node(&job.graph, &decision.node_id)).flatten();
+            let mut value = serde_json::to_value(decision).expect("candidate serializes");
+            value["graph_node_id"] = serde_json::json!(step);
+            value
+        }).collect::<Vec<_>>();
+        Some(serde_json::json!({"job_id": job_id, "status": job.status,
+            "candidates": candidates, "reservation": false}))
+    }
+
+    pub fn node_capability_directory(&self, now: u64) -> serde_json::Value {
+        let items = self.nodes.values().map(|node| {
+            let (_, total, free) = self.node_slot_occupancy(&node.node_id);
+            let mut blocked = Vec::new();
+            if !Self::node_is_schedulable_state(node) { blocked.push("not_ready"); }
+            if !node.policy_allowed { blocked.push("policy_blocked"); }
+            if node.capabilities.as_ref().is_some_and(|capabilities| !capabilities.ready_for_jobs) {
+                blocked.push("advertisement_not_ready");
+            }
+            if parse_unix_seconds(&node.updated_at).is_none_or(|last| now.saturating_sub(last) >= node_heartbeat_stale_seconds()) {
+                blocked.push("heartbeat_stale");
+            }
+            if !node.worker_health.as_ref().is_some_and(|health| health.healthy && health.runtime_ready && Self::worker_runtime_dependencies_ready(health)) {
+                blocked.push("runtime_unavailable");
+            }
+            if free == 0 { blocked.push("no_free_slots"); }
+            let available = blocked.is_empty();
+            let models = Self::model_inventory(node).into_iter().map(|model| {
+                let tasks = model.task_capabilities.iter().chain(model.capability_scores.iter().map(|score| &score.capability))
+                    .collect::<BTreeSet<_>>().into_iter().map(|task| {
+                        let stats = self.recent_task_node_performance(&node.node_id, Some(&model.name), task);
+                        serde_json::json!({"task":task,
+                            "fit_score":Self::model_capability_score(&model, task, task),
+                            "score_source":if model.capability_scores.iter().any(|score| &score.capability == task) {"reported_scorecard"} else {"advertised_skill"},
+                            "completed_samples":stats.completed_samples, "failed_samples":stats.failed_samples,
+                            "mean_latency_ms": if stats.latency_samples > 0 {Some(stats.total_latency_ms / u64::from(stats.latency_samples))} else {None}})
+                    }).collect::<Vec<_>>();
+                serde_json::json!({"model": model, "task_assessments":tasks})
+            }).collect::<Vec<_>>();
+            serde_json::json!({"node_id":node.node_id,"state":node.state,"updated_at":node.updated_at,
+                "available":available,"blocked_reasons":blocked,"total_slots":total,
+                "available_slots":if available {free} else {0},"models":models})
+        }).collect::<Vec<_>>();
+        serde_json::json!({"generated_at":now,"items":items,"reservation":false})
+    }
+
+    fn best_scheduler_decision_for_job(&self, job: &JobRecord) -> SchedulerDecision {
+        let active_graph_node_id = job
+            .graph_execution_enabled
+            .then(|| next_ready_graph_node_id(&job.graph))
+            .flatten();
+        let context_demand = Self::context_demand_for_job(job, active_graph_node_id.as_deref());
+        let best_advertised_context = self
+            .nodes
+            .values()
+            .filter_map(|node| node.worker_health.as_ref())
+            .flat_map(|health| {
+                health
+                    .capabilities
+                    .models
+                    .iter()
+                    .filter_map(|model| model.context_tokens)
+                    .chain(health.capabilities.max_context_tokens)
             })
+            .max()
+            .unwrap_or_default();
+        self.ranked_candidates_for_job(job).into_iter().next()
             .unwrap_or_else(|| {
                 let role_reason = next_ready_graph_node_id(&job.graph)
                     .and_then(|node_id| {
@@ -2832,11 +2888,12 @@ impl ControlPlaneState {
         job: &JobRecord,
         active_graph_node_id: Option<&str>,
     ) {
-        let stats = self.recent_graph_node_performance(&node.node_id);
+        let task = Self::required_model_capability(job, active_graph_node_id);
+        let stats = self.recent_task_node_performance(&node.node_id, decision.model.as_deref(), task);
         if stats.completed_samples == 0 && stats.failed_samples == 0 {
             decision
                 .reasons
-                .push("performance:no recent chunk telemetry".to_string());
+                .push("performance:no matching task telemetry".to_string());
             return;
         }
 
@@ -2846,7 +2903,7 @@ impl ControlPlaneState {
             let latency_delta = performance_latency_score(avg_latency_ms) * latency_weight;
             decision.score += latency_delta;
             decision.reasons.push(format!(
-                "performance:avg_chunk_latency_ms:{} samples:{} score_delta:{}",
+                "performance:avg_task_latency_ms:{} samples:{} score_delta:{}",
                 avg_latency_ms, stats.latency_samples, latency_delta
             ));
         }
@@ -2855,32 +2912,49 @@ impl ControlPlaneState {
             let failure_penalty = (i32::from(stats.failed_samples).min(5) * 12) * latency_weight;
             decision.score -= failure_penalty;
             decision.reasons.push(format!(
-                "performance:recent_chunk_failures:{} score_delta:-{}",
+                "performance:recent_task_failures:{} score_delta:-{}",
                 stats.failed_samples, failure_penalty
             ));
         }
     }
 
-    fn recent_graph_node_performance(&self, node_id: &str) -> NodePerformanceStats {
+    fn recent_task_node_performance(&self, node_id: &str, model: Option<&str>, task: &str) -> NodePerformanceStats {
         let mut stats = NodePerformanceStats::default();
-        for graph_node in self
-            .jobs
-            .values()
-            .flat_map(|job| job.graph.nodes.iter())
-            .filter(|graph_node| graph_node.assigned_node_id.as_deref() == Some(node_id))
-        {
-            match graph_node.status {
-                JobGraphNodeStatus::Completed => {
-                    stats.completed_samples = stats.completed_samples.saturating_add(1);
-                    if let Some(latency_ms) = graph_node.latency_ms {
-                        stats.latency_samples = stats.latency_samples.saturating_add(1);
-                        stats.total_latency_ms = stats.total_latency_ms.saturating_add(latency_ms);
+        let mut samples = Vec::new();
+        for job in self.jobs.values() {
+            if job.graph_execution_enabled {
+                for step in &job.graph.nodes {
+                    if step.assigned_node_id.as_deref() == Some(node_id)
+                        && step.model.as_deref() == model
+                        && Self::required_model_capability(job, Some(&step.id)) == task
+                        && matches!(step.status, JobGraphNodeStatus::Completed | JobGraphNodeStatus::Failed)
+                    {
+                        samples.push((step.completed_at.as_deref().and_then(parse_unix_seconds).unwrap_or(0),
+                            step.status == JobGraphNodeStatus::Completed, step.runtime_ms.or(step.latency_ms)));
                     }
                 }
-                JobGraphNodeStatus::Failed => {
-                    stats.failed_samples = stats.failed_samples.saturating_add(1);
+            } else if job.assigned_node_id.as_deref() == Some(node_id)
+                && job.model.as_deref() == model
+                && Self::required_model_capability(job, None) == task
+                && matches!(job.status, JobStatus::Completed | JobStatus::Failed)
+            {
+                let completed = job.completed_at.as_deref().and_then(parse_unix_seconds);
+                let assigned = job.assigned_at.as_deref().and_then(parse_unix_seconds);
+                let latency = completed.zip(assigned).and_then(|(end, start)| end.checked_sub(start))
+                    .map(|seconds| seconds.saturating_mul(1000));
+                samples.push((completed.unwrap_or(0), job.status == JobStatus::Completed, latency));
+            }
+        }
+        samples.sort_by_key(|sample| std::cmp::Reverse(sample.0));
+        for (_, completed, latency) in samples.into_iter().take(32) {
+            if completed {
+                stats.completed_samples += 1;
+                if let Some(latency_ms) = latency {
+                    stats.latency_samples += 1;
+                    stats.total_latency_ms = stats.total_latency_ms.saturating_add(latency_ms);
                 }
-                _ => {}
+            } else {
+                stats.failed_samples += 1;
             }
         }
         stats
@@ -8979,6 +9053,63 @@ mod tests {
         state.register(m_series_registration("node-1"));
         state.heartbeat(ready_heartbeat("node-1", "1"), "1".to_string());
         state
+    }
+
+    #[test]
+    fn capability_directory_excludes_stale_and_unhealthy_capacity() {
+        let mut state = ready_state();
+        let directory = state.node_capability_directory(2);
+        assert_eq!(directory["items"][0]["available"], true);
+        assert_eq!(state.node_capability_directory(1000)["items"][0]["available_slots"], 0);
+        state.nodes.get_mut("node-1").unwrap().worker_health.as_mut().unwrap().healthy = false;
+        assert_eq!(state.node_capability_directory(2)["items"][0]["available"], false);
+    }
+
+    #[test]
+    fn job_candidates_match_scheduler_and_exclude_blocked_nodes() {
+        let mut state = ready_state();
+        state.register(m_series_registration("node-2"));
+        state.heartbeat(ready_heartbeat("node-2", "1"), "1".into());
+        state.nodes.get_mut("node-2").unwrap().policy_allowed = false;
+        state.submit_job(classification_request("Hello"), "2".into());
+        let candidates = state.job_candidates("job-1").unwrap();
+        assert_eq!(candidates["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(candidates["candidates"][0]["node_id"], state.jobs["job-1"].scheduler_decision.as_ref().unwrap().node_id);
+        assert_eq!(candidates["reservation"], false);
+        assert_eq!(state.jobs["job-1"].status, JobStatus::Queued);
+        assert!(state.job_candidates("missing").is_none());
+    }
+
+    #[test]
+    fn task_performance_requires_matching_model_and_task_and_bounds_samples() {
+        let mut state = ready_state();
+        for index in 0..40 {
+            let id = format!("history-{index}");
+            let mut job = completed_graph_history_job(&id, "node-1", JobGraphNodeStatus::Completed, Some(1000));
+            job.graph.nodes[0].completed_at = Some((index + 1).to_string());
+            state.jobs.insert(id, job);
+        }
+        let task = ControlPlaneState::required_model_capability(&state.jobs["history-0"], Some("history-0.chunk"));
+        let stats = state.recent_task_node_performance("node-1", Some("demo"), task);
+        assert_eq!(stats.completed_samples, 32);
+        assert_eq!(stats.total_latency_ms, 32000);
+        assert_eq!(state.recent_task_node_performance("node-1", Some("new-model"), task).completed_samples, 0);
+        assert_eq!(state.recent_task_node_performance("node-1", Some("demo"), "vision").completed_samples, 0);
+    }
+
+    #[test]
+    fn direct_task_performance_excludes_queue_time_and_does_not_double_count_graph() {
+        let mut state = ready_state();
+        let mut job = completed_graph_history_job("direct", "node-1", JobGraphNodeStatus::Completed, Some(90000));
+        job.graph_execution_enabled = false;
+        job.submitted_at = "1".into();
+        job.assigned_at = Some("100".into());
+        job.completed_at = Some("104".into());
+        state.jobs.insert("direct".into(), job);
+        let stats = state.recent_task_node_performance("node-1", Some("demo"), "chat");
+        assert_eq!(stats.completed_samples, 1);
+        assert_eq!(stats.total_latency_ms, 4000);
+        assert_eq!(state.recent_task_node_performance("node-1", Some("demo"), "research").completed_samples, 0);
     }
 
     #[test]
@@ -15156,7 +15287,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_uses_chunk_latency_telemetry_for_decisions() {
+    fn scheduler_does_not_use_research_latency_for_chat() {
         let mut state = ready_state();
         state.register(m_series_registration("node-2"));
         state.heartbeat(ready_heartbeat("node-2", "1"), "1".to_string());
@@ -15201,11 +15332,11 @@ mod tests {
 
         let job = state.jobs.get("job-1").expect("job");
         let decision = job.scheduler_decision.as_ref().expect("decision");
-        assert_eq!(decision.node_id, "node-2");
+        assert_eq!(decision.node_id, "node-1");
         assert!(decision
             .reasons
             .iter()
-            .any(|reason| reason.contains("performance:avg_chunk_latency_ms:8000")));
+            .any(|reason| reason.contains("performance:no matching task telemetry")));
     }
 
     #[test]
@@ -15291,6 +15422,9 @@ mod tests {
             ),
         );
 
+        for history in state.jobs.values_mut() {
+            history.graph.nodes[0].responsibility = "merge".into();
+        }
         let mut request = reducer_fixture_request();
         request.execution_mode = JobExecutionMode::Decompose;
         state.submit_job(request, "5".to_string());
@@ -15314,7 +15448,7 @@ mod tests {
         assert!(decision
             .reasons
             .iter()
-            .any(|reason| reason.contains("performance:avg_chunk_latency_ms:8000")));
+            .any(|reason| reason.contains("performance:avg_task_latency_ms:8000")));
     }
 
     #[test]
@@ -15397,6 +15531,14 @@ mod tests {
         );
         request.execution_mode = JobExecutionMode::Decompose;
         state.submit_job(request, "5".to_string());
+        let requirements = state.jobs["job-1"].scheduling_requirements.clone();
+        for id in ["history-slow", "history-fast"] {
+            let history = state.jobs.get_mut(id).unwrap();
+            history.scheduling_requirements = requirements.clone();
+            history.graph.nodes[0].id = format!("{id}.implementation");
+            history.graph.nodes[0].name = "Implementation".into();
+            history.graph.nodes[0].responsibility = "implementation".into();
+        }
         state
             .update_graph_node(
                 "job-1",
@@ -15425,7 +15567,7 @@ mod tests {
         assert!(decision
             .reasons
             .iter()
-            .any(|reason| reason.contains("performance:avg_chunk_latency_ms:8000")));
+            .any(|reason| reason.contains("performance:avg_task_latency_ms:8000")));
     }
 
     #[test]
