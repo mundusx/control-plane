@@ -1303,13 +1303,13 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
     }
 
     let mut html = String::from(
-        r#"<div class="table">
+        r#"<div class="table node-table">
         <div class="thead">
           <div>Node</div>
           <div>Host</div>
           <div>Trust</div>
-          <div>Backend</div>
-          <div>State</div>
+          <div>Models and capabilities</div>
+          <div>Availability</div>
           <div>Power</div>
           <div>Policy</div>
           <div>Updated</div>
@@ -3673,6 +3673,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .metric strong {{ display:block; margin-top:7px; font-size:28px; }}
       .table {{ display:grid; overflow-x:auto; }}
       .thead,.row {{ display:grid; grid-template-columns:minmax(210px,1.15fr) minmax(130px,.7fr) minmax(170px,.95fr) minmax(90px,.45fr) minmax(90px,.45fr) minmax(340px,1.8fr) minmax(130px,.7fr) minmax(110px,.55fr); gap:14px; min-width:1280px; padding:14px 0; border-bottom:1px solid var(--line); }}
+      .node-table .thead,.node-table .row {{ grid-template-columns:minmax(190px,1fr) minmax(120px,.6fr) minmax(180px,.9fr) minmax(310px,1.7fr) minmax(140px,.7fr) minmax(140px,.7fr) minmax(150px,.8fr) minmax(100px,.5fr); }}
       .registry-table .thead,.registry-table .row {{ grid-template-columns:minmax(180px,1fr) minmax(240px,1.35fr) minmax(180px,1fr) minmax(220px,1.2fr) minmax(220px,1.2fr) minmax(150px,.8fr); min-width:1190px; }}
       .jobs-table .thead,.jobs-table .row {{ grid-template-columns:minmax(190px,1fr) minmax(260px,1.45fr) minmax(110px,.55fr) minmax(160px,.85fr) minmax(160px,.85fr) minmax(180px,.9fr) minmax(260px,1.35fr); min-width:1320px; }}
       .thead {{ color:var(--muted); text-transform:uppercase; font-size:12px; }}
