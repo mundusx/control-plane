@@ -72,6 +72,15 @@ pub fn validate(entry: &Entry) -> Result<(), String> {
     if !["huggingface-open", "huggingface-mlx", "huggingface-vllm"].contains(&kind) {
         return Err("Unsupported model source kind.".into());
     }
+    let systems = model["supported_os"].as_array().ok_or("Select supported operating systems.")?;
+    if systems.is_empty() || systems.iter().any(|os| !matches!(os.as_str(), Some("windows"|"macos"|"linux"))) {
+        return Err("Invalid operating systems.".into());
+    }
+    if systems.iter().any(|os| match kind {
+        "huggingface-mlx" => os != "macos",
+        "huggingface-vllm" => os != "linux",
+        _ => os == "macos",
+    }) { return Err("Use MLX for macOS, vLLM for Linux, and GGUF for Windows/Linux.".into()); }
     if kind == "huggingface-open" && model["sha256"].as_str().is_none_or(|s| s.len()!=64 || !s.bytes().all(|c| c.is_ascii_hexdigit())) {
         return Err("Single-file downloads require a 64-character SHA-256 checksum.".into());
     }
