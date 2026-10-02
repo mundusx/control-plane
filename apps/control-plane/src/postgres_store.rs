@@ -119,7 +119,23 @@ impl PostgresStore {
                 .collect(),
             audit_events: harness_audit_events,
         };
+        if let Some(row) = client.query_opt("select document::text from public.model_catalog where singleton = true", &[])
+            .map_err(|error| format!("model catalog restore failed: {error}"))? {
+            state.model_catalog = serde_json::from_str(&row.get::<_, String>(0)).map_err(|error| error.to_string())?;
+        }
+        state.admission_policy.allowed_models = state.model_catalog.names();
         Ok(state)
+    }
+
+    pub fn save_model_catalog(&self, catalog: &crate::model_catalog::Catalog, expected: u64, actor: &str) -> Result<(), String> {
+        let document = serde_json::to_string(catalog).map_err(|error| error.to_string())?;
+        let revision = catalog.revision as i64;
+        let expected = expected as i64;
+        let row = self.connect()?.query_opt(
+            "insert into public.model_catalog (singleton, revision, document, updated_by) select true, $1, $2::text::jsonb, $3 where $4::bigint = 0 or exists(select 1 from public.model_catalog where singleton = true) on conflict (singleton) do update set revision=excluded.revision, document=excluded.document, updated_by=excluded.updated_by, updated_at=now() where model_catalog.revision=$4 returning revision",
+            &[&revision, &document, &actor, &expected]).map_err(|error| format!("Catalog save failed: {error}"))?;
+        if row.is_none() { return Err("Catalog changed. Reload before saving.".into()); }
+        Ok(())
     }
 
     pub fn record_registration(&self, registration: &AgentRegistration) -> Result<(), String> {

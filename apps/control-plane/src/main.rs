@@ -1,6 +1,7 @@
 mod chat_api_keys;
 mod native_stream;
 mod global_skills;
+mod model_catalog;
 mod chat_gateway;
 mod admin_login;
 mod contracts;
@@ -3208,18 +3209,8 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("system");
-    let model_rows = contracts::OFFICIAL_MODELS
-        .iter()
-        .enumerate()
-        .map(|(index, (name, label))| {
-            format!(
-                r#"<label class="check"><input type="checkbox" name="allow_model_{index}" value="1"{checked}> <strong>{label}</strong><span class="meta">{name}</span></label>"#,
-                checked = checked_attr(policy.allowed_models.iter().any(|allowed| allowed == name)),
-                label = escape_html(label),
-                name = escape_html(name),
-            )
-        })
-        .collect::<String>();
+    let model_rows = "<a class=\"button\" href=\"/model-catalog\">Manage allowed models (admin)</a>";
+
 
     format!(
         r#"<section class="panel">
@@ -3243,7 +3234,7 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
                 </div>
                 <div class="policy-models">
                   <h3>Model market admission</h3>
-                  <p class="meta">Checked models are allowed. Unchecked catalog models are denied. Models outside this curated catalog are Under investigation and cannot take jobs.</p>
+                  <p class="meta">Manage installer availability in the admin model catalog. With model admission enforcement enabled, models outside the allowed catalog are Under investigation and cannot take jobs.</p>
                   <div class="policy-grid">{model_rows}</div>
                 </div>
                 <button class="button primary" type="submit">Apply Policy</button>
@@ -3643,7 +3634,7 @@ fn control_plane_operator_page(
             .into_iter().map(|nav_page| operator_nav_item(nav_page, page)).collect::<String>(),
         ai = [OperatorPage::Registry, OperatorPage::Skills]
             .into_iter().map(|nav_page| operator_nav_item(nav_page, page)).collect::<String>(),
-        system = operator_nav_item(OperatorPage::Settings, page),
+        system = format!("{}<a class=\"nav-link\" href=\"/model-catalog\">Model catalog (admin)</a>", operator_nav_item(OperatorPage::Settings, page)),
     );
 
     format!(
@@ -6666,6 +6657,8 @@ fn apply_admission_policy_update(
     update: AdmissionPolicyUpdate,
 ) -> Result<serde_json::Value, String> {
     let mut guard = state.lock().expect("state lock");
+    let mut update = update;
+    update.allowed_models = guard.model_catalog.names();
     let policy = guard.set_admission_policy(update, now_unix_seconds());
     let event = guard.record_job_event(
         None,
@@ -7411,6 +7404,49 @@ fn handle_connection_with_streams(
                     "400 Bad Request",
                     serde_json::json!({ "error": error.to_string(), "code": "HARNESS_RUNNER_INVALID" }),
                 ),
+            }
+        }
+        ("GET", "/v1/model-catalog") => {
+            json_response("200 OK", state.lock().expect("state lock").model_catalog.public())
+        }
+        ("GET", "/model-catalog") => {
+            if admin_login::session_email(&request.headers).is_none() {
+                html_response("403 Forbidden", "<h1>Administrator sign-in required</h1><a href='/auth/start'>Sign in</a>")
+            } else {
+                html_response("200 OK", include_str!("model_catalog.html"))
+            }
+        }
+        ("GET", "/v1/admin/model-catalog") => {
+            if admin_login::session_email(&request.headers).is_none() {
+                json_response("403 Forbidden", serde_json::json!({"error":"Administrator sign-in required."}))
+            } else {
+                json_response("200 OK", serde_json::to_value(&state.lock().expect("state lock").model_catalog).unwrap())
+            }
+        }
+        ("PUT", "/v1/admin/model-catalog") => {
+            if !admin_login::session_authorized("PUT", &request.headers) || admin_login::session_email(&request.headers).is_none() {
+                json_response("403 Forbidden", serde_json::json!({"error":"Administrator session and same-origin request required."}))
+            } else {
+                let update = (|| -> Result<serde_json::Value, String> {
+                    let input: serde_json::Value = serde_json::from_str(&request.body).map_err(|_| "Invalid JSON.")?;
+                    let revision = input["revision"].as_u64().ok_or("Missing catalog revision.")?;
+                    let entry: model_catalog::Entry = serde_json::from_value(input["entry"].clone()).map_err(|_| "Invalid model entry.")?;
+                    let mut guard = state.lock().expect("state lock");
+                    let mut candidate = guard.model_catalog.clone();
+                    candidate.upsert(entry, revision)?;
+                    let actor = admin_login::session_email(&request.headers).unwrap();
+                    match supabase {
+                        Some(DatabaseMirror::Postgres(store)) => store.save_model_catalog(&candidate, revision, &actor)?,
+                        _ => return Err("Durable PostgreSQL catalog storage is required.".into()),
+                    }
+                    guard.admission_policy.allowed_models = candidate.names();
+                    guard.model_catalog = candidate;
+                    Ok(serde_json::to_value(&guard.model_catalog).unwrap())
+                })();
+                match update {
+                    Ok(value) => json_response("200 OK", value),
+                    Err(error) => json_response("400 Bad Request", serde_json::json!({"error":error})),
+                }
             }
         }
         ("GET", "/v1/models") => {
@@ -10090,6 +10126,24 @@ mod tests {
     };
 
     #[test]
+    fn model_catalog_is_public_but_admin_editor_and_writes_are_private() {
+        for (method, path, expected) in [("GET", "/v1/model-catalog", "200"), ("GET", "/model-catalog", "403"), ("GET", "/v1/admin/model-catalog", "403"), ("PUT", "/v1/admin/model-catalog", "403")] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                handle_connection(stream, Arc::new(Mutex::new(ControlPlaneState::default())), Arc::new(Mutex::new(SupabaseSyncStatus::disabled(StorageSource::LocalJsonOnly))), None, StorageSource::LocalJsonOnly);
+            });
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            use std::io::{Read, Write};
+            write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            let mut reply = String::new(); stream.read_to_string(&mut reply).unwrap();
+            assert!(reply.starts_with(&format!("HTTP/1.1 {expected}")), "{path}: {}", reply.lines().next().unwrap_or("empty"));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
     fn overloaded_chat_response_advertises_retry_after() {
         let response = json_response_with_retry_after(
             "429 Too Many Requests",
@@ -11937,7 +11991,7 @@ mod tests {
 
         assert!(html.contains("Model market admission"));
         assert!(html.contains("Under investigation"));
-        assert!(html.contains("Qwen/Qwen2.5-0.5B-Instruct"));
+        assert!(html.contains("Manage allowed models (admin)"));
 
         let update = admission_policy_update_from_form(
             "enabled=1&enforce_model_policy=1&allow_backend_m=1&allow_model_1=1",
