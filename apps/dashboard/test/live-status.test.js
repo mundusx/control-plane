@@ -8,6 +8,25 @@ const start = runInNewContext(source + '\nstartControlPlaneLiveStatus;', {});
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const element = (key, innerHTML) => ({ innerHTML, getAttribute: name => name === 'data-live-key' ? key : null });
 
+test('credits total and ledger count stay distinct across live refreshes', async () => {
+  const markup = readFileSync(new URL('../../control-plane/src/main.rs', import.meta.url), 'utf8');
+  const cards = [...markup.matchAll(/<a class="card(?: compact)? metric-link" href="\/credits"([^>]*)>/g)];
+  assert.equal(cards.length, 2);
+  const keys = cards.map(card => card[1].match(/data-live-key="([^"]+)"/)?.[1]);
+  assert.deepEqual(keys, ['credits-total', 'credits-ledger']);
+  const card = (key, html) => ({ innerHTML: html, getAttribute: name => name === 'href' ? '/credits' : name === 'data-live-key' ? key : null });
+  const f = fixture();
+  f.nodes.splice(0, 2, card(keys[0], 'Total credits: 12.50'), card(keys[1], 'Credits ledger: 2'));
+  f.setIncoming([card(keys[0], 'Total credits: 18.75'), card(keys[1], 'Credits ledger: 3')]);
+  const controller = start(f.env); await flush();
+  assert.equal(f.nodes[0].innerHTML, 'Total credits: 18.75');
+  assert.equal(f.nodes[1].innerHTML, 'Credits ledger: 3');
+  await controller.refresh();
+  assert.equal(f.nodes[0].innerHTML, 'Total credits: 18.75');
+  assert.equal(f.nodes[1].innerHTML, 'Credits ledger: 3');
+  controller.stop();
+});
+
 function fixture() {
   const nodes = [element('node-state-worker', '1/16 active · 15 free'), element('assigned', '1')];
   let incoming = [element('node-state-worker', '3/16 active · 13 free'), element('assigned', '3')];
