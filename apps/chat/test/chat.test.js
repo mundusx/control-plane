@@ -7561,3 +7561,19 @@ test("a question with no weather intent is still ignored", () => {
   assert.equal(extractWeatherLocation(""), null);
   assert.equal(extractWeatherLocation(null), null);
 });
+
+test("live chat reserves generation room for reasoning while respecting explicit limits", async () => {
+  for (const [maxTokens, expected] of [[undefined, 1024], [128, 128]]) {
+    let submitted;
+    const response = { writableEnded: false, writeHead() {}, flushHeaders() {}, write() { return true; }, end() { this.writableEnded = true; } };
+    await streamChatTurn(response, { message: "removed ur cache and try again", toolMode: false, maxTokens },
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async (url, init) => {
+        assert.ok(url.endsWith("/v1/chat/completions"));
+        submitted = JSON.parse(init.body);
+        return new Response('data: {"id":"chatcmpl-budget","choices":[{"delta":{"content":"I cannot clear the provider cache."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+      });
+    assert.equal(submitted.max_tokens, expected);
+  }
+});
