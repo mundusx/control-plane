@@ -17,7 +17,7 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, validate_capability_registration,
     AdmissionPolicyUpdate, AgentRegistration, AgentState, AppendChatMessageRequest, Backend,
     ChatCompletionRequest, ChatMessagesResponse, CreditsLedgerRecord, Heartbeat, JobCompletion,
-    JobExecutionMode, JobGraphNodeStatus, JobRecord, JobRequest, JobStatus, JobStreamAck,
+    JobExecutionMode, JobGraphNodeStatus, JobRecord, JobRequest, JobStatus,
     JobStreamDelta, LocalSlotLeaseReleaseRequest, LocalSlotLeaseRenewRequest,
     LocalSlotLeaseRequest, NodePolicyOverrideInput, NodeRecord, OperatorContributionPercentUpdate,
     OperatorNodePolicyOverrideUpdate, RoutingMode, RuntimeMode, ToolRewardRequest,
@@ -9759,17 +9759,21 @@ fn handle_connection_with_streams(
                     let result = live_streams
                         .lock()
                         .expect("live stream registry lock")
-                        .push(&delta.job_id, delta.sequence, delta.delta);
+                        .push_for_active_job(&delta.job_id, delta.sequence, delta.delta);
                     match result {
                         Ok(outcome) => json_response(
                             "200 OK",
-                            serde_json::to_value(JobStreamAck {
-                                job_id: delta.job_id,
-                                sequence: delta.sequence,
-                                accepted: outcome == chat_gateway::PushDeltaResult::Accepted,
-                                duplicate: outcome == chat_gateway::PushDeltaResult::Duplicate,
-                            })
-                            .expect("stream ack json"),
+                            serde_json::json!({
+                                "job_id": delta.job_id,
+                                "sequence": delta.sequence,
+                                "accepted": outcome != chat_gateway::PushDeltaResult::Duplicate,
+                                "duplicate": outcome == chat_gateway::PushDeltaResult::Duplicate,
+                                "delivery": if outcome == chat_gateway::PushDeltaResult::FinalCompletion {
+                                    "final_completion"
+                                } else {
+                                    "live"
+                                },
+                            }),
                         ),
                         Err(error) => {
                             json_response("409 Conflict", serde_json::json!({ "error": error }))
