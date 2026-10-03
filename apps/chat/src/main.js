@@ -7727,7 +7727,12 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
       : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
-  const inferredMaxTokens = inferMaxTokens(message, body?.maxTokens);
+  // The agnostic route can select a reasoning model after this request is
+  // submitted. Its generation budget includes hidden reasoning, even when
+  // the requested visible answer is short. Preserve explicit caller limits.
+  const inferredMaxTokens = positiveInteger(body?.maxTokens, 0) > 0
+    ? inferMaxTokens(message, body.maxTokens)
+    : Math.max(1024, inferMaxTokens(message));
   const initialMaxTokens = codeProjectContinuation
     ? STREAMING_CONTINUATION_MAX_TOKENS
     : codeGenerationResponse
