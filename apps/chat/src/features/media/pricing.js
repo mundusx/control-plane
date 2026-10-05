@@ -3,24 +3,41 @@ import { httpError } from "../../shared/http-error.js";
 export const IMAGE_PROFILE = "qwen-image-fp8-832x480-v1";
 export const LEGACY_IMAGE_PROFILE = "qwen-image-fp8-1024-v1";
 
-// Provisional policy denomination, not literal tokens or measured compute equivalence.
-// Price fixed profile settings once; runtime, prompt length and color do not alter it.
-export const IMAGE_CREDITS_PER_MEGAPIXEL_STEP = 100;
+// Verified GX10 sample. Reward denomination is policy; measured seconds calibrate
+// the workload rate. Individual worker runtime never reprices a stored quote.
+export const IMAGE_REFERENCE_BENCHMARK = Object.freeze({
+  width:832, height:480, steps:30, generation_ms:128178, reward_credits:1199,
+  hardware:'NVIDIA GB10', verified_at:1791131952,
+  artifact_sha256:'dddf5e5ebaa39f726d15dce5ecbcb1c4b8d9c45fea573ac8478f466157abf548',
+});
+const referencePixelSteps = IMAGE_REFERENCE_BENCHMARK.width * IMAGE_REFERENCE_BENCHMARK.height * IMAGE_REFERENCE_BENCHMARK.steps;
+export const IMAGE_CREDITS_PER_REFERENCE_SECOND = IMAGE_REFERENCE_BENCHMARK.reward_credits / (IMAGE_REFERENCE_BENCHMARK.generation_ms / 1000);
+export const IMAGE_CREDITS_PER_MEGAPIXEL_STEP =
+  (IMAGE_REFERENCE_BENCHMARK.generation_ms / 1000) * IMAGE_CREDITS_PER_REFERENCE_SECOND / (referencePixelSteps / 1_000_000);
 export function imageQuote(profile = IMAGE_PROFILE) {
   if (profile !== IMAGE_PROFILE && profile !== LEGACY_IMAGE_PROFILE) throw httpError(422, "Image profile is not benchmarked or priced");
   const legacy = profile === LEGACY_IMAGE_PROFILE;
   const width = legacy ? 1024 : 832, height = legacy ? 1024 : 480, steps = 30;
-  const credits = legacy ? 4 : Math.ceil(width * height * steps * IMAGE_CREDITS_PER_MEGAPIXEL_STEP / 1_000_000);
+  const pixelSteps = width * height * steps;
+  // Integer reference ratio avoids floating-point cancellation adding a credit.
+  const credits = legacy ? 4 : Math.ceil(pixelSteps * IMAGE_REFERENCE_BENCHMARK.reward_credits / referencePixelSteps);
   return {
-    pricing_version: legacy ? "image-compute-v1" : "image-megapixel-steps-v1", profile_id: profile,
+    pricing_version: legacy ? "image-compute-v1" : "image-benchmark-megapixel-steps-v2", profile_id: profile,
     operation: "text_to_image", model: "Qwen/Qwen-Image", width, height,
     steps, image_count: 1, compute_credits: credits, contributor_reward_credits: credits,
     ...(legacy ? {reference_generation_ms:216337, reference_seconds_per_credit:60} : {
       credits_per_megapixel_step:IMAGE_CREDITS_PER_MEGAPIXEL_STEP, pixel_count:width*height,
-      megapixel_steps:width*height*steps/1_000_000, rate_status:'provisional_policy',
+      megapixel_steps:pixelSteps/1_000_000, rate_status:'provisional_single_run_calibration',
+      reference_generation_ms:IMAGE_REFERENCE_BENCHMARK.generation_ms,
+      estimated_generation_ms:IMAGE_REFERENCE_BENCHMARK.generation_ms * pixelSteps / referencePixelSteps,
+      requested_pixel_steps:pixelSteps, reference_pixel_steps:referencePixelSteps,
+      reference_reward_credits:IMAGE_REFERENCE_BENCHMARK.reward_credits,
+      credits_per_reference_second:IMAGE_CREDITS_PER_REFERENCE_SECOND,
+      benchmark:{...IMAGE_REFERENCE_BENCHMARK},
+      rate_formula:'reference_generation_seconds * credits_per_reference_second / reference_megapixel_steps',
     }),
-    calibration: legacy ? "provisional_single_gx10_run" : "provisional_policy_not_token_equivalence", currency: "credits",
-    formula: legacy ? "ceil(reference_generation_ms / 60000)" : "ceil(width * height * steps * image_count * credits_per_megapixel_step / 1000000)",
+    calibration: legacy ? "provisional_single_gx10_run" : "verified_gx10_seconds_with_policy_reward_anchor", currency: "credits",
+    formula: legacy ? "ceil(reference_generation_ms / 60000)" : "ceil(requested_pixel_steps * reference_reward_credits / reference_pixel_steps)",
     cash_price: null, file_retention_seconds: 172800,
   };
 }

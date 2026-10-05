@@ -205,11 +205,16 @@ test("fixed image quote rejects unbenchmarked profiles and does not price bytes,
   assert.equal(imageQuote().compute_credits, 1199);
   assert.equal(imageQuote().contributor_reward_credits, 1199);
   assert.equal(imageQuote().megapixel_steps, 11.9808);
-  assert.equal(imageQuote().pricing_version, "image-megapixel-steps-v1");
+  assert.equal(imageQuote().pricing_version, "image-benchmark-megapixel-steps-v2");
+  assert.equal(imageQuote().reference_generation_ms, 128178);
+  assert.equal(imageQuote().estimated_generation_ms, 128178);
+  assert.equal(imageQuote().benchmark.reward_credits, 1199);
+  assert.ok(Math.abs(imageQuote().credits_per_megapixel_step * imageQuote().megapixel_steps - 1199) < 1e-9);
+  assert.ok(Math.abs(imageQuote().credits_per_reference_second * 128.178 - 1199) < 1e-9);
   assert.equal(imageQuote(LEGACY_IMAGE_PROFILE).compute_credits, 4);
   assert.equal(imageQuote().cash_price, null);
   assert.equal(imageQuote().width, 832); assert.equal(imageQuote().height, 480);
-  assert.equal(imageQuote().calibration, "provisional_policy_not_token_equivalence");
+  assert.equal(imageQuote().calibration, "verified_gx10_seconds_with_policy_reward_anchor");
   for (const profile of ["video", "qwen-2048", "", null]) assert.throws(() => imageQuote(profile), { statusCode: 422 });
 });
 

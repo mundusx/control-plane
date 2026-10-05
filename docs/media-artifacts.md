@@ -97,12 +97,20 @@ size remains on the volume. SVG, video and arbitrary file downloads are rejected
 
 ## Computation and credits
 
-The current image policy (`image-megapixel-steps-v1`) quotes **1,199 credits**
-for Qwen Image FP8 at 832×480 and 30 steps:
-`ceil(832 * 480 * 30 * 100 / 1000000) = 1199`.
-The provisional rate is 100 credits per megapixel-step. It is a chosen credit
-denomination, not literal image/LLM tokens, measured compute equivalence or a
-cash price. Prompt length, RGB versus black-and-white appearance, file bytes,
+The current image policy (`image-benchmark-megapixel-steps-v2`) quotes **1,199
+credits** for Qwen Image FP8 at 832×480 and 30 steps. The verified GX10 sample
+took 128,178 ms and contains 11.9808 megapixel-steps. The policy reward anchor
+is 1,199 credits, giving `credits_per_reference_second = 1199 / 128.178`.
+The workload rate is calibrated as:
+`reference_seconds * credits_per_reference_second / reference_megapixel_steps`.
+Estimate reference generation time by the workload ratio and multiply by the
+reference-second rate. The implementation computes the equivalent rational
+`ceil(requested_pixel_steps * 1199 / reference_pixel_steps)` to avoid rounding
+error at the reference preset.
+The benchmark is one real run, not a multi-run median or independent valuation
+of credits. The 1,199-credit denomination remains policy, not literal image/LLM
+tokens, measured cross-model compute equivalence or a cash price.
+Prompt length, RGB versus black-and-white appearance, file bytes,
 runtime and contributor hardware do not change this fixed profile quote.
 The quote and contributor reward use the same amount; no extra media bonus is
 included. Existing jobs settle their stored quote, including previous 4-credit
