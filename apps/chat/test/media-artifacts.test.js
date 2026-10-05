@@ -202,10 +202,14 @@ async function quotedJob(f, id = randomUUID()) {
 }
 
 test("fixed image quote rejects unbenchmarked profiles and does not price bytes, runtime or text", () => {
-  assert.equal(imageQuote().compute_credits, Math.ceil(216337 / 60000));
+  assert.equal(imageQuote().compute_credits, 1199);
+  assert.equal(imageQuote().contributor_reward_credits, 1199);
+  assert.equal(imageQuote().megapixel_steps, 11.9808);
+  assert.equal(imageQuote().pricing_version, "image-megapixel-steps-v1");
+  assert.equal(imageQuote(LEGACY_IMAGE_PROFILE).compute_credits, 4);
   assert.equal(imageQuote().cash_price, null);
   assert.equal(imageQuote().width, 832); assert.equal(imageQuote().height, 480);
-  assert.equal(imageQuote().calibration, "provisional_legacy_rate_pending_benchmark");
+  assert.equal(imageQuote().calibration, "provisional_policy_not_token_equivalence");
   for (const profile of ["video", "qwen-2048", "", null]) assert.throws(() => imageQuote(profile), { statusCode: 422 });
 });
 
@@ -282,5 +286,5 @@ test("accounting endpoints require dispatcher authority; user quote and history 
   }
   assert.equal((await fetch(`${base}/api/media/quote`)).status, 401);
   const r = await fetch(`${base}/api/media/quote`, { headers: { "x-test-user": "yes" } });
-  assert.equal(r.status, 200); assert.equal((await r.json()).compute_credits, 4);
+  assert.equal(r.status, 200); assert.equal((await r.json()).compute_credits, 1199);
 });

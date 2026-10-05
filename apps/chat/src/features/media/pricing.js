@@ -3,18 +3,24 @@ import { httpError } from "../../shared/http-error.js";
 export const IMAGE_PROFILE = "qwen-image-fp8-832x480-v1";
 export const LEGACY_IMAGE_PROFILE = "qwen-image-fp8-1024-v1";
 
-// Provisional calibration: one verified GX10 run took 216,337 ms.
-// The new 832x480 profile retains the legacy rate pending its own benchmark.
-// The reference work is priced once, never from a contributor's claimed runtime.
+// Provisional policy denomination, not literal tokens or measured compute equivalence.
+// Price fixed profile settings once; runtime, prompt length and color do not alter it.
+export const IMAGE_CREDITS_PER_MEGAPIXEL_STEP = 100;
 export function imageQuote(profile = IMAGE_PROFILE) {
   if (profile !== IMAGE_PROFILE && profile !== LEGACY_IMAGE_PROFILE) throw httpError(422, "Image profile is not benchmarked or priced");
+  const legacy = profile === LEGACY_IMAGE_PROFILE;
+  const width = legacy ? 1024 : 832, height = legacy ? 1024 : 480, steps = 30;
+  const credits = legacy ? 4 : Math.ceil(width * height * steps * IMAGE_CREDITS_PER_MEGAPIXEL_STEP / 1_000_000);
   return {
-    pricing_version: profile === LEGACY_IMAGE_PROFILE ? "image-compute-v1" : "image-compute-v2", profile_id: profile,
-    operation: "text_to_image", model: "Qwen/Qwen-Image", width: profile === LEGACY_IMAGE_PROFILE ? 1024 : 832, height: profile === LEGACY_IMAGE_PROFILE ? 1024 : 480,
-    steps: 30, image_count: 1, compute_credits: 4, contributor_reward_credits: 4,
-    reference_generation_ms: 216337, reference_seconds_per_credit: 60,
-    calibration: profile === LEGACY_IMAGE_PROFILE ? "provisional_single_gx10_run" : "provisional_legacy_rate_pending_benchmark", currency: "credits",
-    formula: "ceil(reference_generation_ms / 60000)",
+    pricing_version: legacy ? "image-compute-v1" : "image-megapixel-steps-v1", profile_id: profile,
+    operation: "text_to_image", model: "Qwen/Qwen-Image", width, height,
+    steps, image_count: 1, compute_credits: credits, contributor_reward_credits: credits,
+    ...(legacy ? {reference_generation_ms:216337, reference_seconds_per_credit:60} : {
+      credits_per_megapixel_step:IMAGE_CREDITS_PER_MEGAPIXEL_STEP, pixel_count:width*height,
+      megapixel_steps:width*height*steps/1_000_000, rate_status:'provisional_policy',
+    }),
+    calibration: legacy ? "provisional_single_gx10_run" : "provisional_policy_not_token_equivalence", currency: "credits",
+    formula: legacy ? "ceil(reference_generation_ms / 60000)" : "ceil(width * height * steps * image_count * credits_per_megapixel_step / 1000000)",
     cash_price: null, file_retention_seconds: 172800,
   };
 }

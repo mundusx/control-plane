@@ -97,6 +97,21 @@ size remains on the volume. SVG, video and arbitrary file downloads are rejected
 
 ## Computation and credits
 
+The current image policy (`image-megapixel-steps-v1`) quotes **1,199 credits**
+for Qwen Image FP8 at 832×480 and 30 steps:
+`ceil(832 * 480 * 30 * 100 / 1000000) = 1199`.
+The provisional rate is 100 credits per megapixel-step. It is a chosen credit
+denomination, not literal image/LLM tokens, measured compute equivalence or a
+cash price. Prompt length, RGB versus black-and-white appearance, file bytes,
+runtime and contributor hardware do not change this fixed profile quote.
+The quote and contributor reward use the same amount; no extra media bonus is
+included. Existing jobs settle their stored quote, including previous 4-credit
+832×480 jobs; do not reprice historical jobs or ledger records.
+Video continues to use its separate versioned benchmark-time policy until
+model-specific megapixel-frame-step rates are calibrated and approved.
+
+Historical image policy:
+
 The initial versioned rate (`image-compute-v1`) is **4 compute credits and 4
 contributor reward credits** for one `qwen-image-fp8-1024-v1` output: original
 Qwen-Image FP8, 1024×1024, 30 steps. Calibration is provisional, based on one
@@ -104,8 +119,8 @@ Qwen-Image FP8, 1024×1024, 30 steps. Calibration is provisional, based on one
 compute-minute credit rate, not a cash price or a measured equivalence to LLM
 text credits. Slower hardware, runtime overhead, waiting, upload, retries and
 contribution percentage never inflate the reward. Actual generation time is
-kept as telemetry. Higher resolutions, editing and video remain unpriced and
-are rejected; benchmark and version those presets before enabling them.
+kept as telemetry. Arbitrary image resolutions and editing remain unsupported;
+video uses the separate preset policy described above.
 
 `GET /api/media/quote?profile_id=qwen-image-fp8-1024-v1` returns the rate to a
 signed-in user. `GET /api/media/computations/{job_id}` returns the owner's durable
