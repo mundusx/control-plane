@@ -55,3 +55,19 @@ test('semantic fallback supports an unseen language and fails closed on unclear 
  assert.equal(await resolveMediaIntent('Unknown request',async()=>{throw Error('No LLM contributor');}),null);
  assert.ok((await resolveMediaIntent(text,async()=>({kind:'video',explicit_request:true,seconds:20}))).error);
 });
+
+test('oversized video requests produce only a maximum-duration error while ten seconds remains valid',async()=>{
+ const {mediaChatIntent}=await import('../src/features/media/chat-intent.js');
+ for(const prompt of ['Generate an 11-second video','Create a video for 20s','Make a video lasting eleven seconds',
+   'Create a twenty-one second video','Make a video for a minute','Make a video for half a minute',
+   'Create a video, 10 seconds then another 15 seconds','生成视频，11秒。','生成11秒的视频','生成视频 １１秒',
+   'أنشئ فيديو ١١ ثانية']) {
+   const result=mediaChatIntent(prompt);assert.equal(result.kind,'video',prompt);assert.match(result.error,/10 seconds maximum/,prompt);assert.equal(result.duration_seconds,undefined);
+ }
+ assert.equal(mediaChatIntent('Create a 10-second video').duration_seconds,10);
+ const {MediaClientService}=await import('../src/features/media/client-service.js');
+ let called=false;
+ const service=new MediaClientService({submit:async()=>{called=true;}},'https://chat.example');
+ await assert.rejects(service.submit('owner',{kind:'video',duration_seconds:11,prompt:'A landscape'}),{statusCode:400});
+ assert.equal(called,false);
+});

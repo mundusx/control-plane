@@ -84,7 +84,8 @@ export function createOpenAiMediaHttpController({ service, authStore, readJsonBo
         const input = await readVideoRequest(request, readJsonBody);
         allowed(input, ['model','prompt','seconds','size','input_reference']);
         const seconds = Number(input.seconds ?? 3);
-        if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10 || input.size && input.size !== '832x480') throw httpError(400, 'Supported: 1-10 seconds, size=832x480');
+        if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.');
+        if (input.size && input.size !== '832x480') throw httpError(400, 'Supported video size: 832x480');
         if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 4000) throw httpError(400, 'Expected a prompt of 1-4000 characters');
         const reference = input.input_reference;
         const model = reference ? I2V_MODEL : VIDEO_MODEL;
