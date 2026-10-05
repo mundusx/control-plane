@@ -43,4 +43,12 @@ Keep previous service deployment IDs and backed-up GX10 binaries/configuration f
 rollback. Revert the contributor first if needed; no new database migration is
 introduced by this admission patch. Never delete the persistent media volume.
 
+During deployment, the existing PgBouncer route stalled large startup job-history
+responses while small chat queries continued working. A read-only 1 MiB probe
+timed out through the pool but completed in about 1.4 seconds through the direct
+database connection. Startup hydration therefore uses the configured direct URL;
+ordinary runtime reads/writes continue using the pooled URL. Pool-only/local
+configurations retain their existing startup route. No historical records are
+deleted or truncated by this fix.
+
 The public website and novusmundus2025 repositories are outside this rollout.
