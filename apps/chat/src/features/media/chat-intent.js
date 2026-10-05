@@ -1,5 +1,15 @@
 // Conservative routing: discussion of media stays with the language model.
 // Kept self-contained so browser and server use precisely the same parser.
+export function mayNeedMediaClassification(message) {
+  const text = String(message || '').trim();
+  if (!text || /^(?:what|why|how|explain|tell me)\b/i.test(text)
+    || /\b(?:don't|do not|never)\s+(?:create|generate|make|draw)\b/i.test(text)
+    || /\b(?:api|endpoint|script|tutorial|function|component)\b/i.test(text)) return false;
+  return /\b(?:image|picture|photo|illustration|video|clip|animation|visual art)\b/i.test(text)
+    || /^(?:sketch|draw|illustrate|render)\b/i.test(text)
+    || /[^\u0000-\u007f]/.test(text);
+}
+
 export function mediaChatIntent(message) {
   const text = String(message || '').trim();
   if (!text || /^(?:how|why|what|explain|tell me|show me how)\b/i.test(text) ||

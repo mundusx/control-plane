@@ -1,7 +1,7 @@
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
 import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
-import { mediaChatIntent } from './features/media/chat-intent.js';
+import { mediaChatIntent, mayNeedMediaClassification } from './features/media/chat-intent.js';
 import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
 import { MediaQueue } from './features/media/queue.js';
 import { MediaClientService } from './features/media/client-service.js';
@@ -4147,6 +4147,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     });
 
     const mediaChatIntent = ${mediaChatIntent.toString()};
+    const mayNeedMediaClassification = ${mayNeedMediaClassification.toString()};
     const mediaUi = (${installMediaChatUi.toString()})({
       detect: mediaChatIntent, cache: appendCachedConversationTurn,
       identity: () => currentUser?.id,
@@ -4156,7 +4157,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const message = promptEl.value.trim();
-      if (!message) return;
+      if (!message || sendEl.disabled) return;
       if (!currentUser && document.body.dataset.authRequired === "true") {
         sessionStorage.setItem(pendingAuthPromptKey, message);
         openAuthentication();
@@ -4166,12 +4167,6 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // runner polling, and responsive UI updates may all refresh activeProject
       // while an async request is being dispatched.
       let mediaIntent = mediaChatIntent(message);
-      if (!mediaIntent) {
-        try {
-          const detected = await fetch('/api/media/intent', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message}) });
-          if (detected.ok) mediaIntent = (await detected.json()).intent;
-        } catch {}
-      }
       const submittedProject = projectSelectedForSubmission();
       const conversationId = getConversationId();
       const priorConversationTurns = readCachedConversation(conversationId);
@@ -4198,6 +4193,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
+        if (!mediaIntent && mayNeedMediaClassification(message)) {
+          try {
+            const detected = await fetch('/api/media/intent', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message}) });
+            if (detected.ok) mediaIntent = (await detected.json()).intent;
+          } catch {}
+        }
         if (mediaIntent) {
           const reference = document.getElementById('media-reference')?.files?.[0];
           if (reference && mediaIntent.kind !== 'video') throw new Error('Reference images currently support video generation only.');
@@ -8032,7 +8033,8 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
         await recordAssistantTurn(conversationId, config, fetchImpl, weatherResult);
         return { content, completionId, finishReason: "stop", tool: "weather" };
       } catch (error) {
-        console.warn(`[weather] direct lookup failed; falling back to live Chat: ${error.message}`);
+        console.warn(`[weather] direct lookup failed: ${error.message}`);
+        throw httpError(503, `Could not retrieve verified weather for ${weatherLocation}. Please try again shortly.`);
       }
     }
   }
@@ -11924,13 +11926,14 @@ function cleanWeatherLocation(value) {
   if (!location || location.length < 2 || location.length > 120) {
     return null;
   }
-  return location;
+  return location.toLowerCase() === "stuggi" ? "Stuttgart" : location;
 }
 
 async function fetchWeatherSummary(location, dayOffset, config, fetchImpl) {
   const url = `${config.weatherBaseUrl}/${encodeURIComponent(location)}?format=j1`;
   const response = await fetchImpl(url, {
     headers: { Accept: "application/json", "User-Agent": "MundusX-Chat/0.1 weather-router" },
+    signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) {
     throw httpError(502, `weather lookup failed for ${location}`);
