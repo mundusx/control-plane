@@ -7204,6 +7204,11 @@ export function createServerApp(config = configFromEnv()) {
         response.setHeader("Cache-Control", "no-store");
         return sendJson(response, 200, {...result,capability_availability:capabilities});
       }
+      if (request.method === "GET" && url.pathname === "/v1/usage/tokens") {
+        const result=await controlPlaneFetch(fetch,config,"/v1/usage/tokens");
+        response.setHeader("Cache-Control","no-store");
+        return sendJson(response,200,result);
+      }
       if (request.method === "GET" && url.pathname === "/api/auth/providers") {
         return sendJson(response, 200, authStore.providers());
       }
