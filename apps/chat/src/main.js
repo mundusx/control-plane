@@ -16,6 +16,7 @@ import { createServer } from "node:http";
 import { MediaArtifactStore } from "./features/media/store.js";
 import { mediaAdmission } from "./features/media/admission.js";
 import { mediaFleet } from "./features/media/routing.js";
+import { liveCapabilityAvailability } from "./features/media/availability.js";
 import { mediaPlanner } from "./features/media/planner.js";
 import { createMediaHttpController } from "./features/media/http-controller.js";
 import { handleAdminLogin } from "./features/admin-login.js";
@@ -1807,6 +1808,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .reference-chip { display:flex;align-items:center;gap:8px;max-width:100%;margin:0 0 8px;padding:7px 12px;border:1px solid var(--line);border-radius:12px;background:var(--panel);font-size:12px;color:var(--text); }
     .reference-chip span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
     .reference-chip button { margin-left:auto;border:0;background:transparent;color:var(--muted);font:inherit;font-size:18px;cursor:pointer; }
+    .composer-availability { display:flex;justify-content:center;flex-wrap:wrap;gap:5px 14px;margin-top:8px;color:var(--muted-2);font-size:11px;line-height:1.5; }
+    .composer-availability span::before { content:"";display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:5px;vertical-align:middle;background:var(--muted-2); }
+    .composer-availability span[data-state="available"]::before { background:#16a36a; }
+    .composer-availability span[data-state="busy"]::before { background:#c79230; }
     .runtime-picker { display:inline-flex; align-items:center; gap:4px; padding:0 4px; color:var(--muted-2); }
     .runtime-picker select { max-width:150px; border:0; border-radius:9px; padding:7px 24px 7px 7px; color:var(--text); background:var(--panel-2); font:inherit; font-size:12px; cursor:pointer; }
     .runtime-picker select:focus-visible { outline:2px solid color-mix(in srgb,var(--blue) 45%,transparent); outline-offset:1px; }
@@ -2409,6 +2414,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           </div>
           <button class="send" id="send" type="submit" aria-label="Send">${ICON_ARROW_UP}</button>
         </div>
+        <div class="composer-availability" id="composer-availability" aria-label="Contributor availability"><span>Checking contributors…</span></div>
         <div class="fine-print">MundusX may produce inaccurate information.</div>
       </form>
     </main>
@@ -3882,9 +3888,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (readyNodeCount === null) {
         setStatus("working", "Checking");
       } else if (readyNodeCount > 0) {
-        setStatus("ready", "Ready");
+        setStatus("ready", "Chat ready");
       } else {
-        setStatus("standby", "Standby - no ready nodes");
+        setStatus("standby", "Chat unavailable");
       }
     }
 
@@ -6354,9 +6360,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         const response = await fetch("/api/network");
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || "network unavailable");
-        readyNodeCount = payload.online_count;
+        const capabilities=payload.capability_availability;
+        readyNodeCount = capabilities?.chat?.nodes ?? null;
+        const availabilityEl=document.getElementById("composer-availability");
+        availabilityEl.replaceChildren();
+        for (const [key,label] of [["chat","Chat"],["image","Images"],["video","Video"],["image_to_video","Image to video"]]) {
+          const item=capabilities?.[key];
+          const indicator=document.createElement("span");
+          indicator.dataset.state=item?.state || "unknown";
+          indicator.textContent=label+" "+(item?.state || "status unknown");
+          indicator.title=item ? item.nodes+" contributor(s), "+item.free_slots+" free slot(s)"+(item.duration_seconds?.length?"; verified durations: "+item.duration_seconds.join(", ")+" seconds":"") : "Live contributor status could not be confirmed";
+          availabilityEl.append(indicator);
+        }
         syncNetworkRuntimeStatus(false);
       } catch {
+        document.getElementById("composer-availability").textContent="Contributor status temporarily unavailable";
         readyNodeCount = 0;
         if (isIdleRuntimeStatus()) setStatus("error", "Offline");
       }
@@ -7176,8 +7194,10 @@ export function createServerApp(config = configFromEnv()) {
         return sendOpenAiJson(response, 200, result);
       }
       if (request.method === "GET" && url.pathname === "/api/network") {
-        const result = await fetchNetworkSummary(config);
-        return sendJson(response, 200, result);
+        const [result,capabilities] = await Promise.all([fetchNetworkSummary(config),
+          fleet ? liveCapabilityAvailability(fleet,mediaStore).catch(()=>null) : Promise.resolve(null)]);
+        response.setHeader("Cache-Control", "no-store");
+        return sendJson(response, 200, {...result,capability_availability:capabilities});
       }
       if (request.method === "GET" && url.pathname === "/api/auth/providers") {
         return sendJson(response, 200, authStore.providers());
