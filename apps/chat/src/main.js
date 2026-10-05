@@ -1795,6 +1795,18 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       box-shadow: 0 10px 28px rgba(15, 23, 42, 0.07);
     }
     .composer-left-actions { grid-column:1; grid-row:1; align-self:center; display:flex; align-items:center; gap:2px; min-width:0; }
+    .composer-plus { width:36px;height:36px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:var(--text);font:inherit;font-size:28px;line-height:1;cursor:pointer; }
+    .composer-plus:hover,.composer-plus[aria-expanded="true"] { background:var(--panel-2); }
+    .composer-plus:focus-visible { outline:2px solid var(--blue);outline-offset:2px; }
+    .composer-menu { position:absolute;left:12px;bottom:calc(100% + 8px);z-index:12;width:min(280px,calc(100vw - 48px));padding:7px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 12px 36px rgba(15,23,42,.16); }
+    .composer-menu[hidden],.reference-chip[hidden] { display:none; }
+    .composer-menu .tool-toggle { width:100%;min-height:42px;padding:10px 12px;border-radius:10px;color:var(--text);font-size:14px;text-align:left; }
+    .composer-menu .tool-toggle:hover { background:var(--panel-2); }
+    .composer-menu #enter-to-send-toggle { display:flex; }
+    .composer-menu .mutation-toggle { width:100%;max-width:none;margin:4px 0; }
+    .reference-chip { display:flex;align-items:center;gap:8px;max-width:100%;margin:0 0 8px;padding:7px 12px;border:1px solid var(--line);border-radius:12px;background:var(--panel);font-size:12px;color:var(--text); }
+    .reference-chip span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+    .reference-chip button { margin-left:auto;border:0;background:transparent;color:var(--muted);font:inherit;font-size:18px;cursor:pointer; }
     .runtime-picker { display:inline-flex; align-items:center; gap:4px; padding:0 4px; color:var(--muted-2); }
     .runtime-picker select { max-width:150px; border:0; border-radius:9px; padding:7px 24px 7px 7px; color:var(--text); background:var(--panel-2); font:inherit; font-size:12px; cursor:pointer; }
     .runtime-picker select:focus-visible { outline:2px solid color-mix(in srgb,var(--blue) 45%,transparent); outline-offset:1px; }
@@ -2374,16 +2386,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         </div>
       </section>
       <form id="chat-form">
+        <div class="reference-chip" id="media-reference-preview" hidden><span id="media-reference-name"></span><button id="media-reference-clear" type="button" aria-label="Remove reference image">&times;</button></div>
         ${config.harnessUiEnabled ? `<div class="project-context-menu" id="project-context-menu" hidden><div class="project-context-menu-header"><strong>Projects</strong><button id="project-context-new" type="button">+ New project</button></div><div class="project-context-list" id="project-context-list"></div><button class="project-context-choice project-context-none" id="project-context-none" type="button"><span aria-hidden="true">○</span><span>No project</span></button></div>` : ""}
         <div class="composer">
           <textarea id="prompt" name="prompt" rows="1" placeholder="Ask everyone..." autocomplete="off" required></textarea>
           <div class="composer-actions">
             <span class="composer-left-actions">
-              <label class="tool-toggle" title="PNG reference for image-to-video">Reference PNG<input id="media-reference" type="file" accept="image/png" aria-label="Reference image for video" style="max-width:160px"></label>
+              <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachments and tools" aria-haspopup="dialog" aria-expanded="false" aria-controls="composer-menu">+</button>
+              <input id="media-reference" type="file" accept="image/png" aria-label="Reference image for video" hidden>
+              <div class="composer-menu" id="composer-menu" role="dialog" aria-label="Attachments and tools" hidden>
+              <button class="tool-toggle" id="media-reference-open" type="button"><span aria-hidden="true">＋</span> Add image for video</button>
               ${config.harnessUiEnabled ? `<span class="active-project-context" id="active-project-context"><button class="tool-toggle project-context-open" id="active-project-open" type="button" aria-pressed="false" title="Choose a project"><span class="kbd" aria-hidden="true">⌁</span><strong id="active-project-name">Choose project</strong></button><button class="project-context-clear" id="active-project-clear" type="button" aria-label="Leave active project" title="Leave active project" hidden>&times;</button></span>` : ""}
               <select class="mutation-toggle" id="mutation-toggle" aria-label="Project access" title="Access is saved for this project" hidden><option value="ask">Ask before edits</option><option value="full">Full access</option></select>
-            </span>
             <button class="tool-toggle" id="enter-to-send-toggle" type="button" aria-pressed="false" title="Toggle sending messages with Enter"><span class="kbd">&#8629;</span><span id="enter-to-send-label">Enter to Send</span></button>
+              </div>
+            </span>
             <span class="voice-controls" id="voice-controls">
               <button class="voice-button" id="voice-mic" type="button" aria-label="Start voice input" title="Voice input">${ICON_MIC}</button>
               <button class="voice-button" id="voice-speak" type="button" aria-label="Speak replies" aria-pressed="false" title="Speak replies">${ICON_VOLUME}</button>
@@ -2404,6 +2421,37 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const form = document.getElementById("chat-form");
     const mainEl = document.getElementById("chat-main");
     const promptEl = document.getElementById("prompt");
+    const composerPlusEl = document.getElementById("composer-plus");
+    const composerMenuEl = document.getElementById("composer-menu");
+    const mediaReferenceEl = document.getElementById("media-reference");
+    function setComposerMenuOpen(open, restoreFocus = false) {
+      composerMenuEl.hidden = !open;
+      composerPlusEl.setAttribute("aria-expanded", String(open));
+      if (open) {
+        const projects = document.getElementById("project-context-menu");
+        if (projects) projects.hidden = true;
+        document.getElementById("media-reference-open").focus();
+      } else if (restoreFocus) composerPlusEl.focus();
+    }
+    function renderMediaReference() {
+      const file = mediaReferenceEl.files?.[0];
+      document.getElementById("media-reference-preview").hidden = !file;
+      document.getElementById("media-reference-name").textContent = file ? "Reference: " + file.name : "";
+    }
+    composerPlusEl.addEventListener("click", () => setComposerMenuOpen(composerMenuEl.hidden));
+    document.getElementById("media-reference-open").addEventListener("click", () => {
+      setComposerMenuOpen(false); mediaReferenceEl.click();
+    });
+    mediaReferenceEl.addEventListener("change", renderMediaReference);
+    document.getElementById("media-reference-clear").addEventListener("click", () => {
+      mediaReferenceEl.value = ""; renderMediaReference(); promptEl.focus();
+    });
+    document.addEventListener("click", event => {
+      if (!event.target.closest("#composer-menu, #composer-plus")) setComposerMenuOpen(false);
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !composerMenuEl.hidden) { setComposerMenuOpen(false, true); event.preventDefault(); }
+    });
     const sendEl = document.getElementById("send");
     const messagesViewportEl = document.getElementById("messages");
     const messagesEl = document.getElementById("conversation");
@@ -3612,6 +3660,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     activeProjectOpenEl?.addEventListener("click", (event) => {
       if (!projectsAvailableOnDevice()) return;
       event.stopPropagation();
+      setComposerMenuOpen(false);
       if (projectContextMenuEl) projectContextMenuEl.hidden = !projectContextMenuEl.hidden;
     });
     activeProjectClearEl?.addEventListener("click", () => {
@@ -4160,7 +4209,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             inputArtifactId = data.artifact_id;
           }
           await mediaUi.submit(pending, message, conversationId, mediaIntent, inputArtifactId);
-          if (reference) document.getElementById('media-reference').value = '';
+          if (reference) { document.getElementById('media-reference').value = ''; renderMediaReference(); }
           setStatus("ready", "Ready");
           return;
         }
