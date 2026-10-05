@@ -36,7 +36,7 @@ export class MediaAccounting {
       }
       const artifact = (await db.query("select * from public.media_artifacts where artifact_id=$1 for update", [artifact_id])).rows[0];
       if (!artifact || artifact.owner_user_id !== record.owner_user_id || artifact.width !== record.quote.width ||
-          artifact.height !== record.quote.height || (record.quote.operation === "text_to_video" && (artifact.content_type !== "video/mp4" || artifact.frames !== record.quote.frames || artifact.fps !== record.quote.fps)) || artifact.status !== "pending" || new Date(artifact.expires_at).getTime() <= this.store.now()) {
+          artifact.height !== record.quote.height || (record.quote.operation !== "text_to_image" && (artifact.content_type !== "video/mp4" || artifact.frames !== record.quote.frames || artifact.fps !== record.quote.fps)) || artifact.status !== "pending" || new Date(artifact.expires_at).getTime() <= this.store.now()) {
         throw httpError(409, "Expected an unexpired pending image reservation for this job owner and profile");
       }
       if (record.artifact_id) {
@@ -68,7 +68,7 @@ export class MediaAccounting {
         throw httpError(409, "This job already has a reward; reconcile it before media settlement");
       }
       const id = randomUUID(), now = new Date(this.store.now());
-      const metadata = { ...record.quote, work_type: record.quote.operation === "text_to_video" ? "video_generation" : "image_generation", reward_scope: "job", job_status: "completed",
+      const metadata = { ...record.quote, work_type: record.quote.operation !== "text_to_image" ? "video_generation" : "image_generation", reward_scope: "job", job_status: "completed",
         artifact_id: artifact.artifact_id, sha256: artifact.sha256, byte_size: artifact.byte_size,
         generation_ms, runtime_role: "telemetry_only", contribution_percent_role: "routing_budget_only" };
       await db.query(`insert into public.credits_ledger

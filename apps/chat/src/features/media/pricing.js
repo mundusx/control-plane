@@ -38,13 +38,22 @@ for (let seconds = 1; seconds <= 10; seconds++) {
   const frames = seconds * 16 + 1;
   VIDEO_PROFILES[`wan22-14b-480p-${frames}f-v1`] = { ...VIDEO_PROFILES[`wan22-14b-704p-${frames}f-v1`], width: 832, height: 480, calibration: 'provisional_legacy_rate_pending_benchmark', reference_estimated: true };
 }
+export const ACTIVE_I2V_PROFILES = [];
+for (let seconds = 1; seconds <= 10; seconds++) {
+  const frames = seconds * 16 + 1, id = `wan22-i2v-lightning-14b-480p-${frames}f-v3`;
+  ACTIVE_I2V_PROFILES.push(id);
+  VIDEO_PROFILES[id] = { fps: 16, frames, width: 832, height: 480, steps: 4,
+    operation: 'image_to_video', model: 'Wan-AI/Wan2.2-I2V-A14B-Lightning',
+    reference_generation_ms: Math.ceil(146360 * frames / 33), reference_estimated: true,
+    calibration: 'estimated_from_2s_gx10_fast_i2v_before_padding' };
+}
 export const ACTIVE_VIDEO_PROFILES = Object.keys(VIDEO_PROFILES).filter(id => id.startsWith('wan22-14b-480p-') && VIDEO_PROFILES[id].reference_generation_ms > 0).sort((a,b) => VIDEO_PROFILES[a].frames - VIDEO_PROFILES[b].frames);
 export function mediaQuote(profile = IMAGE_PROFILE) {
   if (profile === IMAGE_PROFILE || profile === LEGACY_IMAGE_PROFILE) return imageQuote(profile);
   const preset = Object.hasOwn(VIDEO_PROFILES, profile) ? VIDEO_PROFILES[profile] : null;
   if (!preset || !(preset.reference_generation_ms > 0)) throw httpError(422, 'Media profile is not benchmarked or priced');
-  return { pricing_version: preset.width === 832 ? 'video-compute-v3' : preset.model ? 'video-compute-v2' : 'video-compute-v1', profile_id: profile, operation: 'text_to_video', model: preset.model ?? 'Wan-AI/Wan2.2-TI2V-5B',
-    width: preset.width ?? 1280, height: preset.height ?? 704, steps: 20, frames: preset.frames, fps: preset.fps ?? 24, duration_seconds: preset.frames/(preset.fps ?? 24),
+  return { pricing_version: preset.width === 832 ? 'video-compute-v3' : preset.model ? 'video-compute-v2' : 'video-compute-v1', profile_id: profile, operation: preset.operation ?? 'text_to_video', model: preset.model ?? 'Wan-AI/Wan2.2-TI2V-5B',
+    width: preset.width ?? 1280, height: preset.height ?? 704, steps: preset.steps ?? 20, frames: preset.frames, fps: preset.fps ?? 24, duration_seconds: preset.frames/(preset.fps ?? 24),
     compute_credits: Math.ceil(preset.reference_generation_ms/60000), contributor_reward_credits: Math.ceil(preset.reference_generation_ms/60000),
     reference_generation_ms: preset.reference_generation_ms, reference_seconds_per_credit: 60,
     calibration: preset.calibration ?? (preset.reference_estimated ? 'estimated_from_2s_gx10_frame_count' : 'provisional_single_gx10_run'),

@@ -1,3 +1,5 @@
+import { resolveMediaIntent } from './features/media/intent-resolver.js';
+import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
 import { mediaChatIntent } from './features/media/chat-intent.js';
 import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
@@ -2375,6 +2377,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           <textarea id="prompt" name="prompt" rows="1" placeholder="Ask everyone..." autocomplete="off" required></textarea>
           <div class="composer-actions">
             <span class="composer-left-actions">
+              <label class="tool-toggle" title="PNG reference for image-to-video">Reference PNG<input id="media-reference" type="file" accept="image/png" aria-label="Reference image for video" style="max-width:160px"></label>
               ${config.harnessUiEnabled ? `<span class="active-project-context" id="active-project-context"><button class="tool-toggle project-context-open" id="active-project-open" type="button" aria-pressed="false" title="Choose a project"><span class="kbd" aria-hidden="true">⌁</span><strong id="active-project-name">Choose project</strong></button><button class="project-context-clear" id="active-project-clear" type="button" aria-label="Leave active project" title="Leave active project" hidden>&times;</button></span>` : ""}
               <select class="mutation-toggle" id="mutation-toggle" aria-label="Project access" title="Access is saved for this project" hidden><option value="ask">Ask before edits</option><option value="full">Full access</option></select>
             </span>
@@ -4111,7 +4114,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // Freeze the selected workspace for this submission. Account refreshes,
       // runner polling, and responsive UI updates may all refresh activeProject
       // while an async request is being dispatched.
-      const mediaIntent = mediaChatIntent(message);
+      let mediaIntent = mediaChatIntent(message);
+      if (!mediaIntent) {
+        try {
+          const detected = await fetch('/api/media/intent', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message}) });
+          if (detected.ok) mediaIntent = (await detected.json()).intent;
+        } catch {}
+      }
       const submittedProject = projectSelectedForSubmission();
       const conversationId = getConversationId();
       const priorConversationTurns = readCachedConversation(conversationId);
@@ -4139,7 +4148,17 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
       try {
         if (mediaIntent) {
-          await mediaUi.submit(pending, message, conversationId);
+          const reference = document.getElementById('media-reference')?.files?.[0];
+          if (reference && mediaIntent.kind !== 'video') throw new Error('Reference images currently support video generation only.');
+          let inputArtifactId;
+          if (reference) {
+            const uploaded = await fetch('/api/media/reference', { method:'POST', headers:{'Content-Type':'image/png'}, body:reference });
+            const data = await uploaded.json();
+            if (!uploaded.ok) throw new Error(data.error || 'Reference upload failed');
+            inputArtifactId = data.artifact_id;
+          }
+          await mediaUi.submit(pending, message, conversationId, mediaIntent, inputArtifactId);
+          if (reference) document.getElementById('media-reference').value = '';
           setStatus("ready", "Ready");
           return;
         }
@@ -6883,6 +6902,22 @@ export function createServerApp(config = configFromEnv()) {
   const mediaStore = config.mediaStore ?? (config.mediaDirectory
     ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
   const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config)) : null, config.auth?.publicOrigin);
+  const mediaIntentCache = new Map();
+  async function detectMediaIntent(owner, message) {
+    const key = owner + ':' + String(message);
+    const existing = mediaIntentCache.get(key);
+    if (existing && existing.expires > Date.now()) return existing.intent;
+    const intent = await resolveMediaIntent(message, config.mediaIntentClassifier ?? (async (text, systemPrompt) => {
+      if (!mediaStore) return null;
+      const job = await submitToolPlannerJob(text, config, fetch, systemPrompt);
+      const output = String(job.output ?? '').replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+      return JSON.parse(output);
+    }));
+    if (mediaIntentCache.size >= 512) mediaIntentCache.delete(mediaIntentCache.keys().next().value);
+    mediaIntentCache.set(key, { intent, expires: Date.now() + 60000 });
+    return intent;
+  }
+  const handleOpenAiMediaRequest = createOpenAiMediaHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
   const handleMediaClientRequest = createMediaClientHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
   const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config) });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
@@ -6915,6 +6950,7 @@ export function createServerApp(config = configFromEnv()) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (await handleOpenAiMediaRequest({ request, response, url })) return;
       if (await handleMediaClientRequest({ request, response, url })) return;
       if (await handleMediaRequest({ request, response, url })) return;
       if (await handleGlobalSkills({ request, response, url })) return;
@@ -7237,6 +7273,21 @@ export function createServerApp(config = configFromEnv()) {
         const body = await readJsonBody(request);
         return sendJson(response, 200, await authStore.updateChatConversation(request.mundusxSession.id, conversationId, body));
       }
+      if (url.pathname === '/api/media/reference' && request.method === 'POST') {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, 'Sign in to upload a reference');
+        authStore.requireCsrf(request, session);
+        const chunks = []; let total = 0;
+        for await (const chunk of request) { total += chunk.length; if (total > 33554432) throw httpError(413, 'Reference image too large'); chunks.push(chunk); }
+        return sendJson(response, 201, { artifact_id: await saveReference(mediaStore, session.id, Buffer.concat(chunks)) });
+      }
+      if (url.pathname === '/api/media/intent' && request.method === 'POST') {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, 'Sign in to request media');
+        authStore.requireCsrf(request, session);
+        const body = await readJsonBody(request);
+        return sendJson(response, 200, { intent: await detectMediaIntent(session.id, body.message) });
+      }
       if (url.pathname === "/api/media/chat" || /^\/api\/media\/chat\/jobs\/[0-9a-f-]{36}(?:\/result)?$/.test(url.pathname)) {
         const session = request.mundusxSession ?? await authStore.session(request);
         if (!session) throw httpError(401, "Sign in to generate media");
@@ -7244,11 +7295,11 @@ export function createServerApp(config = configFromEnv()) {
         response.setHeader("Cache-Control", "private, no-store");
         if (url.pathname === "/api/media/chat" && request.method === "POST") {
           const body = await readJsonBody(request);
-          const intent = mediaChatIntent(body.message);
+          const intent = await detectMediaIntent(session.id, body.message);
           if (!intent || intent.error) throw httpError(400, intent?.error || "Ask to create an image or video");
           if (!body.conversationId) throw httpError(400, "conversationId is required");
           await authStore.authorizeConversation(session.id, body.conversationId, true, {title:body.message});
-          const job = await mediaService.submit(session.id, {...intent,idempotency_key:body.idempotency_key});
+          const job = await mediaService.submit(session.id, {...intent,input_artifact_id:body.input_artifact_id,idempotency_key:body.idempotency_key});
           // A queued job must remain recoverable even if history persistence is temporarily unavailable.
           let historySaved = true;
           try { await persistMediaChatTurn(mediaStore,session.id,body.conversationId,job,intent); }
@@ -10635,7 +10686,7 @@ async function fetchToolPlannerIntents(message, config, fetchImpl) {
   }
 }
 
-async function submitToolPlannerJob(message, config, fetchImpl) {
+async function submitToolPlannerJob(message, config, fetchImpl, systemPrompt = buildToolPlannerSystemPrompt()) {
   const jobBody = {
     request_id: `chatplan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     prompt: String(message ?? "").trim(),
@@ -10643,7 +10694,7 @@ async function submitToolPlannerJob(message, config, fetchImpl) {
     runtime_mode: "local",
     execution_mode: "single",
     stream: false,
-    system_prompt: buildToolPlannerSystemPrompt(),
+    system_prompt: systemPrompt,
     max_tokens: 384,
     temperature: 0,
     top_p: 0.1,

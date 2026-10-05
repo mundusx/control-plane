@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
-import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
+import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
@@ -23,11 +23,17 @@ export class MediaQueue {
     const seed=input.seed??42;
     if(!Number.isSafeInteger(seed)||seed<0||seed>2147483647) throw httpError(400,'Invalid seed');
     const task={prompt:input.prompt.trim(),profile_id:quote.profile_id,seed};
+    if (quote.operation === 'image_to_video') {
+      const reference = await this.store.owned(input.input_artifact_id, owner);
+      if (!reference.media_available || reference.content_type !== 'image/png') throw httpError(422, 'A ready, owned PNG reference is required');
+      task.input_artifact_id = reference.artifact_id;
+      task.input_sha256 = reference.sha256;
+    } else if (input.input_artifact_id !== undefined) throw httpError(400, 'Reference image requires image-to-video');
     return this.store.transaction(async db=>{
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
-      if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed)) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,quote:saved.quote}; }
-      if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
+      if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed || (old.request.input_sha256 ?? old.request.input_artifact_id)!==(task.input_sha256 ?? task.input_artifact_id))) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,created_at:old.created_at,quote:saved.quote}; }
+      if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
       if(pending>=4) throw httpError(429,'You already have four pending media requests');
       // Media-prefixed states are excluded by the legacy LLM restore/claim query.
@@ -35,11 +41,11 @@ export class MediaQueue {
       await db.query(`insert into public.jobs(job_id,request_id,prompt,preferred_backend,model,classification,status,submitted_at_epoch) values($1,$1,$2,'auto',$3,$4,'media_queued',$5)`,[id,task.prompt,quote.model,{operation:quote.operation,media_profile_id:quote.profile_id},Math.floor(this.store.now()/1000)]);
       await db.query('insert into public.media_compute_records(job_id,owner_user_id,quote) values($1,$2,$3)',[id,owner,quote]);
       await db.query('insert into public.media_generation_jobs(job_id,owner_user_id,idempotency_key,request,created_at) values($1,$2,$3,$4,$5)',[id,owner,input.idempotency_key,task,now]);
-      return {job_id:id,state:'queued',quote};
+      return {job_id:id,state:'queued',created_at:now.toISOString(),quote};
     });
   }
   async claim(device,profiles) {
-    if(!await this.admitWorker(device)) throw httpError(403,'Contributor policy does not allow work');
+    if(!await this.admitWorker(device, profiles)) throw httpError(403,'Contributor policy does not allow work');
     const supported=Array.isArray(profiles)?profiles.filter(x=>x===IMAGE_PROFILE || x===LEGACY_IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
     if(!supported.length) throw httpError(422,'No supported media presets');
     return this.store.transaction(async db=>{
@@ -68,6 +74,16 @@ export class MediaQueue {
        !(allowCompleted&&row.state==='completed') && (row.state!=='running'||new Date(row.lease_until).getTime()<=this.store.now())) throw httpError(409,'Media lease is no longer valid');
     return row;
   }
+  async input(node, input) {
+    const row = await this.store.transaction(db => this.lease(db, node, input));
+    if (!row.request.input_artifact_id) throw httpError(404, 'No reference image for this job');
+    const record = await this.store.owned(row.request.input_artifact_id, row.owner_user_id);
+    if (!record.media_available || record.content_type !== 'image/png') throw httpError(410, 'Reference image expired');
+    const { readFile } = await import('node:fs/promises');
+    const bytes = await readFile(this.store.file(record.artifact_id, 'image/png'));
+    if (bytes.length > 33554432 || createHash('sha256').update(bytes).digest('hex') !== record.sha256) throw httpError(422, 'Reference image integrity check failed');
+    return { data: bytes.toString('base64'), sha256: record.sha256 };
+  }
   async heartbeat(node,input) { return this.store.transaction(async db=>{
     await this.lease(db,node,input);
     await db.query('update public.media_generation_jobs set lease_until=$2 where job_id=$1',[input.job_id,new Date(this.store.now()+180000)]);
@@ -76,7 +92,7 @@ export class MediaQueue {
   async reserve(node,input) {
     const row=await this.store.transaction(db=>this.lease(db,node,input));
     const q=mediaQuote(row.request.profile_id);
-    const reservation=await this.store.reserve(row.owner_user_id,{...input.metadata,content_type:q.operation==='text_to_video'?'video/mp4':'image/png',width:q.width,height:q.height,frames:q.frames,fps:q.fps});
+    const reservation=await this.store.reserve(row.owner_user_id,{...input.metadata,content_type:q.operation!=='text_to_image'?'video/mp4':'image/png',width:q.width,height:q.height,frames:q.frames,fps:q.fps});
     try { await this.store.transaction(async db=>{
       await this.lease(db,node,input);
       const record=(await db.query('select * from public.media_compute_records where job_id=$1 for update',[row.job_id])).rows[0];
