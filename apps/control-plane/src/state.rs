@@ -1388,7 +1388,7 @@ impl ControlPlaneState {
             return 1;
         };
 
-        if !worker_health.healthy
+        if worker_health.runtime_mode == "media" || !worker_health.healthy
             || !worker_health.runtime_ready
             || (!matches!(node.backend, Backend::M | Backend::Vllm)
                 && !Self::serves_models_remotely(worker_health)
@@ -1520,7 +1520,7 @@ impl ControlPlaneState {
             return false;
         };
 
-        if !worker_health.healthy
+        if worker_health.runtime_mode == "media" || !worker_health.healthy
             || !worker_health.runtime_ready
             || !Self::worker_runtime_dependencies_ready(worker_health)
         {
@@ -1983,7 +1983,7 @@ impl ControlPlaneState {
             return false;
         };
 
-        if !worker_health.healthy
+        if worker_health.runtime_mode == "media" || !worker_health.healthy
             || !worker_health.runtime_ready
             || !Self::worker_runtime_dependencies_ready(worker_health)
         {
@@ -8486,6 +8486,16 @@ pub fn evaluate_policy(
         reasons.push("runtime capability report is not ready".to_string());
     }
 
+    if worker_health.runtime_mode == "media" {
+        let valid = !worker_health.media_profiles.is_empty() && worker_health.media_profiles.iter().all(|profile| {
+            (profile == "qwen-image-fp8-832x480-v1" && worker_health.media_budget_bytes >= 32 * 1024u64.pow(3)) ||
+            (((1..=10).any(|seconds| profile == &format!("wan22-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-14b-704p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-lightning-14b-480p-{}f-v3", seconds * 16 + 1))) && worker_health.media_budget_bytes >= 64 * 1024u64.pow(3))
+        });
+        if !valid { reasons.push("No verified media profile fits the contributed memory budget".into()); }
+        if worker_health.parallel_slots != 1 { reasons.push("Media requires one execution slot".into()); }
+        return if reasons.is_empty() { (true, None) } else { (false, Some(reasons.join("; "))) };
+    }
+
     if worker_health.model_dir.trim().is_empty() {
         reasons.push("model directory is missing".to_string());
     }
@@ -8610,7 +8620,15 @@ pub fn evaluate_admission_policy(
             ));
         }
 
-        if policy.enforce_model_policy {
+        if policy.enforce_model_policy && worker_health.runtime_mode == "media" {
+            for profile in &worker_health.media_profiles {
+                let model = if profile.starts_with("qwen-") { "Qwen/Qwen-Image" } else if profile.starts_with("wan22-i2v-") { "Wan-AI/Wan2.2-I2V-A14B-Lightning" } else { "Wan-AI/Wan2.2-T2V-A14B" };
+                if !policy.allowed_models.iter().any(|allowed| allowed == model) {
+                    reasons.push(format!("media model {model} is denied by operator model policy"));
+                }
+            }
+        }
+        if policy.enforce_model_policy && worker_health.runtime_mode != "media" {
             match worker_health
                 .model_name
                 .as_deref()
@@ -8792,6 +8810,7 @@ mod tests {
 
     fn healthy_worker_health(checked_at: &str) -> WorkerHealthReport {
         WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),
@@ -14307,6 +14326,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -15519,6 +15539,7 @@ mod tests {
                 policy_allowed: false,
                 policy_reason: Some("client says blocked".to_string()),
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -15600,6 +15621,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: r"C:\Users\batal\.opengpu\models".to_string(),
                     model_name: Some("Qwen/Qwen2.5-0.5B-Instruct".to_string()),
@@ -15880,6 +15902,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -15956,6 +15979,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -16698,4 +16722,53 @@ mod tests {
         assert_eq!(timeline[0].stage, "repair");
         assert_eq!(timeline[0].status, "planned");
     }
+    #[test]
+    fn media_only_admission_requires_verified_profiles_budget_and_one_slot() {
+        let mut health = healthy_worker_health("1");
+        health.runtime_mode = "media".into();
+        health.model_name = None; health.model_path = None; health.model_dir.clear();
+        health.llama_cli_available = false;
+        health.media_profiles = vec!["wan22-i2v-lightning-14b-480p-161f-v3".into()];
+        health.media_budget_bytes = 96 * 1024u64.pow(3);
+        assert!(evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_budget_bytes = 32 * 1024u64.pow(3);
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_budget_bytes = 96 * 1024u64.pow(3);
+        health.media_profiles = vec!["wan22-unknown".into()];
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
+        assert!(!evaluate_policy(AgentState::Paused, "ac", false, None, &health).0);
+        health.parallel_slots = 2;
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+    }
+
+    #[test]
+    fn media_only_nodes_never_satisfy_llm_job_eligibility() {
+        let mut state = ControlPlaneState::default();
+        state.register(cuda_registration("media-node"));
+        let mut beat = ready_heartbeat("media-node", "1");
+        beat.backend = Backend::Cuda;
+        beat.worker_health.runtime_mode = "media".into();
+        beat.worker_health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
+        beat.worker_health.media_budget_bytes = 64 * 1024u64.pow(3);
+        beat.worker_health.model_name = None;
+        beat.worker_health.llama_cli_available = false;
+        let node = state.heartbeat(beat, "1".into());
+        assert!(!ControlPlaneState::node_worker_can_run_request(&node, &classification_request("hello")));
+        state.submit_job(classification_request("hello"), "2".into());
+        assert!(state.claim_job("media-node", "3".into()).job.is_none());
+    }
+
+    #[test]
+    fn media_only_admission_preserves_operator_model_allowlist() {
+        let mut health = healthy_worker_health("1");
+        health.runtime_mode = "media".into();
+        health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
+        health.media_budget_bytes = 64 * 1024u64.pow(3);
+        let mut policy = AdmissionPolicy { enforce_model_policy: true, allowed_models: vec![], ..AdmissionPolicy::default() };
+        assert!(!evaluate_admission_policy(true, None, &policy, Backend::Cuda, "test", 128000, &health).0);
+        policy.allowed_models.push("Qwen/Qwen-Image".into());
+        assert!(evaluate_admission_policy(true, None, &policy, Backend::Cuda, "test", 128000, &health).0);
+    }
+
 }

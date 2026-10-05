@@ -9927,6 +9927,7 @@ mod tests {
 
     fn healthy_worker_health(checked_at: &str) -> WorkerHealthReport {
         WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),

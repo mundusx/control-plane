@@ -1295,6 +1295,10 @@ pub struct JobStreamAck {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerHealthReport {
+    #[serde(default)]
+    pub media_profiles: Vec<String>,
+    #[serde(default)]
+    pub media_budget_bytes: u64,
     pub healthy: bool,
     pub model_dir: String,
     pub model_name: Option<String>,
@@ -1873,6 +1877,7 @@ mod tests {
     #[test]
     fn worker_health_report_serializes_runtime_capabilities() {
         let report = WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),

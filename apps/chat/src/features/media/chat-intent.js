@@ -5,11 +5,32 @@ export function mediaChatIntent(message) {
   if (!text || /^(?:how|why|what|explain|tell me|show me how)\b/i.test(text) ||
       /\b(?:don't|do not|never)\s+(?:create|generate|make|draw)\b/i.test(text) ||
       /\b(?:code|function|component|api|endpoint|script|tutorial|button|player)\b/i.test(text)) return null;
+  // Explicit requests in common languages; Unicode boundaries must not use ASCII \b.
+  const international = [
+    [/^(?:por favor\s+)?(?:genera|generar|crea|crear|haz|dibuja|quiero).{0,100}?(vídeo|video|imagen|foto|ilustración)/iu, /vídeo|video/iu],
+    [/^(?:s'il vous plaît\s+)?(?:génère|générez|crée|créez|dessine|je veux).{0,100}?(vidéo|image|photo|illustration)/iu, /vidéo/iu],
+    [/^(?:bitte\s+)?(?:erstelle|generiere|zeichne|ich möchte).{0,100}?(video|bild|foto)/iu, /video/iu],
+    [/^(?:proszę\s+)?(?:wygeneruj|stwórz|utwórz|narysuj|chcę).{0,100}?(wideo|film|obraz|zdjęcie|ilustracj)/iu, /wideo|film/iu],
+    [/^(?:por favor\s+)?(?:gere|crie|desenhe|quero).{0,100}?(vídeo|video|imagem|foto)/iu, /vídeo|video/iu],
+    [/^(?:per favore\s+)?(?:genera|crea|disegna|voglio).{0,100}?(video|immagine|foto)/iu, /video/iu],
+    [/^(?:пожалуйста\s+)?(?:создай|сгенерируй|нарисуй|хочу).{0,100}?(видео|изображение|картин|фото)/iu, /видео/iu],
+    [/^(?:створи|згенеруй|намалюй).{0,100}?(відео|зображення|картин)/iu, /відео/iu],
+    [/^(?:请|請)?(?:生成|创建|創建|制作|製作|画|畫).{0,100}?(视频|視頻|影片|图片|圖片|图像|圖像)/u, /视频|視頻|影片/u],
+    [/^(?=.*(?:生成|作成|作って|描いて))(?=.*(?:動画|ビデオ|画像|写真)).+/u, /動画|ビデオ/u],
+    [/^(?=.*(?:생성|만들어|그려))(?=.*(?:동영상|비디오|이미지|사진)).+/u, /동영상|비디오/u],
+    [/^(?:أنشئ|انشئ|ولّد|ولد|ارسم).{0,100}?(فيديو|صورة)/u, /فيديو/u],
+    [/^(?:gumawa|gawan|maggenerate|mag generate|generate|lumikha).{0,100}?(video|larawan|imahe|image|picture)/iu, /video/iu],
+    [/^(?:buat|buatkan|hasilkan).{0,100}?(video|gambar|foto)/iu, /video/iu],
+    [/^(?:bir\s+)?(?:video|resim|görüntü).{0,100}?(oluştur|üret|çiz)/iu, /video/iu],
+    [/^(?=.*(?:बनाओ|बनाइए|बनाएं|जनरेट))(?=.*(?:वीडियो|चित्र|तस्वीर)).+/u, /वीडियो/u]
+  ];
+  if (/^(?:nie|no|non|nicht|não|не|لا|不要|别|別|huwag)\s*/iu.test(text) || /^(?:jak|dlaczego|co|cómo|como|por qué|comment|pourquoi|wie|warum|как|почему|如何|怎么|怎麼|为什么|為什麼|paano|bakit)\s*/iu.test(text)) return null;
+  const translated = international.find(([pattern]) => pattern.test(text));
   const match = text.match(/^(?:(?:please|hey)[,\s]+)?(?:(?:can|could|would|will)\s+(?:you|u)\s+)?(?:please\s+)?(?:create|generate|make|draw|render|produce|give me|show me|i\s+(?:want|need|would like|would love)(?:\s+(?:you|u)\s+to\s+(?:create|generate|make))?)\b[\s\S]{0,100}?\b(video|clip|image|picture|photo|illustration)\b/i);
-  if (!match) return null;
-  const kind = /video|clip/i.test(match[1]) ? 'video' : 'image';
+  if (!match && !translated) return null;
+  const kind = (translated ? translated[1].test(text) : /video|clip/i.test(match[1])) ? 'video' : 'image';
   if (kind === 'image') return { kind, prompt: text };
-  const duration = text.match(/\b(\d+(?:\.\d+)?)\s*[- ]?\s*(?:seconds?|secs?|s)\b/i);
+  const duration = text.match(/\b(\d+(?:\.\d+)?)\s*[- ]?\s*(?:seconds?|secs?|s|sekund\w*|segundos?|secondes?|sekunden|секунд\w*|ثواني)\b/i);
   const words = text.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s*[- ]?\s*seconds?\b/i);
   const seconds = duration ? Number(duration[1]) : words ? ['one','two','three','four','five','six','seven','eight','nine','ten'].indexOf(words[1].toLowerCase())+1 : 3;
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10 || /\b\d+\s*(?:minutes?|mins?|hours?)\b/i.test(text)) {

@@ -1,4 +1,4 @@
-import { IMAGE_PROFILE, ACTIVE_VIDEO_PROFILES, mediaQuote } from './pricing.js';
+import { IMAGE_PROFILE, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, mediaQuote } from './pricing.js';
 import { httpError } from '../../shared/http-error.js';
 
 // Shared contract for MCP and HTTP actions. Never wait for GPU work in a request.
@@ -8,7 +8,7 @@ export class MediaClientService {
     this.origin = publicOrigin ? new URL(publicOrigin).origin : null;
   }
   profiles() {
-    return { profiles: [IMAGE_PROFILE, ...ACTIVE_VIDEO_PROFILES].map(mediaQuote),
+    return { profiles: [IMAGE_PROFILE, ...ACTIVE_VIDEO_PROFILES, ...ACTIVE_I2V_PROFILES].map(mediaQuote),
       file_retention_seconds: 172800, asynchronous: true };
   }
   async submit(owner, input) {
@@ -18,10 +18,10 @@ export class MediaClientService {
     if (input.kind === 'video') {
       const seconds = input.duration_seconds ?? 3;
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Video duration must be an integer from 1 to 10 seconds');
-      profile = `wan22-14b-480p-${seconds * 16 + 1}f-v1`;
+      profile = input.input_artifact_id ? `wan22-i2v-lightning-14b-480p-${seconds * 16 + 1}f-v3` : `wan22-14b-480p-${seconds * 16 + 1}f-v1`;
     } else if (input.duration_seconds !== undefined) throw httpError(400, 'duration_seconds applies only to video');
     const job = await this.queue.submit(owner, { profile_id: profile, prompt: input.prompt,
-      seed: input.seed, idempotency_key: input.idempotency_key });
+      seed: input.seed, input_artifact_id: input.input_artifact_id, idempotency_key: input.idempotency_key });
     return this.describe(job);
   }
   describe(job) {

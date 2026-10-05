@@ -231,3 +231,56 @@ test('old 704p queue jobs retain their quote and can only be claimed by matching
  assert.equal(claim.job_id,job.job_id);assert.equal(claim.quote.width,1280);assert.equal(claim.quote.height,704);
  assert.equal(mediaQuote(profile).compute_credits,quote.compute_credits);
 });
+
+
+test('fast I2V requires owned references, fences downloads, and settles video once',async t=>{
+ const f=await fixture(t),service=new MediaClientService(f.queue,'https://chat.example');
+ const reference=png(64,128);
+ const reserved=await f.store.reserve(f.owner,{width:64,height:128,byte_size:reference.length,sha256:createHash('sha256').update(reference).digest('hex')});
+ await f.store.upload(reserved.artifact_id,reserved.upload_ticket.upload_token,reference);
+ const input={kind:'video',prompt:'The subject turns',duration_seconds:2,input_artifact_id:reserved.artifact_id,idempotency_key:randomUUID()};
+ await assert.rejects(service.submit(f.other,input),{statusCode:404});
+ const job=await service.submit(f.owner,input);
+ assert.equal(job.quote.operation,'image_to_video');assert.equal(job.quote.steps,4);
+ assert.equal(await f.queue.claim(f.device,[profile]),null);
+ const claim=await f.queue.claim(f.device,[job.quote.profile_id]);
+ const downloaded=await f.queue.input('gx10',claim);
+ assert.deepEqual(Buffer.from(downloaded.data,'base64'),reference);
+ await assert.rejects(f.queue.input('other',claim),{statusCode:409});
+ await assert.rejects(f.queue.input('gx10',{...claim,lease_token:'wrong'}),{statusCode:409});
+ const bytes=await video(f.root),ticket=await f.queue.reserve('gx10',{...claim,metadata:{byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+ await f.store.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,bytes);
+ await f.queue.complete('gx10',{...claim,generation_ms:146360});
+ await f.queue.complete('gx10',{...claim,generation_ms:146360});
+ assert.equal((await service.result(f.owner,job.job_id)).content_type,'video/mp4');
+ const ledger=(await f.db.query('select * from credits_ledger where job_id=$1',[job.job_id])).rows;
+ assert.equal(ledger.length,1);assert.equal(ledger[0].metadata.work_type,'video_generation');
+});
+
+test('OpenAI HTTP multipart I2V supports polling, idempotency and protected content',async t=>{
+ const f=await fixture(t),{createServerApp}=await import('../src/main.js');
+ const authStore={session:async()=>null,mcpSession:async req=>req.headers.authorization==='Bearer user-token'?{id:f.owner}:null};
+ const server=createServerApp({auth:{required:true,publicOrigin:'https://chat.example'},authStore,mediaStore:f.store,mediaAdmission:async()=>true});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
+ const origin='http://127.0.0.1:'+server.address().port;
+ const headers={Authorization:'Bearer user-token','Idempotency-Key':randomUUID()};
+ const reference=png(64,128);
+ async function submit() {
+   const form=new FormData();form.set('model','Wan-AI/Wan2.2-I2V-A14B-Lightning');form.set('prompt','A teapot turns');
+   form.set('seconds','2');form.set('size','832x480');form.set('input_reference',new Blob([reference],{type:'image/png'}),'input.png');
+   const response=await fetch(origin+'/v1/videos',{method:'POST',headers,body:form});
+   assert.equal(response.status,200);return response.json();
+ }
+ const created=await submit();assert.equal(created.object,'video');assert.equal(created.status,'queued');assert.equal(created.seconds,'2');
+ assert.equal((await submit()).id,created.id);
+ assert.equal((await fetch(origin+'/v1/videos/'+created.id)).status,401);
+ assert.equal((await fetch(origin+'/v1/videos/'+created.id+'/content',{headers})).status,409);
+ const job=await f.queue.owned(f.owner,created.id),claim=await f.queue.claim(f.device,[job.quote.profile_id]);
+ const bytes=await video(f.root),ticket=await f.queue.reserve('gx10',{...claim,metadata:{byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+ await f.store.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,bytes);
+ await f.queue.complete('gx10',{...claim,generation_ms:146360});
+ const status=await (await fetch(origin+'/v1/videos/'+created.id,{headers})).json();assert.equal(status.status,'completed');assert.equal(status.progress,100);
+ const content=await fetch(origin+'/v1/videos/'+created.id+'/content',{headers});assert.equal(content.headers.get('content-type'),'video/mp4');assert.deepEqual(Buffer.from(await content.arrayBuffer()),bytes);
+ assert.equal((await fetch(origin+'/v1/videos/'+created.id+'/content?variant=thumbnail',{headers})).status,400);
+});

@@ -11,7 +11,7 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
   const queue = store ? new MediaQueue(store, admitWorker) : null;
   const accounting = store ? new MediaAccounting(store) : null;
   return async function handleMedia({ request, response, url }) {
-    const worker = url.pathname.match(/^\/api\/media\/worker\/(claim|heartbeat|reserve|complete|fail)$/);
+    const worker = url.pathname.match(/^\/api\/media\/worker\/(claim|heartbeat|reserve|complete|fail|input)$/);
     const jobs = url.pathname.match(/^\/api\/media\/jobs(?:\/([0-9a-f-]{36}))?$/);
     const profiles = url.pathname === "/api/media/profiles";
     const price = url.pathname === "/api/media/quote";

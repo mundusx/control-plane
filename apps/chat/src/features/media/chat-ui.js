@@ -68,15 +68,15 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
     }
     return { monitor, remember, status, card, visual, live };
   }
-  async function submit(node, prompt, conversationId) {
-    const intent=detect(prompt);
+  async function submit(node, prompt, conversationId, detectedIntent, inputArtifactId) {
+    const intent=detectedIntent ?? detect(prompt);
     if (!intent) return false;
     if (intent.error) { node.querySelector('.message-body').textContent=intent.error; cache(conversationId,{role:'assistant',content:intent.error}); return true; }
     const item={...intent,idempotency_key:crypto.randomUUID()};
     const view=mount(node,item,conversationId);
     const send=async()=>{
       try {
-        const job=await api('/api/media/chat',{message:prompt,conversationId,idempotency_key:item.idempotency_key});
+        const job=await api('/api/media/chat',{message:prompt,conversationId,input_artifact_id:inputArtifactId,idempotency_key:item.idempotency_key});
         item.job_id=job.job_id; view.remember();
         if (view.live()) view.monitor();
       } catch(error) {
