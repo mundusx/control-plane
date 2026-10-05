@@ -16,7 +16,15 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
     const control = new AbortController(); controllers.set(node, control);
     const body = node.querySelector('.message-body'); body.replaceChildren();
     const card = document.createElement('section'); card.className = 'media-chat-card';
-    const visual = document.createElement('div'); visual.className = 'media-chat-mesh'; visual.setAttribute('aria-hidden','true');
+    const visual = document.createElement('div'); visual.className = 'media-chat-loader'; visual.setAttribute('aria-hidden','true');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('viewBox','0 0 32 32');svg.setAttribute('fill','none');
+    for (const [index,d] of ['M16 3C23.2 3 29 8.8 29 16','M29 16C29 23.2 23.2 29 16 29','M16 29C8.8 29 3 23.2 3 16','M3 16C3 8.8 8.8 3 16 3'].entries()) {
+      const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d',d);path.setAttribute('stroke','currentColor');path.setAttribute('stroke-width','2.2');path.setAttribute('stroke-linecap','round');
+      path.style.opacity=String(1-index*.2);svg.append(path);
+    }
+    visual.append(svg);
     const heading = document.createElement('strong');
     heading.textContent = item.kind === 'video' ? 'Creating your video' : 'Creating your image';
     const detail = document.createElement('p'); detail.className = 'media-chat-detail';
@@ -44,7 +52,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
             if (item.kind === 'video') { media.controls = true; media.preload = 'metadata'; }
             else { media.alt = item.prompt || 'Generated image'; media.loading = 'lazy'; }
             media.className = 'media-chat-output'; media.src = result.preview_url;
-            visual.replaceWith(media); card.setAttribute('aria-busy','false');
+            visual.replaceWith(media); card.setAttribute('aria-busy','false');card.classList.add('media-chat-complete');
             heading.textContent = item.kind === 'video' ? 'Your video is ready' : 'Your image is ready';
             status.textContent = 'Download available until ' + new Date(result.expires_at).toLocaleString();
             const link = document.createElement('a'); link.className = 'media-chat-download';
@@ -93,13 +101,14 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
 }
 
 export const mediaChatCss = `
-.media-chat-card{width:min(100%,540px);display:grid;gap:12px;padding:16px;border:1px solid var(--line);border-radius:20px;background:var(--panel);overflow:hidden}
-.media-chat-card strong{font-size:16px}.media-chat-card p{margin:0}.media-chat-detail,.media-chat-status{font-size:13px;color:var(--muted);line-height:1.5}
-.media-chat-mesh{height:270px;border-radius:13px;position:relative;overflow:hidden;background:#f8fafc}
-.media-chat-mesh::before{content:'';position:absolute;inset:-35%;background:radial-gradient(ellipse at 28% 32%,#dce9fa 0%,transparent 48%),radial-gradient(ellipse at 76% 42%,#ebe4f7 0%,transparent 48%),radial-gradient(ellipse at 48% 80%,#dff2ef 0%,transparent 48%);filter:blur(32px);opacity:.75;animation:media-mesh-drift 10s ease-in-out infinite alternate}
-.media-chat-mesh::after{content:'';position:absolute;inset:0;background-image:linear-gradient(#94a3b808 1px,transparent 1px),linear-gradient(90deg,#94a3b808 1px,transparent 1px);background-size:32px 32px;opacity:.4}
-@keyframes media-mesh-drift{from{transform:rotate(-10deg) translate(-3%,-2%) scale(1)}to{transform:rotate(24deg) translate(6%,3%) scale(1.15)}}
-.media-chat-still::before{animation:none}.media-chat-output{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:13px;background:#10131a}
+.media-chat-card{width:fit-content;max-width:min(100%,540px);display:grid;grid-template-columns:32px minmax(0,1fr);gap:4px 12px;padding:10px 0;background:transparent}
+.media-chat-card strong{grid-column:2;font-size:14px;align-self:center}.media-chat-card p{margin:0}.media-chat-status{grid-column:2;font-size:13px;color:var(--muted);line-height:1.5}.media-chat-detail{display:none;font-size:13px;color:var(--muted);line-height:1.5}
+.media-chat-loader{grid-column:1;grid-row:1/3;align-self:center;width:32px;height:32px;color:var(--text)}
+.media-chat-loader svg{display:block;width:32px;height:32px;animation:media-vector-turn 1.4s linear infinite;transform-origin:center}
+@keyframes media-vector-turn{to{transform:rotate(360deg)}}
+.media-chat-still svg{animation:none;opacity:.4}.media-chat-card button{grid-column:2;width:fit-content}
+.media-chat-complete{width:min(100%,540px);display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--line);border-radius:20px;background:var(--panel);overflow:hidden}
+.media-chat-complete .media-chat-detail{display:block}.media-chat-output{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:13px;background:#10131a}
 .media-chat-download{display:inline-block;width:fit-content;color:var(--text);font-size:14px;font-weight:600;text-decoration:underline;text-underline-offset:4px}
-@media(prefers-reduced-motion:reduce){.media-chat-mesh::before{animation:none}}
+@media(prefers-reduced-motion:reduce){.media-chat-loader svg{animation:none}}
 `;
