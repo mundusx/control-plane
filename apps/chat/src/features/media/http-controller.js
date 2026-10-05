@@ -7,8 +7,8 @@ import { httpError } from "../../shared/http-error.js";
 import { MAX_VIDEO_BYTES } from "./video.js";
 import { MAX_IMAGE_BYTES } from "./png.js";
 
-export function createMediaHttpController({ store, authStore, operatorToken, readJsonBody, sendJson, admitWorker }) {
-  const queue = store ? new MediaQueue(store, admitWorker) : null;
+export function createMediaHttpController({ store, authStore, operatorToken, readJsonBody, sendJson, admitWorker, fleet }) {
+  const queue = store ? new MediaQueue(store, admitWorker, fleet) : null;
   const accounting = store ? new MediaAccounting(store) : null;
   return async function handleMedia({ request, response, url }) {
     const worker = url.pathname.match(/^\/api\/media\/worker\/(claim|heartbeat|reserve|complete|fail|input)$/);
