@@ -4206,6 +4206,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           } catch {}
         }
         if (mediaIntent) {
+          if (mediaIntent.error) {
+            await mediaUi.submit(pending, message, conversationId, mediaIntent);
+            setStatus("ready", "Ready");
+            return;
+          }
           const reference = document.getElementById('media-reference')?.files?.[0];
           if (reference && mediaIntent.kind !== 'video') throw new Error('Reference images currently support video generation only.');
           let inputArtifactId;
