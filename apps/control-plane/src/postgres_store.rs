@@ -24,6 +24,27 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
+    pub fn record_runtime_token_usage(&self, completion:&JobCompletion, records:&[crate::runtime_usage::RuntimeTokenUsage], active:bool) -> Result<(),String> {
+        let mut client=self.connect()?;
+        let mut tx=client.transaction().map_err(|e|e.to_string())?;
+        if !active {
+            let saved=tx.query("select call_id::text,completion_tokens,prompt_tokens from public.runtime_token_usage where job_id=$1 and worker_id=$2 order by call_index",&[&completion.job_id,&completion.worker_id]).map_err(|e|e.to_string())?;
+            if saved.len()!=records.len() || saved.iter().zip(records).any(|(row,r)| row.get::<_,String>(0)!=r.call_id || row.get::<_,i64>(1)!=r.completion_tokens as i64 || row.get::<_,Option<i64>>(2)!=r.prompt_tokens.map(|n|n as i64)) {
+                return Err("Completed usage report does not match its saved measurement".into());
+            }
+            return tx.commit().map_err(|e|e.to_string());
+        }
+        for (index,r) in records.iter().enumerate() {
+            tx.execute(include_str!("../../../db/statements/record_runtime_token_usage.sql"),
+                &[&r.call_id,&completion.job_id,&completion.node_id,&completion.worker_id,&(index as i32),&(r.completion_tokens as i64),&r.prompt_tokens.map(|n|n as i64)]).map_err(|e|e.to_string())?;
+        }
+        tx.commit().map_err(|e|e.to_string())
+    }
+
+    pub fn runtime_token_totals(&self)->Result<serde_json::Value,String> {
+        let row=self.connect()?.query_one("select completion_tokens,prompt_tokens,measured_calls,tracking_started_at::text,last_recorded_at::text from public.runtime_token_totals where id=1",&[]).map_err(|e|e.to_string())?;
+        Ok(serde_json::json!({"measured_output_tokens":row.get::<_,i64>(0).to_string(),"measured_input_tokens":row.get::<_,i64>(1).to_string(),"measured_model_calls":row.get::<_,i64>(2).to_string(),"tracking_started_at":row.get::<_,String>(3),"last_recorded_at":row.get::<_,Option<String>>(4),"source":"runtime_reported","includes_estimates":false,"historical_unmetered_requests":"excluded","scope":"model calls reported by instrumented EHDA contributors, including internal calls and retries"}))
+    }
     pub fn from_env(pool_url: Option<&str>, direct_url: Option<&str>) -> Option<Self> {
         Self::from_values(pool_url, direct_url)
     }
