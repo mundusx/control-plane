@@ -142,10 +142,17 @@ function png(width = 8, height = width) {
     chunk("IDAT", deflateSync(Buffer.alloc(height * (width * 3 + 1)))), chunk("IEND", Buffer.alloc(0))]);
 }
 
-test('image client result delivers an expiring URL after validated output and one settlement',async t=>{
+for (const oldPrice of [false,true]) test('image result settles its saved '+(oldPrice?'previous':'megapixel-step')+' quote once',async t=>{
  const f=await fixture(t),service=new MediaClientService(f.queue,'https://chat.example');
- const job=await service.submit(f.owner,{kind:'image',prompt:'A teapot',idempotency_key:randomUUID()});
+ const key=randomUUID(),input={kind:'image',prompt:'A teapot',idempotency_key:key};
+ const job=await service.submit(f.owner,input);
+ if (oldPrice) {
+   const saved={...job.quote,pricing_version:'image-compute-v2',compute_credits:4,contributor_reward_credits:4};
+   await f.db.query('update media_compute_records set quote=$2 where job_id=$1',[job.job_id,saved]);
+   assert.equal((await service.submit(f.owner,input)).quote.compute_credits,4);
+ }
  const claim=await f.queue.claim(f.device,['qwen-image-fp8-832x480-v1']);
+ assert.equal(claim.quote.compute_credits,oldPrice?4:1199);
  const bytes=png(832,480),ticket=await f.queue.reserve('gx10',{...claim,metadata:{byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
  await f.store.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,bytes);
  await f.queue.complete('gx10',{...claim,generation_ms:1000});
@@ -157,6 +164,7 @@ test('image client result delivers an expiring URL after validated output and on
  assert.deepEqual(await downloaded.file.readFile(),bytes);await downloaded.file.close();
  await assert.rejects(service.result(f.other,job.job_id),{statusCode:404});
  assert.equal((await f.db.query('select * from credits_ledger')).rows.length,1);
+ assert.equal(Number((await f.db.query('select amount from credits_ledger')).rows[0].amount),oldPrice?4:1199);
  f.advance(RETENTION_SECONDS*1000);await f.store.cleanup();
  await assert.rejects(service.result(f.owner,job.job_id),{statusCode:410});
  assert.equal((await service.status(f.owner,job.job_id)).state,'completed');
