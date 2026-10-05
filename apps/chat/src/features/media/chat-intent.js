@@ -41,7 +41,7 @@ export function mediaChatIntent(message) {
   const kind = (translated ? translated[1].test(text) : /video|clip/i.test(match[1])) ? 'video' : 'image';
   if (kind === 'image') return { kind, prompt: text };
   const durationText = text.replace(/[٠-٩۰-۹０-９]/g, digit => String(digit.charCodeAt(0) - (digit >= '０' ? 0xff10 : digit >= '۰' ? 0x06f0 : 0x0660)));
-  const durations = [...durationText.matchAll(/(\d+(?:\.\d+)?)\s*[- ]?\s*(?:seconds?|secs?|s|sekund\w*|segundos?|secondes?|секунд\w*|ثواني|ثانية|秒|초)(?=$|[^\p{L}])/giu)].map(match => Number(match[1]));
+  const durations = [...durationText.matchAll(/(\d+(?:\.\d+)?)\s*[- ]?\s*(?:(?:seconds?|secs?|s|sekund\w*|segundos?|secondes?|секунд\w*|ثواني|ثانية)(?=$|[^\p{L}])|秒|초)/giu)].map(match => Number(match[1]));
   const numberWords = ['one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen','eighteen','nineteen','twenty'];
   const words = durationText.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|sixty)\s*[- ]?\s*seconds?\b/i);
   const largeWordDuration = /\b(?:eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)(?:[ -]+(?:one|two|three|four|five|six|seven|eight|nine|ten|and|hundred|thousand))*[ -]+seconds?\b/i.test(durationText);

@@ -60,7 +60,7 @@ test('oversized video requests produce only a maximum-duration error while ten s
  const {mediaChatIntent}=await import('../src/features/media/chat-intent.js');
  for(const prompt of ['Generate an 11-second video','Create a video for 20s','Make a video lasting eleven seconds',
    'Create a twenty-one second video','Make a video for a minute','Make a video for half a minute',
-   'Create a video, 10 seconds then another 15 seconds','生成视频，11秒。','生成视频 １１秒',
+   'Create a video, 10 seconds then another 15 seconds','生成视频，11秒。','生成11秒的视频','生成视频 １１秒',
    'أنشئ فيديو ١١ ثانية']) {
    const result=mediaChatIntent(prompt);assert.equal(result.kind,'video',prompt);assert.match(result.error,/10 seconds maximum/,prompt);assert.equal(result.duration_seconds,undefined);
  }
