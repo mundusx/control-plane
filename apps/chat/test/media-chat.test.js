@@ -22,7 +22,8 @@ test('chat has no separate video link, embeds parseable media UI and respects re
   assert.doesNotMatch(html,/href="\/video"/);
   assert.match(html,/Maximum 10 seconds/);
   assert.match(html,/prefers-reduced-motion:reduce/);
-  assert.match(html,/media-chat-mesh/);
+  assert.match(html,/media-chat-loader/);
+  assert.match(html,/media-vector-turn/);
   for(const match of html.matchAll(/<script(?:[^>]*)>([\s\S]*?)<\/script>/g)) if(match[1].trim()) assert.doesNotThrow(()=>new vm.Script(match[1]));
 });
 
