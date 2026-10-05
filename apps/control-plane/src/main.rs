@@ -1164,6 +1164,7 @@ fn node_last_seen(updated_at: &str) -> String {
 
 fn render_node_classification(node: &NodeRecord) -> String {
     let advertised = node.capabilities.as_ref();
+    let media_health = node.worker_health.as_ref().filter(|health| health.runtime_mode == "media" || !health.media_profiles.is_empty());
     let live = node
         .worker_health
         .as_ref()
@@ -1171,6 +1172,8 @@ fn render_node_classification(node: &NodeRecord) -> String {
     let harness = advertised.and_then(|capabilities| capabilities.harness.as_ref());
     let node_type = if harness.is_some() {
         "harness runner"
+    } else if media_health.is_some_and(|health| health.runtime_mode == "media") {
+        "media contributor"
     } else {
         "inference contributor"
     };
@@ -1234,10 +1237,24 @@ fn render_node_classification(node: &NodeRecord) -> String {
         .or_else(|| advertised.and_then(|profile| profile.physical_memory_mb))
         .map(|mb| format!("{:.1} GiB RAM", f64::from(mb) / 1024.0))
         .unwrap_or_else(|| "memory not reported".to_string());
-    let model_html = if models.is_empty() {
+    let media_html = media_health.map(|health| {
+        let profiles = health.media_profiles.iter().map(|profile| {
+            let operation = if profile.starts_with("qwen-image-") { "Text to image" }
+                else if profile.starts_with("wan22-i2v-") { "Image to video" }
+                else if profile.starts_with("wan22-") { "Text to video" }
+                else { "Media" };
+            format!(r#"<div class="meta"><strong>{operation}:</strong> {}</div>"#, escape_html(profile))
+        }).collect::<Vec<_>>().join("");
+        let profiles = if profiles.is_empty() { r#"<div class="meta">No verified media profiles advertised</div>"#.to_string() } else { profiles };
+        format!(r#"{profiles}<div class="meta">Media memory budget: {:.1} GiB &middot; {} shared media slot(s)</div><div class="meta">Verified profiles reported by contributor; availability and policy shown separately.</div>"#,
+            health.media_budget_bytes as f64 / 1024.0_f64.powi(3), health.parallel_slots)
+    }).unwrap_or_default();
+    let model_html = if models.is_empty() && media_health.is_some_and(|health| health.runtime_mode == "media") {
+        media_html
+    } else if models.is_empty() {
         r#"<div class="meta">Awaiting model advertisement; task suitability unknown</div>"#.to_string()
     } else {
-        models.iter().map(|model| {
+        let model_html = models.iter().map(|model| {
             let tasks = if model.task_capabilities.is_empty() {
                 "task skills not reported".to_string()
             } else { model.task_capabilities.join(", ") };
@@ -1248,7 +1265,8 @@ fn render_node_classification(node: &NodeRecord) -> String {
                 if model.supports_tools { "advertised" } else { "not advertised" },
                 if model.supports_vision { "advertised" } else { "not advertised" },
                 if model.supports_embeddings { "advertised" } else { "not advertised" })
-        }).collect::<Vec<_>>().join("")
+        }).collect::<Vec<_>>().join("");
+        model_html + &media_html
     };
     format!(
         r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
@@ -11298,6 +11316,30 @@ mod tests {
         assert_eq!(trust_grade_badge(92, 4, 0).2, "high trust");
         assert_eq!(trust_grade_badge(45, 1, 1).2, "warning");
         assert_eq!(trust_grade_badge(20, 1, 5).2, "poor trust");
+    }
+
+    #[test]
+    fn media_node_classification_displays_verified_profiles_without_llm_warning() {
+        let mut state = ControlPlaneState::default();
+        register_ready_node(&mut state, "node-media", "GX10", "1");
+        let node = state.nodes.get_mut("node-media").unwrap();
+        let health = node.worker_health.as_mut().unwrap();
+        health.runtime_mode = "media".into();
+        health.capabilities.models.clear();
+        health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into(), "wan22-14b-480p-49f-v1".into(), "wan22-i2v-lightning-14b-480p-81f-v3".into(), "<untrusted>".into()];
+        health.media_budget_bytes = 104481695334;
+        health.parallel_slots = 1;
+        let html = crate::render_node_classification(node);
+        assert!(html.contains("media contributor"));
+        assert!(html.contains("Text to image:</strong> qwen-image-fp8-832x480-v1"));
+        assert!(html.contains("Text to video:</strong> wan22-14b-480p-49f-v1"));
+        assert!(html.contains("Image to video:</strong> wan22-i2v-lightning-14b-480p-81f-v3"));
+        assert!(html.contains("97.3 GiB"));
+        assert!(html.contains("1 shared media slot(s)"));
+        assert!(html.contains("&lt;untrusted&gt;"));
+        assert!(!html.contains("Awaiting model advertisement"));
+        node.worker_health.as_mut().unwrap().media_profiles.clear();
+        assert!(crate::render_node_classification(node).contains("No verified media profiles advertised"));
     }
 
     #[test]
