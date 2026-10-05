@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     database_url: String,
+    restore_database_url: String,
 }
 
 impl PostgresStore {
@@ -31,11 +32,16 @@ impl PostgresStore {
         let database_url = pool_url
             .and_then(trimmed)
             .or_else(|| direct_url.and_then(trimmed))?;
-        Some(Self { database_url })
+        let restore_database_url = direct_url
+            .and_then(trimmed)
+            .unwrap_or_else(|| database_url.clone());
+        Some(Self { database_url, restore_database_url })
     }
 
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
-        let mut client = self.connect()?;
+        // Startup hydration can return large historical JSON rows. Keep this
+        // one-time read on the direct connection; ordinary requests stay pooled.
+        let mut client = connect_client(&self.restore_database_url)?;
         let totals = client
             .query_one(JOB_TOTALS_SQL, &[])
             .map_err(|error| format!("postgres job totals restore failed: {error}"))?;
@@ -1680,6 +1686,10 @@ mod tests {
             store.database_url,
             "postgresql://app@pgbouncer.example/mundusx"
         );
+        assert_eq!(
+            store.restore_database_url,
+            "postgresql://admin@postgres.example/mundusx"
+        );
     }
 
     #[test]
@@ -1692,6 +1702,15 @@ mod tests {
             store.database_url,
             "postgresql://admin@postgres.example/mundusx"
         );
+        assert_eq!(store.restore_database_url, store.database_url);
+    }
+
+    #[test]
+    fn pool_only_configuration_retains_startup_compatibility() {
+        let store = PostgresStore::from_values(
+            Some("postgresql://app@pgbouncer.example/mundusx"), Some(" "),
+        ).expect("store");
+        assert_eq!(store.restore_database_url, store.database_url);
     }
 
     #[test]
