@@ -18,7 +18,7 @@ export class MediaClientService {
     let profile = IMAGE_PROFILE;
     if (input.kind === 'video') {
       const seconds = input.duration_seconds ?? 3;
-      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Video duration must be an integer from 1 to 10 seconds');
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.');
       profile = input.input_artifact_id ? `wan22-i2v-lightning-14b-480p-${seconds * 16 + 1}f-v3` : `wan22-14b-480p-${seconds * 16 + 1}f-v1`;
     } else if (input.duration_seconds !== undefined) throw httpError(400, 'duration_seconds applies only to video');
     if (this.planner) {

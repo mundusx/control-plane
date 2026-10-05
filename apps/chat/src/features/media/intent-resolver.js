@@ -15,7 +15,7 @@ export async function resolveMediaIntent(message, classify) {
     const intent = { kind: result.kind, prompt: message };
     if (result.kind === 'video') {
       const seconds = result.seconds ?? 3;
-      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) return { ...intent, error: 'Videos can be 1–10 seconds long.' };
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) return { ...intent, error: 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.' };
       intent.duration_seconds = seconds;
     }
     return intent;
