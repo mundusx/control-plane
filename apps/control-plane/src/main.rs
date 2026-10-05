@@ -7,6 +7,7 @@ mod admin_login;
 mod contracts;
 mod harness;
 mod migrations;
+mod runtime_usage;
 mod planner_client;
 mod postgres_store;
 mod state;
@@ -9804,11 +9805,44 @@ fn handle_connection_with_streams(
                 serde_json::json!({ "error": error.to_string() }),
             ),
         },
+        ("GET", "/v1/usage/tokens") => match supabase {
+            Some(DatabaseMirror::Postgres(store)) => match store.runtime_token_totals() {
+                Ok(value)=>json_response("200 OK",value),
+                Err(_)=>json_response("503 Service Unavailable",serde_json::json!({"error":"Measured token statistics temporarily unavailable"})),
+            },
+            _=>json_response("503 Service Unavailable",serde_json::json!({"error":"Measured token statistics require PostgreSQL"})),
+        },
         ("POST", "/v1/jobs/complete") => match serde_json::from_str::<JobCompletion>(&request.body)
         {
             Ok(completion) => {
+                let token_usage=match runtime_usage::parse(&request.body) {
+                    Ok(records)=>records,
+                    Err(error)=>return stream.write_all(json_response("400 Bad Request",serde_json::json!({"error":error})).as_bytes()).unwrap_or(()),
+                };
                 let completion_clone = completion.clone();
                 let mut guard = state.lock().expect("state lock");
+                if !token_usage.is_empty() {
+                    if header_value(&request.headers,"x-mundusx-node-id") != Some(completion.node_id.as_str()) {
+                        return stream.write_all(json_response("403 Forbidden",serde_json::json!({"error":"Runtime usage identity mismatch"})).as_bytes()).unwrap_or(());
+                    }
+                    let active=guard.jobs.get(&completion.job_id).is_some_and(|job| {
+                        (!job.graph_execution_enabled && job.status==contracts::JobStatus::Assigned)
+                        || job.graph.nodes.iter().any(|n| n.status==contracts::JobGraphNodeStatus::Running && n.assigned_node_id.as_deref()==Some(completion.node_id.as_str()))
+                    });
+                    let valid=guard.jobs.get(&completion.job_id).is_some_and(|job| {
+                        (!job.graph_execution_enabled && job.assigned_node_id.as_deref()==Some(completion.node_id.as_str())
+                            && (active || job.worker_id.as_deref()==Some(completion.worker_id.as_str())))
+                        || job.graph.nodes.iter().any(|n| n.assigned_node_id.as_deref()==Some(completion.node_id.as_str())
+                            && (matches!(n.status,contracts::JobGraphNodeStatus::Running)
+                                || n.worker_id.as_deref()==Some(completion.worker_id.as_str())))
+                    });
+                    if !valid {return stream.write_all(json_response("403 Forbidden",serde_json::json!({"error":"Runtime usage must belong to the assigned worker"})).as_bytes()).unwrap_or(());}
+                    let stored=match supabase {
+                        Some(DatabaseMirror::Postgres(store))=>store.record_runtime_token_usage(&completion,&token_usage,active),
+                        _=>Err("Runtime usage storage is unavailable".into()),
+                    };
+                    if stored.is_err() {return stream.write_all(json_response("503 Service Unavailable",serde_json::json!({"error":"Could not persist runtime usage; retry completion"})).as_bytes()).unwrap_or(());}
+                }
                 let record = guard.complete_job(completion, now_unix_seconds());
                 let mut completion_event = None;
                 let mut credit_award = None;
