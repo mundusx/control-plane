@@ -2,10 +2,11 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, 
 import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
+import { rankedMediaWorker, eligibleMediaNode } from './routing.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export class MediaQueue {
-  constructor(store, admitWorker = async device => device.policy_allowed === true) { this.store=store; this.accounting=new MediaAccounting(store); this.admitWorker=admitWorker; }
+  constructor(store, admitWorker = async device => device.policy_allowed === true, fleet = null) { this.store=store; this.accounting=new MediaAccounting(store); this.admitWorker=admitWorker; this.fleet=fleet; }
   async authenticate(request, path, body) {
     const h=request.headers, node=String(h['x-mundusx-node-id']??''), timestamp=String(h['x-mundusx-timestamp']??''), signature=String(h['x-mundusx-signature']??'');
     if (!/^\d{10}$/.test(timestamp) || Math.abs(Number(timestamp)*1000-this.store.now())>120000 || !/^[0-9a-f]{128}$/.test(signature) || !uuid.test(body?._nonce??'')) throw httpError(401,'Invalid worker signature');
@@ -29,10 +30,14 @@ export class MediaQueue {
       task.input_artifact_id = reference.artifact_id;
       task.input_sha256 = reference.sha256;
     } else if (input.input_artifact_id !== undefined) throw httpError(400, 'Reference image requires image-to-video');
+    let fleet, fleetError;
+    if (this.fleet) { try { fleet = await this.fleet(); } catch (error) { fleetError = error; } }
     return this.store.transaction(async db=>{
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
       if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed || (old.request.input_sha256 ?? old.request.input_artifact_id)!==(task.input_sha256 ?? task.input_artifact_id))) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,created_at:old.created_at,quote:saved.quote}; }
+      if (fleetError) throw fleetError;
+      if (fleet && !fleet.some(n => eligibleMediaNode(n,quote.profile_id,this.store.now()))) throw httpError(503,'No eligible media contributor is currently serving this profile. Please try again later.');
       if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
       if(pending>=4) throw httpError(429,'You already have four pending media requests');
@@ -48,22 +53,45 @@ export class MediaQueue {
     if(!await this.admitWorker(device, profiles)) throw httpError(403,'Contributor policy does not allow work');
     const supported=Array.isArray(profiles)?profiles.filter(x=>x===IMAGE_PROFILE || x===LEGACY_IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
     if(!supported.length) throw httpError(422,'No supported media presets');
+    const fleet = this.fleet ? await this.fleet() : null;
     return this.store.transaction(async db=>{
+      if (fleet) {
+        // Serialize ranked decisions across workers and web replicas.
+        await db.query('select pg_advisory_xact_lock(748291044)');
+        await db.query(`insert into public.media_worker_presence(node_id,public_key_hex,profiles,last_poll_at)
+          values($1,$2,$3,$4) on conflict(node_id) do update set public_key_hex=excluded.public_key_hex,
+          profiles=excluded.profiles,last_poll_at=excluded.last_poll_at`,
+          [device.node_id,device.public_key_hex,JSON.stringify(supported),new Date(this.store.now())]);
+      }
       // Serialize claims per node across processes; SKIP LOCKED distributes jobs across nodes.
       await db.query('select node_id from public.devices where node_id=$1 for update',[device.node_id]);
       const now=new Date(this.store.now());
       const expired=await db.query("update public.media_generation_jobs set state=case when attempts>=3 then 'failed' else 'queued' end,lease_hash=null,lease_until=null,node_id=null,error='Worker lease expired' where state='running' and lease_until<=$1 returning job_id,state",[now]);
       for(const x of expired.rows) {
+        if (fleet) await db.query("update public.media_execution_attempts set state='expired',finished_at=$2 where job_id=$1 and state='running'",[x.job_id,now]);
         await db.query('update public.jobs set status=$2,assigned_node_id=null where job_id=$1',[x.job_id,'media_'+x.state]);
         await db.query("update public.media_compute_records set artifact_id=null,node_id=null where job_id=$1 and status='quoted'",[x.job_id]);
       }
       await db.query('delete from public.media_worker_nonces where expires_at<=$1',[now]);
       if((await db.query("select 1 from public.media_generation_jobs where node_id=$1 and state='running'",[device.node_id])).rows.length) return null;
-      const row=(await db.query("select * from public.media_generation_jobs where state='queued' and request->>'profile_id'=any($1::text[]) order by created_at,job_id for update skip locked limit 1",[supported])).rows[0];
+      const rows=(await db.query(`select * from public.media_generation_jobs where state='queued' and request->>'profile_id'=any($1::text[]) order by created_at,job_id for update skip locked limit ${fleet ? 32 : 1}`,[supported])).rows;
+      let row;
+      const ranked = new Map();
+      for (const candidate of rows) {
+        if (!fleet) { row=candidate; break; }
+        const profile=candidate.request.profile_id;
+        if (!ranked.has(profile)) ranked.set(profile,await rankedMediaWorker(db,fleet,profile,this.store.now()));
+        if (ranked.get(profile) === device.node_id) { row=candidate; break; }
+      }
       if(!row) return null;
       const token=randomBytes(32).toString('hex');
       await db.query("update public.media_generation_jobs set state='running',node_id=$2,lease_hash=$3,lease_until=$4,attempts=attempts+1,error=null where job_id=$1",[row.job_id,device.node_id,hash(token),new Date(this.store.now()+180000)]);
       await db.query("update public.jobs set status='media_running',assigned_node_id=$2,assigned_at_epoch=$3 where job_id=$1",[row.job_id,device.node_id,Math.floor(this.store.now()/1000)]);
+      if (fleet) {
+        await db.query("insert into public.media_execution_attempts(job_id,attempt,node_id,profile_id,state,started_at) values($1,$2,$3,$4,'running',$5)",[row.job_id,row.attempts+1,device.node_id,row.request.profile_id,now]);
+        await db.query('update public.media_worker_presence set last_assigned_at=$2 where node_id=$1',[device.node_id,now]);
+        await db.query('insert into public.media_routing_clock(profile_id,assignments) values($1,1) on conflict(profile_id) do update set assignments=media_routing_clock.assignments+1',[row.request.profile_id]);
+      }
       const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[row.job_id])).rows[0];
       return {job_id:row.job_id,...row.request,lease_token:token,lease_seconds:180,quote:saved.quote};
     });
@@ -111,6 +139,7 @@ export class MediaQueue {
     await this.store.transaction(async db=>{
       const row=await this.lease(db,node,input,true);
       if(row.state==='completed') return;
+      if (this.fleet) await db.query("update public.media_execution_attempts set state='completed',finished_at=$2,generation_ms=$3 where job_id=$1 and state='running'",[row.job_id,new Date(this.store.now()),input.generation_ms]);
       const a=(await db.query(`select a.* from public.media_artifacts a join public.media_compute_records c on c.artifact_id=a.artifact_id where c.job_id=$1 and c.node_id=$2 for update of a`,[row.job_id,node])).rows[0];
       if(!a||a.status!=='ready'||a.file_deleted_at||new Date(a.expires_at).getTime()<=this.store.now()) throw httpError(409,'Upload a valid media before completion');
       await db.query("update public.jobs set status='media_completed',completed_at_epoch=$2 where job_id=$1",[row.job_id,Math.floor(this.store.now()/1000)]);
@@ -120,6 +149,7 @@ export class MediaQueue {
   }
   async fail(node,input) { return this.store.transaction(async db=>{
     await this.lease(db,node,input);
+    if (this.fleet) await db.query("update public.media_execution_attempts set state='failed',finished_at=$2 where job_id=$1 and state='running'",[input.job_id,new Date(this.store.now())]);
     await db.query("update public.media_generation_jobs set state='failed',error='Media generation failed',lease_until=null,completed_at=$2 where job_id=$1",[input.job_id,new Date(this.store.now())]);
     await db.query("update public.jobs set status='media_failed',error='Media generation failed' where job_id=$1",[input.job_id]);
     return {ok:true};

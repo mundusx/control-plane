@@ -15,6 +15,8 @@ import { webResearchRequest, fetchWebResearch } from "./web-research.js";
 import { createServer } from "node:http";
 import { MediaArtifactStore } from "./features/media/store.js";
 import { mediaAdmission } from "./features/media/admission.js";
+import { mediaFleet } from "./features/media/routing.js";
+import { mediaPlanner } from "./features/media/planner.js";
 import { createMediaHttpController } from "./features/media/http-controller.js";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
@@ -6901,7 +6903,9 @@ export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
   const mediaStore = config.mediaStore ?? (config.mediaDirectory
     ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
-  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config)) : null, config.auth?.publicOrigin);
+  const fleet = config.mediaFleet ?? (config.mediaAdmission ? null : mediaFleet(config));
+  const planMedia = config.mediaPlanner ?? mediaPlanner(process.env.MUNDUSX_MEDIA_PLANNER_URL);
+  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia);
   const mediaIntentCache = new Map();
   async function detectMediaIntent(owner, message) {
     const key = owner + ':' + String(message);
@@ -6919,7 +6923,7 @@ export function createServerApp(config = configFromEnv()) {
   }
   const handleOpenAiMediaRequest = createOpenAiMediaHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
   const handleMediaClientRequest = createMediaClientHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
-  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config) });
+  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config), fleet });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
   const handleHarnessRequest = createHarnessHttpController({

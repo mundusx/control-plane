@@ -11,7 +11,7 @@ if (process.env.MUNDUSX_MEDIA_DIR?.trim()) {
     await client.query("begin");
     await client.query("set local lock_timeout = '15s'");
     await client.query("select pg_advisory_xact_lock(748291037)");
-    for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql", "0040_video_jobs.sql", "0043_video_480p.sql"]) {
+    for (const name of ["0037_media_artifacts.sql", "0038_media_compute_records.sql", "0040_video_jobs.sql", "0043_video_480p.sql", "0044_media_routing.sql"]) {
       // 0040 was applied atomically. Replaying its old constraint after 14B
       // artifacts exist would reject those rows before the current constraint widens it.
       // 0043 supersedes 0041/0042; replaying narrower constraints rejects 480p rows.
