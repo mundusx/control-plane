@@ -63,10 +63,27 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
             const media = document.createElement(item.kind === 'video' ? 'video' : 'img');
             if (item.kind === 'video') { media.controls = true; media.preload = 'metadata'; }
             else { media.alt = item.prompt || 'Generated image'; media.loading = 'lazy'; }
-            media.className = 'media-chat-output'; media.src = result.preview_url;
+            media.className = 'media-chat-output';
+            const readyTitle = item.kind === 'video' ? 'Your video is ready' : 'Your image is ready';
+            media.addEventListener(item.kind === 'video' ? 'loadedmetadata' : 'load', () => {
+              if (!live()) return;
+              heading.textContent = readyTitle;
+              status.textContent = 'Download available until ' + new Date(result.expires_at).toLocaleString();
+              scroll();
+            });
+            media.addEventListener('error', () => {
+              if (!live()) return;
+              media.hidden = true; heading.textContent = 'Your media is saved';
+              status.textContent = 'Preview could not load. Try loading it again or use the download link.';
+              if (card.querySelector('.media-chat-reload')) return;
+              const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'media-chat-reload'; retry.textContent = 'Reload preview';
+              retry.onclick = () => { retry.remove(); media.hidden = false; heading.textContent = 'Loading saved media…'; media.src = result.preview_url + (result.preview_url.includes('?') ? '&' : '?') + 'reload=' + Date.now(); };
+              card.append(retry);
+            });
+            media.src = result.preview_url;
             visual.replaceWith(media); card.setAttribute('aria-busy','false');card.classList.add('media-chat-complete');
-            heading.textContent = item.kind === 'video' ? 'Your video is ready' : 'Your image is ready';
-            status.textContent = 'Download available until ' + new Date(result.expires_at).toLocaleString();
+            heading.textContent = 'Loading saved media…';
+            status.textContent = 'Generation completed. Loading the preview.';
             const link = document.createElement('a'); link.className = 'media-chat-download';
             link.href = result.download_url; link.textContent = item.kind === 'video' ? 'Download video' : 'Download image';
             card.append(link); scroll(); return;
@@ -124,6 +141,7 @@ export const mediaChatCss = `
 .media-chat-still svg{animation:none;opacity:.4}.media-chat-card button{grid-column:2;width:fit-content}
 .media-chat-complete{width:min(100%,540px);display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--line);border-radius:20px;background:var(--panel);overflow:hidden}
 .media-chat-complete .media-chat-detail{display:block}.media-chat-output{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:13px;background:#10131a}
+.media-chat-output[hidden]{display:none}
 .media-chat-download{display:inline-block;width:fit-content;color:var(--text);font-size:14px;font-weight:600;text-decoration:underline;text-underline-offset:4px}
 @media(prefers-reduced-motion:reduce){.media-chat-loader svg{animation:none}}
 `;
