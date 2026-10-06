@@ -1,5 +1,5 @@
 // Serialized into the existing Chat page. No untrusted content is inserted as HTML.
-export function installMediaChatUi({ detect, cache, activeConversation, scroll, identity = () => null }) {
+export function installMediaChatUi({ detect, cache, activeConversation, scroll, identity = () => null, requestAnother = () => {} }) {
   const controllers = new WeakMap();
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function api(path, body) {
@@ -30,8 +30,13 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
     const detail = document.createElement('p'); detail.className = 'media-chat-detail';
     detail.textContent = item.kind === 'video' ? (item.duration_seconds || 3) + ' seconds · Maximum 10 seconds' : 'Qwen Image · ' + (item.width || 832) + ' × ' + (item.height || 480);
     const status = document.createElement('p'); status.className = 'media-chat-status'; status.setAttribute('role','status');
+    const queue = document.createElement('p'); queue.className = 'media-chat-queue';
     status.textContent = 'Submitting request…';
-    card.setAttribute('aria-busy','true'); card.append(visual,heading,detail,status); body.append(card);
+    card.setAttribute('aria-busy','true'); card.append(visual,heading,detail,status,queue); body.append(card);
+    if (item.kind === 'image') {
+      const another = document.createElement('button'); another.type = 'button'; another.className = 'media-chat-another';
+      another.textContent = 'Create another image'; another.onclick = () => requestAnother(); card.append(another);
+    }
     const live = () => identity() === owner && !control.signal.aborted && node.isConnected && activeConversation() === conversationId;
     const remember = () => identity() === owner && cache(conversationId, { role:'assistant', content:item.kind === 'video' ? 'Video generation' : 'Image generation', jobId:item.job_id,
       payload:{media_job:{...item}} });
@@ -40,6 +45,13 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
         while (live()) {
           const job = await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id));
           if (!live()) return;
+          const pending = Number(job.pending_requests);
+          queue.textContent = ['queued','running'].includes(job.state)
+            ? (Number.isInteger(pending) ? pending + ' of ' + (job.max_pending_requests || 4) + ' media requests active. ' : '') +
+              (pending >= (job.max_pending_requests || 4) ? 'Your media queue is full. You can keep chatting. ' : 'You can submit another request while this one waits. ') + 'Updates every 30 seconds.'
+            : '';
+          const another = card.querySelector('.media-chat-another');
+          if (another) another.disabled = pending >= (job.max_pending_requests || 4);
           if (item.kind === 'image' && job.quote?.width && job.quote?.height) {
             item.width = job.quote.width; item.height = job.quote.height;
             detail.textContent = 'Qwen Image · ' + item.width + ' × ' + item.height;
@@ -60,8 +72,10 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
             card.append(link); scroll(); return;
           }
           if (job.state === 'failed' || job.state === 'cancelled') throw Object.assign(new Error(job.error || 'Generation ' + job.state + '. Please try a new request.'),{terminal:true});
-          status.textContent = job.state === 'running' ? 'Generating… You can keep chatting.' : 'Queued — waiting for an available contributor. You can keep chatting.';
-          await delay(15000);
+          status.textContent = job.state === 'running' ? 'Generating… You can keep chatting.'
+            : Number.isInteger(job.queue_position) ? 'Queued · Position ' + job.queue_position + ' · ' + job.jobs_ahead + ' compatible jobs ahead. Position may change.'
+            : 'Queued — waiting for an available contributor. You can keep chatting.';
+          await delay(Math.max(5, Math.min(60, Number(job.poll_after_seconds) || 30)) * 1000);
         }
       } catch (error) {
         if (!live()) return;
@@ -103,6 +117,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
 export const mediaChatCss = `
 .media-chat-card{width:fit-content;max-width:min(100%,540px);display:grid;grid-template-columns:32px minmax(0,1fr);gap:4px 12px;padding:10px 0;background:transparent}
 .media-chat-card strong{grid-column:2;font-size:14px;align-self:center}.media-chat-card p{margin:0}.media-chat-status{grid-column:2;font-size:13px;color:var(--muted);line-height:1.5}.media-chat-detail{display:none;font-size:13px;color:var(--muted);line-height:1.5}
+.media-chat-queue{grid-column:2;font-size:12px;color:var(--muted);line-height:1.5}.media-chat-another{grid-column:2;margin-top:6px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);cursor:pointer}.media-chat-another:disabled{opacity:.5;cursor:default}
 .media-chat-loader{grid-column:1;grid-row:1/3;align-self:center;width:32px;height:32px;color:var(--text)}
 .media-chat-loader svg{display:block;width:32px;height:32px;animation:media-vector-turn 1.4s linear infinite;transform-origin:center}
 @keyframes media-vector-turn{to{transform:rotate(360deg)}}
