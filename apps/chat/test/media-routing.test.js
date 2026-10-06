@@ -77,7 +77,9 @@ test('real queue selects ranked worker, preserves one slot, and records failed/e
   const waiting=await submit();assert.equal(waiting.state,'queued');
   clock+=1;
   queue.fleet=async()=>{throw new Error('fleet unavailable');};
-  assert.equal((await submit()).state,'queued');
+  await assert.rejects(submit(),{statusCode:429});
+  const retryKey=(await db.query('select idempotency_key from media_generation_jobs where job_id=$1',[waiting.job_id])).rows[0].idempotency_key;
+  assert.equal((await queue.submit(owner,{profile_id:profile,prompt:'A teapot',idempotency_key:retryKey})).job_id,waiting.job_id);
   fleet=[live('fast'),live('slow')].map(n=>({...n,updated_at:String(clock/1000)}));
   queue.fleet=async()=>fleet;
   const recovered=await queue.claim(slow,[profile]);

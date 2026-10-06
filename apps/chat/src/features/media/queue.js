@@ -38,7 +38,7 @@ export class MediaQueue {
       // checks, policy and capacity remain enforced when a worker claims work.
       if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
-      if(pending>=4) throw httpError(429,'You already have four pending media requests');
+      if(pending>=2) throw httpError(429,'You already have two pending media requests. Wait for one to finish before submitting another.');
       // Media-prefixed states are excluded by the legacy LLM restore/claim query.
       const id=randomUUID(), now=new Date(this.store.now());
       await db.query(`insert into public.jobs(job_id,request_id,prompt,preferred_backend,model,classification,status,submitted_at_epoch) values($1,$1,$2,'auto',$3,$4,'media_queued',$5)`,[id,task.prompt,quote.model,{operation:quote.operation,media_profile_id:quote.profile_id},Math.floor(this.store.now()/1000)]);
@@ -164,7 +164,7 @@ export class MediaQueue {
     row.jobs_ahead = row.jobs_ahead === null ? null : Number(row.jobs_ahead);
     row.queue_position = row.jobs_ahead === null ? null : row.jobs_ahead + 1;
     row.pending_requests = Number(row.pending_requests);
-    row.max_pending_requests = 4;
+    row.max_pending_requests = 2;
     row.queue_scope = 'queued jobs with the same media profile; position may change as workers become available';
     if(row.artifact_id) row.artifact=await this.store.owned(row.artifact_id,owner);
     return row;
