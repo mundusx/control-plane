@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { marked } from "marked";
 
 import {
@@ -246,7 +247,7 @@ test("renders a usable chat page", () => {
   assert.doesNotMatch(html, /raw\.includes\("\r?\n"\)/);
   assert.match(html, /aria-label", role === "user" \? "Your message" : "MundusX response"/);
   assert.doesNotMatch(html, /avatar\.textContent = role === "user" \? "You" : "M"/);
-  assert.match(html, /aria-label="Mercedes-Benz three-pointed star"/);
+  assert.match(html, /class="brand-mark" src="\/assets\/ehda-logo\.png"[^>]+alt="EHDA"/);
   assert.match(html, /<\/aside>\s*<div class="history-context-menu"/);
   assert.match(html, /uat\.mundusx\.ai/);
   assert.match(html, /\.header-actions \{\s*display: none;/);
@@ -562,7 +563,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /Administrators control Global Skills/);
   assert.match(html, /Hermes selects available tools/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
-  assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
+  assert.match(html, /id="guest-login"[^>]*>Log in<\/button>/);
   assert.match(html, /guestLoginEl\?\.addEventListener\("click", openAuthentication\)/);
   assert.match(html, /guestWidgetEl\.hidden = true/);
   assert.doesNotMatch(workspaceNav, />Agents<|>Nodes</);
@@ -3375,9 +3376,9 @@ test("fails honestly when a current-web request reaches Chat without a Hermes cr
     async () => { throw new Error("current-web fallback must not call a search provider or model worker"); },
   );
 
-  assert.equal(result.tool, "web_crawler");
+  assert.equal(result.tool, "web_research");
   assert.equal(result.status, "completed");
-  assert.match(result.output, /Hermes crawler on a connected computer/);
+  assert.match(result.output, /hosted web worker is not connected/);
 });
 
 test("does not route ordinary model requests to the Hermes crawler", async () => {
@@ -4404,9 +4405,8 @@ test("agent model provider configuration keeps aligned models and credentials", 
   ]);
 });
 
-test("normal Chat streams direct even when a prompt could use discovery", async () => {
+test("normal Chat answers a focused weather request directly from wttr.in", async () => {
   const events = [];
-  const encoder = new TextEncoder();
   const response = {
     writableEnded: false,
     writeHead: (status, headers) => events.push({ status, headers }),
@@ -4420,30 +4420,29 @@ test("normal Chat streams direct even when a prompt could use discovery", async 
   const requests = [];
   const result = await streamChatTurn(
     response,
-    { message: "berlin weather today", toolMode: true },
+    { message: "What's the weaather today in Stuttgart?", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
-      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
-      if (url.endsWith("/v1/chat/completions")) {
-        requests.push(JSON.parse(init.body));
-        return new Response(new ReadableStream({
-          start(controller) {
-            controller.enqueue(encoder.encode(
-              'data: {"id":"chatcmpl-weather","choices":[{"delta":{"content":"Direct answer."},"finish_reason":null}]}\n\n' +
-              'data: {"id":"chatcmpl-weather","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
-              'data: [DONE]\n\n',
-            ));
-            controller.close();
-          },
-        }), { status: 200 });
+      requests.push({ url, init });
+      if (url === "https://wttr.in/Stuttgart?format=j1") {
+        return jsonResponse({
+          nearest_area: [{ areaName: [{ value: "Stuttgart" }], region: [{ value: "Baden-Wurttemberg" }], country: [{ value: "Germany" }] }],
+          current_condition: [{
+            weatherDesc: [{ value: "Sunny" }], temp_C: "21", temp_F: "70",
+            FeelsLikeC: "20", FeelsLikeF: "68", humidity: "45", windspeedKmph: "8",
+            localObsDateTime: "2026-09-14 12:00 PM",
+          }],
+        });
       }
       throw new Error(`unexpected URL ${url}`);
     },
   );
-  assert.equal(result.content, "Direct answer.");
+  assert.match(result.content, /Weather for Stuttgart, Baden-Wurttemberg, Germany: Sunny/);
+  assert.equal(result.tool, "weather");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].stream, true);
-  assert.equal(requests[0].mode, "chat");
+  assert.equal(requests[0].url, "https://wttr.in/Stuttgart?format=j1");
+  assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "direct-tool");
+  assert.match(events.map((event) => String(event.value ?? "")).join(""), /data: \[DONE\]/);
   assert.equal(response.writableEnded, true);
 });
 
@@ -4698,6 +4697,68 @@ test("live Chat checkpoints a long assistant stream and finalizes the same compl
   assert.equal(writes.at(-1).content.length, 9000);
 });
 
+test("live Chat finishes and persists an answer after the browser stream disconnects", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const content = "x".repeat(9000);
+  let closeHandler = null;
+  let disconnected = false;
+  const response = {
+    writableEnded: false,
+    destroyed: false,
+    writeHead: () => {},
+    flushHeaders: () => {},
+    once(event, handler) {
+      if (event === "close") closeHandler = handler;
+    },
+    off(event, handler) {
+      if (event === "close" && closeHandler === handler) closeHandler = null;
+    },
+    write() {
+      if (!disconnected) {
+        disconnected = true;
+        this.destroyed = true;
+        closeHandler?.();
+      }
+      return false;
+    },
+    end() { this.writableEnded = true; },
+  };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/v1/conversations/conversation-disconnect/messages")) {
+      writes.push(JSON.parse(init.body));
+      return jsonResponse({ stored: true });
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ id: "chatcmpl-disconnect", choices: [{ delta: { content }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: "chatcmpl-disconnect", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+            "data: [DONE]\n\n",
+          ));
+          controller.close();
+        },
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const result = await streamChatTurn(
+    response,
+    { message: "Write a long answer", conversationId: "conversation-disconnect" },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    fetchImpl,
+  );
+
+  assert.equal(result.finishReason, "stop");
+  assert.equal(result.content, content);
+  assert.equal(disconnected, true);
+  assert.equal(writes.at(-1).job_id, "chatcmpl-disconnect");
+  assert.equal(writes.at(-1).metadata.partial, false);
+  assert.equal(writes.at(-1).content, content);
+});
+
 test("live Chat preserves a short assistant checkpoint when the provider stream is interrupted", async () => {
   const encoder = new TextEncoder();
   const writes = [];
@@ -4783,8 +4844,12 @@ test("a new full-code Chat request with long history finishes across bounded res
     async (_url, init = {}) => {
       requests.push(JSON.parse(init.body));
       const segment = requests.length;
+      const continuationPrompt = requests.at(-1).messages.at(-1)?.content ?? "";
+      const continuationAnchor = segment > 1
+        ? continuationPrompt.match(/CONTINUATION_ANCHOR:\n([\s\S]*?)\nEND_CONTINUATION_ANCHOR/)?.[1] ?? ""
+        : "";
       return streamResponse(
-        `segment-${segment}:${"y".repeat(1990)}\n`,
+        `${continuationAnchor}segment-${segment}:${"y".repeat(1990)}\n`,
         segment < 6 ? "length" : "stop",
         `chatcmpl-part-${segment}`,
       );
@@ -4848,6 +4913,116 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
   assert.equal(requests[1].temperature, 0);
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
+});
+
+test("automatic continuation waits for the exact anchor before streaming a restarted section", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const first = `Intro\n\`\`\`js\n${"// existing controller line\n".repeat(18)}const updateBooking = async (req, res) => {\n  return res`;
+  const anchor = first.slice(-256);
+  const suffix = ".status(200).json({ ok: true });\n};\n\`\`\`";
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  const streamResponse = (chunks, finishReason) => new Response(new ReadableStream({
+    start(controller) {
+      for (const content of chunks) {
+        controller.enqueue(encoder.encode(
+          `data: ${JSON.stringify({ id: "chatcmpl-anchor", choices: [{ delta: { content }, finish_reason: null }] })}\n\n`,
+        ));
+      }
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-anchor", choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n` +
+        "data: [DONE]\n\n",
+      ));
+      controller.close();
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  let requestCount = 0;
+  const result = await streamChatTurn(
+    response,
+    { message: "create a complete booking API", historyMessages: [], toolMode: false },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async () => {
+      requestCount += 1;
+      if (requestCount === 1) return streamResponse([first], "length");
+      return streamResponse([
+        "Restarting the controller from an earlier point.\n",
+        anchor.slice(0, 120),
+        anchor.slice(120) + suffix.slice(0, 18),
+        suffix.slice(18),
+      ], "stop");
+    },
+  );
+
+  assert.equal(requestCount, 2);
+  assert.equal(result.content, first + suffix);
+  assert.equal(result.finishReason, "stop");
+  assert.doesNotMatch(writes.join(""), /continuation changed after its streamed prefix/);
+  assert.doesNotMatch(writes.join(""), /Restarting the controller/);
+  assert.equal((writes.join("").match(/data: \[DONE\]/g) || []).length, 1);
+});
+
+test("automatic continuation resumes after an upstream socket terminates mid-response", async () => {
+  const encoder = new TextEncoder();
+  const writes = [];
+  const first = `package.json\n\`\`\`json\n{\n  "name": "bus-ticketing-api",\n${"  \"dependency\": \"express\",\n".repeat(12)}`;
+  const suffix = `  "scripts": { "start": "node src/app.js" }\n}\n\`\`\``;
+  const response = {
+    writableEnded: false,
+    writeHead() {}, flushHeaders() {},
+    write(value) { writes.push(String(value)); return true; },
+    end(value) { this.writableEnded = true; if (value) writes.push(String(value)); },
+  };
+  const terminated = Object.assign(new TypeError("terminated"), {
+    cause: { code: "UND_ERR_SOCKET" },
+  });
+  const interrupted = new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ id: "chatcmpl-bus", choices: [{ delta: { content: first }, finish_reason: null }] })}\n\n`,
+      ));
+      setTimeout(() => controller.error(terminated), 0);
+    },
+  }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+
+  let requestCount = 0;
+  const result = await streamChatTurn(
+    response,
+    {
+      message: "can u please create a nodejs code for CRUD api complete for Bus Ticketing",
+      historyMessages: [],
+      toolMode: false,
+    },
+    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+    async (_url, init = {}) => {
+      requestCount += 1;
+      if (requestCount === 1) return interrupted;
+      const request = JSON.parse(init.body);
+      const prompt = request.messages.at(-1)?.content ?? "";
+      const anchor = prompt.match(/CONTINUATION_ANCHOR:\n([\s\S]*?)\nEND_CONTINUATION_ANCHOR/)?.[1] ?? "";
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ id: "chatcmpl-bus", choices: [{ delta: { content: anchor + suffix }, finish_reason: null }] })}\n\n` +
+            `data: ${JSON.stringify({ id: "chatcmpl-bus", choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n` +
+            "data: [DONE]\n\n",
+          ));
+          controller.close();
+        },
+      }), { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+    },
+  );
+
+  assert.equal(requestCount, 2);
+  assert.equal(result.content, first + suffix);
+  assert.equal(result.finishReason, "stop");
+  assert.doesNotMatch(writes.join(""), /network error|interrupted before completion|UND_ERR_SOCKET/i);
+  assert.equal((writes.join("").match(/data: \[DONE\]/g) || []).length, 1);
 });
 
 test("automatic continuation strips generation markers and advances past a restarted controller block", async () => {
@@ -5080,7 +5255,7 @@ test("automatic continuation streams new deltas before the segment completes", a
 
   const continuationResponse = new Response(new ReadableStream({
     start(controller) {
-      const progressiveContent = `  function swap() external {${" ".repeat(128)}`;
+      const progressiveContent = `contract DEX {\n  function swap() external {${" ".repeat(128)}`;
       controller.enqueue(encoder.encode(
         `data: ${JSON.stringify({ id: "chatcmpl-live-continuation", choices: [{ delta: { content: progressiveContent }, finish_reason: null }] })}\n\n`,
       ));
@@ -7254,7 +7429,12 @@ test("deleteChatConversation proxies real conversation deletion to the control p
     },
   );
 
-  assert.deepEqual(result, { conversation_id: "conv-1", deleted: true, persisted: true });
+  assert.deepEqual(result, {
+    conversation_id: "conv-1",
+    deleted: true,
+    persisted: true,
+    credits_affected: false,
+  });
   assert.equal(calls.length, 1);
 });
 
@@ -7302,19 +7482,28 @@ test("deleteChatConversation treats missing backend records as shallow local his
   assert.equal(result.conversation_id, "tool-only");
   assert.equal(result.deleted, false);
   assert.equal(result.persisted, false);
+  assert.equal(result.credits_affected, false);
 });
 
-test("deleteChatConversation keeps local deletion when conversation storage is temporarily unavailable", async () => {
-  const result = await deleteChatConversation(
-    "conv-1",
-    configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
-    async () => jsonResponse({ error: "conversation storage unavailable" }, false, 502),
+test("deleteChatConversation rejects storage outages so database history cannot be orphaned", async () => {
+  await assert.rejects(
+    () => deleteChatConversation(
+      "conv-1",
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async () => jsonResponse({ error: "conversation storage unavailable" }, false, 502),
+    ),
+    (error) => error.statusCode === 502 && /conversation storage unavailable/.test(error.message),
   );
+});
 
-  assert.equal(result.conversation_id, "conv-1");
-  assert.equal(result.deleted, false);
-  assert.equal(result.persisted, false);
-  assert.match(result.reason, /conversation storage unavailable/);
+test("chat deletion restores failed history and explicitly preserves project folders", () => {
+  const source = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+  const browserDelete = source.match(/async function deleteConversationRecord[\s\S]*?\n    }/)?.[0] ?? "";
+  assert.doesNotMatch(browserDelete, /response\.status === 503/);
+  assert.match(source, /project_deleted:\s*false/);
+  assert.match(source, /credits_affected:\s*false/);
+  assert.doesNotMatch(browserDelete, /projects?\//i);
+  assert.doesNotMatch(browserDelete, /credits?|ledger/i);
 });
 
 test("extracts a location that comes before the word weather", () => {
@@ -7371,4 +7560,20 @@ test("a question with no weather intent is still ignored", () => {
   assert.equal(extractWeatherLocation("who is Ada Lovelace"), null);
   assert.equal(extractWeatherLocation(""), null);
   assert.equal(extractWeatherLocation(null), null);
+});
+
+test("live chat reserves generation room for reasoning while respecting explicit limits", async () => {
+  for (const [maxTokens, expected] of [[undefined, 1024], [128, 128]]) {
+    let submitted;
+    const response = { writableEnded: false, writeHead() {}, flushHeaders() {}, write() { return true; }, end() { this.writableEnded = true; } };
+    await streamChatTurn(response, { message: "removed ur cache and try again", toolMode: false, maxTokens },
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async (url, init) => {
+        assert.ok(url.endsWith("/v1/chat/completions"));
+        submitted = JSON.parse(init.body);
+        return new Response('data: {"id":"chatcmpl-budget","choices":[{"delta":{"content":"I cannot clear the provider cache."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+      });
+    assert.equal(submitted.max_tokens, expected);
+  }
 });

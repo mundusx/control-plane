@@ -434,10 +434,7 @@ returning user_id::text"#,
     pub fn delete_chat_conversation(&self, conversation_id: &str) -> Result<bool, String> {
         let mut client = self.connect()?;
         let deleted = client
-            .execute(
-                "delete from public.chat_conversations where conversation_id = $1::text::uuid",
-                &[&conversation_id],
-            )
+            .execute(CHAT_CONVERSATION_DELETE_SQL, &[&conversation_id])
             .map_err(|error| format!("postgres chat conversation delete failed: {error}"))?;
         Ok(deleted > 0)
     }
@@ -1355,6 +1352,12 @@ from (
 ) t
 "#;
 
+// Conversation deletion is intentionally scoped to chat storage. The foreign
+// key on chat_messages cascades from this row; jobs and the append-only credits
+// ledger remain independent records.
+const CHAT_CONVERSATION_DELETE_SQL: &str =
+    "delete from public.chat_conversations where conversation_id = $1::text::uuid";
+
 const HARNESS_TASKS_RESTORE_SQL: &str = r#"
 select coalesce(jsonb_agg(to_jsonb(t) order by t.created_at_epoch, t.task_id)::text, '[]')
 from (
@@ -1628,7 +1631,8 @@ on conflict (event_id) do nothing
 #[cfg(test)]
 mod tests {
     use super::{
-        PostgresStore, CHAT_MESSAGE_INSERT_SQL, CREDITS_RESTORE_SQL, CREDITS_UPSERT_SQL,
+        PostgresStore, CHAT_CONVERSATION_DELETE_SQL, CHAT_MESSAGE_INSERT_SQL,
+        CREDITS_RESTORE_SQL, CREDITS_UPSERT_SQL,
         DEVICES_UPSERT_SQL, HARNESS_ARTIFACTS_RESTORE_SQL, HARNESS_AUDIT_UPSERT_SQL,
         HARNESS_TASKS_RESTORE_SQL, HARNESS_RESERVATION_UPSERT_SQL, HARNESS_TASK_UPSERT_SQL,
         JOBS_RESTORE_SQL, JOBS_UPSERT_SQL, JOB_EVENTS_RESTORE_SQL, JOB_EVENTS_UPSERT_SQL,
@@ -1696,6 +1700,18 @@ mod tests {
         assert!(CHAT_MESSAGE_INSERT_SQL.contains("on conflict (job_id) where job_id is not null do update"));
         assert!(CHAT_MESSAGE_INSERT_SQL.contains("content = excluded.content"));
         assert!(CHAT_MESSAGE_INSERT_SQL.contains("metadata = excluded.metadata"));
+    }
+
+    #[test]
+    fn chat_deletion_cannot_mutate_credits_or_execution_records() {
+        let sql = CHAT_CONVERSATION_DELETE_SQL.to_ascii_lowercase();
+        assert!(sql.starts_with("delete from public.chat_conversations"));
+        for protected_table in ["credits_ledger", "jobs", "job_events", "users", "devices"] {
+            assert!(
+                !sql.contains(protected_table),
+                "chat deletion must not reference {protected_table}"
+            );
+        }
     }
 
     #[test]

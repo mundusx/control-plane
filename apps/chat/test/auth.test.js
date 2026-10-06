@@ -21,7 +21,7 @@ test("GitHub access remains disabled until credentials and encryption exist", ()
     resendApiKey: "key",
     emailFrom: "",
   }, { pool: {} });
-  assert.deepEqual(store.providers(), { github: false, google: false, email: false });
+  assert.deepEqual(store.providers(), { github: false, google: false, hard_user: false, email: false });
 });
 
 test("Google provider is enabled only with both OAuth credentials", () => {
