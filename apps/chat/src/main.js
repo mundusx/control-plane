@@ -7393,7 +7393,7 @@ export function createServerApp(config = configFromEnv()) {
         }
         const match = url.pathname.match(/^\/api\/media\/chat\/jobs\/([0-9a-f-]{36})(\/result)?$/);
         if (match && request.method === "GET" && !match[2]) return sendJson(response,200,await mediaService.status(session.id,match[1]));
-        if (match && request.method === "POST" && match[2]) return sendJson(response,200,await mediaService.result(session.id,match[1]));
+        if (match && request.method === "POST" && match[2]) return sendJson(response,200,await mediaService.result(session.id,match[1],{ownerOnly:true}));
         throw httpError(405,"Method not allowed");
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {

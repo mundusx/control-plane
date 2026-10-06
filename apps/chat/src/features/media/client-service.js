@@ -40,10 +40,16 @@ export class MediaClientService {
     if (!this.queue || !this.origin) throw httpError(503, 'Media generation is not configured');
     return this.describe(await this.queue.owned(owner, id));
   }
-  async result(owner, id) {
+  async result(owner, id, { ownerOnly = false } = {}) {
     const job = await this.status(owner, id);
     if (job.state !== 'completed') throw httpError(409, 'Media is not completed; check job status first');
     if (!job.artifact?.media_available) throw httpError(410, 'Media expired; job and credit records are retained');
+    if (ownerOnly) {
+      const path = `/media/owned/${job.artifact_id}/${job.artifact.content_type === 'video/mp4' ? 'video.mp4' : 'image.png'}`;
+      return { job_id: id, state: job.state, content_type: job.artifact.content_type,
+        download_url: path, preview_url: path + '?inline=1', expires_at: job.artifact.expires_at,
+        quote: job.quote, note: 'Sign-in required; available only to the requesting account until expiry.' };
+    }
     const link = await this.queue.store.renewLink(job.artifact_id, owner);
     return { job_id: id, state: job.state, content_type: link.content_type,
       download_url: new URL(link.download_path, this.origin).href,

@@ -168,9 +168,20 @@ export class MediaArtifactStore {
   async download(id, token) {
     const row = await this.lookup(id);
     if (row.status !== "ready" || !matches(token, row.download_token_hash) || new Date(row.expires_at).getTime() <= this.now()) throw notFound();
+    return this.openDownload(row);
+  }
+
+  async downloadOwned(id, owner) {
+    const row = await this.lookup(id);
+    if (row.owner_user_id !== owner || row.status !== 'ready' || row.file_deleted_at ||
+        new Date(row.expires_at).getTime() <= this.now()) throw notFound();
+    return this.openDownload(row);
+  }
+
+  async openDownload(row) {
     let file;
     try {
-      file = await open(this.file(id, row.content_type), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      file = await open(this.file(row.artifact_id, row.content_type), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const info = await file.stat();
       if (!info.isFile() || info.size !== row.byte_size) throw notFound();
       return { file, record: publicRecord(row, this.now()) };

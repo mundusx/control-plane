@@ -85,6 +85,19 @@ test("private upload survives restart; expiry deletes bytes but retains owner hi
   assert.equal(await f.store.cleanup(), 0);
 });
 
+test('owner previews survive link rotations, enforce ownership, and expire', async t => {
+  const f = await fixture(t), r = await f.store.reserve(f.owner, metadata());
+  await f.store.upload(r.artifact_id,r.upload_ticket.upload_token,png());
+  for (let i=0;i<2;i++) {
+    await f.store.renewLink(r.artifact_id,f.owner);
+    const downloaded = await f.store.downloadOwned(r.artifact_id,f.owner);
+    assert.deepEqual(await downloaded.file.readFile(),png()); await downloaded.file.close();
+  }
+  await assert.rejects(f.store.downloadOwned(r.artifact_id,f.other),{statusCode:404});
+  f.advance(RETENTION_SECONDS*1000);
+  await assert.rejects(f.store.downloadOwned(r.artifact_id,f.owner),{statusCode:404});
+});
+
 test("upload tickets are scoped, expire, and cannot publish malformed images", async (t) => {
   const f = await fixture(t);
   const a = await f.store.reserve(f.owner, metadata()), b = await f.store.reserve(f.owner, metadata());
@@ -185,6 +198,16 @@ test("real HTTP routes reserve with current user, upload by ticket, and download
   assert.equal(sessions, before); // Neither the worker nor a link recipient signs in.
   response = await fetch(base + reservation.preview_path, { method: "HEAD" });
   assert.equal(response.status, 200); assert.match(response.headers.get("content-disposition"), /^inline/);
+  const ownedPath = `/media/owned/${reservation.artifact_id}/image.png?inline=1`;
+  response = await fetch(base + ownedPath);
+  assert.equal(response.status, 401);
+  for (let i=0;i<2;i++) {
+    await f.store.renewLink(reservation.artifact_id,f.owner);
+    response = await fetch(base + ownedPath,{headers:{'x-test-user':'yes'}});
+    assert.equal(response.status,200);
+    assert.match(response.headers.get('content-disposition'),/^inline/);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()),png());
+  }
   f.advance(RETENTION_SECONDS * 1000);
   response = await fetch(base + reservation.download_path); assert.equal(response.status, 404);
 });
