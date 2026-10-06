@@ -27,7 +27,10 @@ test('chat has no separate video link, embeds parseable media UI and respects re
   assert.match(html,/Create another image/);
   assert.match(html,/Reload preview/);
   assert.match(html,/Generation completed\. Loading the preview\./);
-  assert.match(html,/compatible jobs ahead/);
+  assert.match(html,/Queue position:/);
+  assert.match(html,/Position includes all users waiting for the same media profile/);
+  assert.doesNotMatch(html,/media requests active\./);
+  assert.doesNotMatch(html,/while this one waits/);
   assert.match(html,/Updates every 30 seconds/);
   for(const match of html.matchAll(/<script(?:[^>]*)>([\s\S]*?)<\/script>/g)) if(match[1].trim()) assert.doesNotThrow(()=>new vm.Script(match[1]));
 });
