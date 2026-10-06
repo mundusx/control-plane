@@ -46,10 +46,10 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
           const job = await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id));
           if (!live()) return;
           const pending = Number(job.pending_requests);
-          queue.textContent = ['queued','running'].includes(job.state)
-            ? (Number.isInteger(pending) ? pending + ' of ' + (job.max_pending_requests || 4) + ' media requests active. ' : '') +
-              (pending >= (job.max_pending_requests || 4) ? 'Your media queue is full. You can keep chatting. ' : 'You can submit another request while this one waits. ') + 'Updates every 30 seconds.'
-            : '';
+          queue.textContent = job.state === 'queued'
+            ? (Number.isInteger(job.queue_position) ? 'Queue position: ' + job.queue_position + ' · ' : '') +
+              'Updates every 30 seconds. Position includes all users waiting for the same media profile.'
+            : job.state === 'running' ? 'You can keep chatting. Updates every 30 seconds.' : '';
           const another = card.querySelector('.media-chat-another');
           if (another) another.disabled = pending >= (job.max_pending_requests || 4);
           if (item.kind === 'image' && job.quote?.width && job.quote?.height) {
@@ -89,8 +89,9 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
             card.append(link); scroll(); return;
           }
           if (job.state === 'failed' || job.state === 'cancelled') throw Object.assign(new Error(job.error || 'Generation ' + job.state + '. Please try a new request.'),{terminal:true});
-          status.textContent = job.state === 'running' ? 'Generating… You can keep chatting.'
-            : Number.isInteger(job.queue_position) ? 'Queued · Position ' + job.queue_position + ' · ' + job.jobs_ahead + ' compatible jobs ahead. Position may change.'
+          heading.textContent = job.state === 'running' ? 'Generating…' : (item.kind === 'video' ? 'Video request · Queued' : 'Image request · Queued');
+          status.textContent = job.state === 'running' ? ''
+            : Number.isInteger(job.queue_position) ? job.jobs_ahead + ' compatible request' + (job.jobs_ahead === 1 ? '' : 's') + ' ahead'
             : 'Queued — waiting for an available contributor. You can keep chatting.';
           await delay(Math.max(5, Math.min(60, Number(job.poll_after_seconds) || 30)) * 1000);
         }
