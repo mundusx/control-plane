@@ -155,9 +155,19 @@ export class MediaQueue {
     return {ok:true};
   }); }
   async owned(owner,id) {
-    const row=(await this.store.pool.query(`select q.job_id,q.state,q.request,q.error,q.created_at,q.completed_at,c.quote,c.artifact_id,c.status as settlement_status,c.ledger_id
+    const row=(await this.store.pool.query(`select q.job_id,q.state,q.request,q.error,q.created_at,q.completed_at,c.quote,c.artifact_id,c.status as settlement_status,c.ledger_id,
+      case when q.state='queued' then (select count(*) from public.media_generation_jobs ahead
+        where ahead.state='queued' and ahead.request->>'profile_id'=q.request->>'profile_id'
+          and (ahead.created_at,ahead.job_id)<(q.created_at,q.job_id)) else null end as jobs_ahead,
+      (select count(*) from public.media_generation_jobs own where own.owner_user_id=q.owner_user_id
+        and own.state in ('queued','running')) as pending_requests
       from public.media_generation_jobs q join public.media_compute_records c using(job_id) where q.job_id=$1 and q.owner_user_id=$2`,[id,owner])).rows[0];
     if(!row) throw httpError(404,'Media job not found');
+    row.jobs_ahead = row.jobs_ahead === null ? null : Number(row.jobs_ahead);
+    row.queue_position = row.jobs_ahead === null ? null : row.jobs_ahead + 1;
+    row.pending_requests = Number(row.pending_requests);
+    row.max_pending_requests = 4;
+    row.queue_scope = 'queued jobs with the same media profile; position may change as workers become available';
     if(row.artifact_id) row.artifact=await this.store.owned(row.artifact_id,owner);
     return row;
   }

@@ -4158,6 +4158,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       detect: mediaChatIntent, cache: appendCachedConversationTurn,
       identity: () => currentUser?.id,
       activeConversation: () => activeHistoryId, scroll: () => scrollChatToLatest(),
+      requestAnother: () => { if (!promptEl.value.trim()) promptEl.value = 'Create an image of '; promptEl.focus(); },
     });
 
     form.addEventListener("submit", async (event) => {

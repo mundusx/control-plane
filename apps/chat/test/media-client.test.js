@@ -11,7 +11,7 @@ test('client contract bounds durations, maps image/video profiles and does not p
   } }, 'https://chat.example');
   for (let seconds=1;seconds<=10;seconds++) {
     const result = await service.submit('owner',{kind:'video',duration_seconds:seconds,prompt:'test',idempotency_key:id});
-    assert.equal(result.poll_after_seconds,15);
+    assert.equal(result.poll_after_seconds,30);
     assert.equal(result.terminal,false);
     assert.equal(result.status_url,`https://chat.example/v1/media/jobs/${id}`);
     assert.equal(submitted.at(-1).input.profile_id,`wan22-14b-480p-${seconds*16+1}f-v1`);
@@ -62,5 +62,5 @@ test('HTTP actions require a user token and return 202 with polling location',as
   assert.equal(await controller({request,response,url}),true);
   assert.equal(results[0].status,202);
   assert.equal(headers.Location,results[0].body.status_url);
-  assert.equal(headers['Retry-After'],'15');
+  assert.equal(headers['Retry-After'],'30');
 });
