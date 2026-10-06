@@ -42,8 +42,29 @@ impl PostgresStore {
     }
 
     pub fn runtime_token_totals(&self)->Result<serde_json::Value,String> {
-        let row=self.connect()?.query_one("select completion_tokens,prompt_tokens,measured_calls,tracking_started_at::text,last_recorded_at::text from public.runtime_token_totals where id=1",&[]).map_err(|e|e.to_string())?;
-        Ok(serde_json::json!({"measured_output_tokens":row.get::<_,i64>(0).to_string(),"measured_input_tokens":row.get::<_,i64>(1).to_string(),"measured_model_calls":row.get::<_,i64>(2).to_string(),"tracking_started_at":row.get::<_,String>(3),"last_recorded_at":row.get::<_,Option<String>>(4),"source":"runtime_reported","includes_estimates":false,"historical_unmetered_requests":"excluded","scope":"model calls reported by instrumented EHDA contributors, including internal calls and retries"}))
+        let mut client = self.connect()?;
+        let row=client.query_one("select completion_tokens,prompt_tokens,measured_calls,tracking_started_at::text,last_recorded_at::text from public.runtime_token_totals where id=1",&[]).map_err(|e|e.to_string())?;
+        let media_available: bool = client.query_one("select to_regclass('public.media_compute_records') is not null", &[])
+            .map_err(|e| e.to_string())?.get(0);
+        let media = if media_available {
+            let raw: String = client.query_one(include_str!("../../../db/statements/media_usage_totals.sql"), &[])
+                .map_err(|e| e.to_string())?.get(0);
+            serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| e.to_string())?
+        } else {
+            json!({"available": false, "completed_generations": null})
+        };
+        let media_calls = media["completed_generations"].as_str()
+            .and_then(|value| value.parse::<u128>().ok());
+        let output = row.get::<_,i64>(0) as u128;
+        let input = row.get::<_,i64>(1) as u128;
+        let calls = row.get::<_,i64>(2) as u128;
+        Ok(json!({"measured_output_tokens":output.to_string(),"measured_input_tokens":input.to_string(),
+            "total_tokens":(input + output).to_string(), "measured_model_calls":calls.to_string(),
+            "total_recorded_calls": media_calls.map(|count| (calls + count).to_string()),
+            "media":media, "tracking_started_at":row.get::<_,String>(3),
+            "last_recorded_at":row.get::<_,Option<String>>(4),"source":"runtime_reported",
+            "includes_estimates":false,"historical_unmetered_requests":"excluded",
+            "scope":"instrumented LLM calls including retries, plus durable settled media generations; tokens cover LLM calls only"}))
     }
     pub fn from_env(pool_url: Option<&str>, direct_url: Option<&str>) -> Option<Self> {
         Self::from_values(pool_url, direct_url)
