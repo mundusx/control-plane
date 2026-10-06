@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, 
 import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
-import { rankedMediaWorker, eligibleMediaNode } from './routing.js';
+import { rankedMediaWorker } from './routing.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export class MediaQueue {
@@ -30,14 +30,12 @@ export class MediaQueue {
       task.input_artifact_id = reference.artifact_id;
       task.input_sha256 = reference.sha256;
     } else if (input.input_artifact_id !== undefined) throw httpError(400, 'Reference image requires image-to-video');
-    let fleet, fleetError;
-    if (this.fleet) { try { fleet = await this.fleet(); } catch (error) { fleetError = error; } }
     return this.store.transaction(async db=>{
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
       if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed || (old.request.input_sha256 ?? old.request.input_artifact_id)!==(task.input_sha256 ?? task.input_artifact_id))) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,created_at:old.created_at,quote:saved.quote}; }
-      if (fleetError) throw fleetError;
-      if (fleet && !fleet.some(n => eligibleMediaNode(n,quote.profile_id,this.store.now()))) throw httpError(503,'No eligible media contributor is currently serving this profile. Please try again later.');
+      // Queue supported requests even while contributors are offline. Live fleet
+      // checks, policy and capacity remain enforced when a worker claims work.
       if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
       if(pending>=4) throw httpError(429,'You already have four pending media requests');
