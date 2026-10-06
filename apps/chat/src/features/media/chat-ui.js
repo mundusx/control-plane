@@ -56,6 +56,9 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
             item.width = job.quote.width; item.height = job.quote.height;
             detail.textContent = 'Qwen Image · ' + item.width + ' × ' + item.height;
           }
+          if (item.kind === 'video' && job.quote?.steps) {
+            detail.textContent = (job.quote.steps === 4 ? 'Fast Lightning' : 'Quality') + ' · ' + job.quote.steps + ' steps · ' + job.quote.width + ' × ' + job.quote.height;
+          }
           if (job.state === 'completed') {
             if (!job.artifact?.media_available) throw Object.assign(new Error('This download has expired. Your job and credit records are retained.'),{status:410});
             const result = await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id) + '/result', {});
