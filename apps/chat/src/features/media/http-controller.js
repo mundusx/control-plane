@@ -19,7 +19,8 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
     const internal = url.pathname.match(/^\/api\/media\/accounting\/(quote|bind|settle)$/);
     const api = url.pathname.match(/^\/api\/media\/artifacts(?:\/([0-9a-f-]{36})(?:\/(content|link))?)?$/);
     const download = url.pathname.match(/^\/media\/([0-9a-f-]{36})\/(image\.png|video\.mp4)$/);
-    if (!api && !download && !price && !compute && !internal && !worker && !jobs && !profiles) return false;
+    const ownedDownload = url.pathname.match(/^\/media\/owned\/([0-9a-f-]{36})\/(image\.png|video\.mp4)$/);
+    if (!api && !download && !ownedDownload && !price && !compute && !internal && !worker && !jobs && !profiles) return false;
     response.setHeader("Cache-Control", "private, no-store, max-age=0");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
@@ -43,9 +44,15 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
     }
 
     // These two capability routes deliberately precede the browser login/CSRF gate.
-    if (download && ["GET", "HEAD"].includes(request.method)) {
-      const { file, record } = await store.download(download[1], url.searchParams.get("token"));
-      if ((download[2] === "video.mp4") !== (record.content_type === "video/mp4")) { await file.close(); throw httpError(404, "Media not found"); }
+    if ((download || ownedDownload) && ["GET", "HEAD"].includes(request.method)) {
+      let result;
+      if (ownedDownload) {
+        const session = await authStore.session(request);
+        if (!session) throw httpError(401, 'Sign in to view this media');
+        result = await store.downloadOwned(ownedDownload[1], session.id);
+      } else result = await store.download(download[1], url.searchParams.get("token"));
+      const { file, record } = result;
+      if (((download || ownedDownload)[2] === "video.mp4") !== (record.content_type === "video/mp4")) { await file.close(); throw httpError(404, "Media not found"); }
       const source = file.createReadStream({ autoClose: false });
       const expiry = setTimeout(() => source.destroy(new Error("Image link expired")),
         Math.max(1, Math.min(2147483647, new Date(record.expires_at).getTime() - store.now())));
