@@ -41,6 +41,12 @@ test('status does not rotate links; result checks ownership, completion and expi
   assert.equal(rotations,0);
   assert.equal((await service.result('owner',id)).download_url,'https://chat.example/media/result?token=secret');
   assert.equal(rotations,1);
+  const chatResult = await service.result('owner',id,{ownerOnly:true});
+  assert.equal(chatResult.preview_url, `/media/owned/${id}/image.png?inline=1`);
+  assert.equal(chatResult.download_url, `/media/owned/${id}/image.png`);
+  assert.equal(rotations,1);
+  assert.deepEqual(await service.result('owner',id,{ownerOnly:true}), chatResult);
+  assert.equal(rotations,1);
   available=false;
   await assert.rejects(service.result('owner',id),{statusCode:410});
   assert.equal(rotations,1);
