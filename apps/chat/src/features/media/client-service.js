@@ -1,6 +1,15 @@
 import { IMAGE_PROFILE, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, mediaQuote } from './pricing.js';
 import { httpError } from '../../shared/http-error.js';
 
+export function videoQuality(input) {
+  if (input.quality !== undefined) {
+    if (!['fast','quality'].includes(input.quality)) throw httpError(400,'Video quality must be fast or quality');
+    return input.quality;
+  }
+  const text = String(input.prompt || '').replace(/\b(?:no|not|without|don't need|do not need)\s+(?:hd|uhd|4k|8k|high quality|best quality)\b/gi,'');
+  return /\b(?:hd|uhd|4k|8k|high(?:est)?[- ](?:definition|quality|resolution)|best[- ](?:definition|quality|resolution)|maximum[- ]quality)\b/i.test(text) ? 'quality' : 'fast';
+}
+
 // Shared contract for MCP and HTTP actions. Never wait for GPU work in a request.
 export class MediaClientService {
   constructor(queue, publicOrigin, planner = null) {
@@ -19,7 +28,10 @@ export class MediaClientService {
     if (input.kind === 'video') {
       const seconds = input.duration_seconds ?? 3;
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.');
-      profile = input.input_artifact_id ? `wan22-i2v-lightning-14b-480p-${seconds * 16 + 1}f-v3` : `wan22-14b-480p-${seconds * 16 + 1}f-v1`;
+      input = {...input,quality:videoQuality(input)};
+      const fast = input.quality === 'fast';
+      const prefix = input.input_artifact_id ? (fast ? 'wan22-i2v-lightning-14b' : 'wan22-i2v-14b') : (fast ? 'wan22-t2v-lightning-14b' : 'wan22-14b');
+      profile = `${prefix}-480p-${seconds * 16 + 1}f-${input.input_artifact_id && fast ? 'v3' : 'v1'}`;
     } else if (input.duration_seconds !== undefined) throw httpError(400, 'duration_seconds applies only to video');
     if (this.planner) {
       const plan = await this.planner(input);

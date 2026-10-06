@@ -8489,7 +8489,7 @@ pub fn evaluate_policy(
     if worker_health.runtime_mode == "media" {
         let valid = !worker_health.media_profiles.is_empty() && worker_health.media_profiles.iter().all(|profile| {
             (profile == "qwen-image-fp8-832x480-v1" && worker_health.media_budget_bytes >= 32 * 1024u64.pow(3)) ||
-            (((1..=10).any(|seconds| profile == &format!("wan22-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-14b-704p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-lightning-14b-480p-{}f-v3", seconds * 16 + 1))) && worker_health.media_budget_bytes >= 64 * 1024u64.pow(3))
+            (((1..=10).any(|seconds| profile == &format!("wan22-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-14b-704p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-t2v-lightning-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-lightning-14b-480p-{}f-v3", seconds * 16 + 1))) && worker_health.media_budget_bytes >= 64 * 1024u64.pow(3))
         });
         if !valid { reasons.push("No verified media profile fits the contributed memory budget".into()); }
         if worker_health.parallel_slots != 1 { reasons.push("Media requires one execution slot".into()); }

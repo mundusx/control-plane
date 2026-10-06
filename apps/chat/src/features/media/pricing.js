@@ -62,7 +62,17 @@ for (let seconds = 1; seconds <= 10; seconds++) {
   VIDEO_PROFILES[`wan22-14b-480p-${frames}f-v1`] = { ...VIDEO_PROFILES[`wan22-14b-704p-${frames}f-v1`], width: 832, height: 480, calibration: 'provisional_legacy_rate_pending_benchmark', reference_estimated: true };
 }
 export const ACTIVE_I2V_PROFILES = [];
+export const FAST_VIDEO_PROFILES = [];
 for (let seconds = 1; seconds <= 10; seconds++) {
+  const fastId = `wan22-t2v-lightning-14b-480p-${seconds * 16 + 1}f-v1`;
+  FAST_VIDEO_PROFILES.push(fastId);
+  VIDEO_PROFILES[fastId] = { fps:16, frames:seconds*16+1, width:832, height:480, steps:4,
+    operation:'text_to_video', model:'Wan-AI/Wan2.2-T2V-A14B', variant:'lightning',
+    reference_generation_ms:Math.ceil(VIDEO_PROFILES[`wan22-14b-480p-${seconds*16+1}f-v1`].reference_generation_ms * 4 / 20),
+    reference_estimated:true, calibration:'provisional_standard_t2v_step_ratio_pending_fast_benchmark' };
+  const qualityId = `wan22-i2v-14b-480p-${seconds * 16 + 1}f-v1`;
+  ACTIVE_I2V_PROFILES.push(qualityId);
+  VIDEO_PROFILES[qualityId] = {...VIDEO_PROFILES[`wan22-14b-480p-${seconds*16+1}f-v1`],steps:20,operation:'image_to_video',model:'Wan-AI/Wan2.2-I2V-A14B'};
   const frames = seconds * 16 + 1, id = `wan22-i2v-lightning-14b-480p-${frames}f-v3`;
   ACTIVE_I2V_PROFILES.push(id);
   VIDEO_PROFILES[id] = { fps: 16, frames, width: 832, height: 480, steps: 4,
@@ -70,7 +80,7 @@ for (let seconds = 1; seconds <= 10; seconds++) {
     reference_generation_ms: Math.ceil(146360 * frames / 33), reference_estimated: true,
     calibration: 'estimated_from_2s_gx10_fast_i2v_before_padding' };
 }
-export const ACTIVE_VIDEO_PROFILES = Object.keys(VIDEO_PROFILES).filter(id => id.startsWith('wan22-14b-480p-') && VIDEO_PROFILES[id].reference_generation_ms > 0).sort((a,b) => VIDEO_PROFILES[a].frames - VIDEO_PROFILES[b].frames);
+export const ACTIVE_VIDEO_PROFILES = Object.keys(VIDEO_PROFILES).filter(id => (id.startsWith('wan22-14b-480p-') || id.startsWith('wan22-t2v-lightning-14b-480p-')) && VIDEO_PROFILES[id].reference_generation_ms > 0).sort((a,b) => VIDEO_PROFILES[a].frames - VIDEO_PROFILES[b].frames);
 export function mediaQuote(profile = IMAGE_PROFILE) {
   if (profile === IMAGE_PROFILE || profile === LEGACY_IMAGE_PROFILE) return imageQuote(profile);
   const preset = Object.hasOwn(VIDEO_PROFILES, profile) ? VIDEO_PROFILES[profile] : null;
