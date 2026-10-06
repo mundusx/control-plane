@@ -3238,7 +3238,7 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
               <form method="post" action="/actions/admission-policy" class="policy-form">
                 <label class="check"><input type="checkbox" name="enabled" value="1"{enabled_checked}> Enforce admission rules</label>
                 <label class="check"><input type="checkbox" name="require_healthy_runtime" value="1"{runtime_checked}> Require healthy runtime</label>
-                <label class="check"><input type="checkbox" name="require_trusted_identity" value="1"{trusted_checked}> Require trusted identity</label>
+                <label class="check"><input type="checkbox" name="require_trusted_identity" value="1"{trusted_checked}> Require keychain-backed identity</label>
                 <label class="check"><input type="checkbox" name="enforce_model_policy" value="1"{model_policy_checked}> Enforce model admission (unknown models become Under investigation)</label>
                 <div class="policy-grid">
                   <label><span>Minimum system RAM (MB)</span><input type="number" name="min_memory_mb" min="0" step="512" value="{min_memory_mb}"></label>
@@ -3561,7 +3561,7 @@ fn control_plane_operator_page(
             r#"{filters}
             <section class="grid four">
               <a class="metric metric-link" href="/nodes?state=online"><span>Online</span><strong>{nodes}</strong></a>
-              <a class="metric metric-link" href="/nodes?trust=trusted"><span>Trusted</span><strong>{trusted}</strong></a>
+              <a class="metric metric-link" href="/nodes?trust=trusted"><span>Keychain-backed identities</span><strong>{trusted}</strong></a>
               <a class="metric metric-link" href="/nodes?state=paused"><span>Paused</span><strong>{paused}</strong></a>
               <a class="metric metric-link" href="/nodes?policy=blocked"><span>Policy blocked</span><strong>{policy_blocked}</strong></a>
             </section>
@@ -3613,7 +3613,7 @@ fn control_plane_operator_page(
             r#"{filters}
             <section class="grid four">
               <a class="metric metric-link" href="/registry"><span>Registered</span><strong>{registered}</strong></a>
-              <a class="metric metric-link" href="/registry?trust=trusted"><span>Trusted</span><strong>{trusted}</strong></a>
+              <a class="metric metric-link" href="/registry?trust=trusted"><span>Keychain-backed identities</span><strong>{trusted}</strong></a>
               <a class="metric metric-link" href="/registry?policy=blocked"><span>Policy blocked</span><strong>{policy_blocked}</strong></a>
               <div class="metric"><span>Storage</span><strong>{storage_value}</strong></div>
             </section>
@@ -5221,7 +5221,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
 
         <section class="primary-metrics" aria-label="Primary metrics">
           <a class="card metric-link" href="/nodes?state=online"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="16" r="2.5"/><circle cx="19" cy="16" r="2.5"/><path d="M10 7 6.5 14"/><path d="m14 7 3.5 7"/><path d="M7.5 16h9"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Online nodes</div><div class="card-value">{nodes}</div><div class="delta">Open Nodes</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 33 C14 28 16 17 27 19 C36 21 35 34 47 31 C60 28 54 12 69 11 C82 11 77 25 89 22 C101 19 102 8 120 4" stroke="#188fff" stroke-width="2"/></svg></a>
-          <a class="card metric-link" href="/registry?trust=trusted"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Trusted nodes</div><div class="card-value">{trusted}</div><div class="delta">Open Registry</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C10 14 18 34 27 19 S41 23 50 16 S66 27 74 13 S92 19 120 3" stroke="#188fff" stroke-width="2"/></svg></a>
+          <a class="card metric-link" href="/registry?trust=trusted"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label" title="Nodes whose identity keys use the system keychain">Keychain-backed identities</div><div class="card-value">{trusted}</div><div class="delta">Open Registry</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C10 14 18 34 27 19 S41 23 50 16 S66 27 74 13 S92 19 120 3" stroke="#188fff" stroke-width="2"/></svg></a>
           <a class="card metric-link" href="/jobs?status=queued"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Queued jobs</div><div class="card-value">{queued}</div><div class="delta">Open Jobs</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 34 C12 33 12 13 27 9 C39 6 42 31 55 28 C68 25 69 11 82 15 C95 19 99 17 120 4" stroke="#188fff" stroke-width="2"/></svg></a>
           <a class="card metric-link" href="/credits" data-live-key="credits-total"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Total credits</div><div class="card-value">{credits_total:.2}</div><div class="delta">Open Credits</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C12 12 19 27 30 20 S44 26 55 16 S70 20 80 7 S99 32 120 18" stroke="#188fff" stroke-width="2"/></svg></a>
         </section>
@@ -5240,7 +5240,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
             <div class="section">
               <div class="section-head">
                 <div class="section-title-row"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="16" r="2.5"/><circle cx="19" cy="16" r="2.5"/><path d="M10 7 6.5 14"/><path d="m14 7 3.5 7"/><path d="M7.5 16h9"/></svg><div><h2 class="section-title">Network Topology</h2><div class="meta">Live view of compute network</div></div></div>
-                <div class="legend"><span><i class="legend-dot"></i>Online</span><span><i class="legend-dot trusted"></i>Trusted</span><span><i class="legend-dot paused"></i>Paused</span><span><i class="legend-dot offline"></i>Offline</span></div>
+                <div class="legend"><span><i class="legend-dot"></i>Online</span><span><i class="legend-dot trusted"></i>Keychain-backed</span><span><i class="legend-dot paused"></i>Paused</span><span><i class="legend-dot offline"></i>Offline</span></div>
               </div>
               <div class="section-body">
                 <div class="topology">
@@ -5785,7 +5785,7 @@ fn control_filter_form(page: OperatorPage, query: Option<&str>, api_path: &str) 
               <input name="search" aria-label="Search" placeholder="Search node id, host, model, backend" value="{search}" />
               <select name="state" aria-label="Filter state"><option value="">All states</option><option value="online"{online}>Online</option><option value="ready"{ready}>Ready</option><option value="busy"{busy}>Busy</option><option value="paused"{paused}>Paused</option><option value="stopped"{stopped}>Stopped</option></select>
               <select name="backend" aria-label="Filter backend"><option value="">All backends</option><option value="vllm"{vllm}>vLLM</option><option value="cuda"{cuda}>CUDA</option><option value="m"{m}>M-series</option><option value="auto"{auto}>Auto</option></select>
-              <select name="trust" aria-label="Filter trust"><option value="">All trust</option><option value="trusted"{trusted}>Trusted</option><option value="untrusted"{untrusted}>Untrusted</option></select>
+              <select name="trust" aria-label="Filter trust"><option value="">All identity storage</option><option value="trusted"{trusted}>Keychain-backed</option><option value="untrusted"{untrusted}>Other identity storage</option></select>
               <select name="policy" aria-label="Filter policy"><option value="">All policy</option><option value="allowed"{policy_allowed}>Allowed</option><option value="blocked"{policy_blocked}>Blocked</option></select>
               <input name="recorded_after" aria-label="Heartbeat after timestamp" placeholder="heartbeat after timestamp" value="{start}" />
               <input name="recorded_before" aria-label="Heartbeat before timestamp" placeholder="heartbeat before timestamp" value="{end}" />
