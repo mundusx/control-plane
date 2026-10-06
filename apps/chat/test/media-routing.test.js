@@ -73,7 +73,15 @@ test('real queue selects ranked worker, preserves one slot, and records failed/e
   clock+=181000;fleet=fleet.map(n=>({...n,updated_at:String(clock/1000)}));
   await queue.claim(fast,[profile]);
   assert.equal((await db.query('select state from media_execution_attempts where job_id=$1 and attempt=1',[other.job_id])).rows[0].state,'expired');
-  fleet=[];await assert.rejects(submit(),{statusCode:503});
+  fleet=[];
+  const waiting=await submit();assert.equal(waiting.state,'queued');
+  clock+=1;
+  queue.fleet=async()=>{throw new Error('fleet unavailable');};
+  assert.equal((await submit()).state,'queued');
+  fleet=[live('fast'),live('slow')].map(n=>({...n,updated_at:String(clock/1000)}));
+  queue.fleet=async()=>fleet;
+  const recovered=await queue.claim(slow,[profile]);
+  assert.equal(recovered.job_id,waiting.job_id);
 });
 
 test('media planner must return the exact async profile before submitting',async()=>{
