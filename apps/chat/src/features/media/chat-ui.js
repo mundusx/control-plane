@@ -51,7 +51,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
               'Updates every 30 seconds. Position includes all users waiting for the same media profile.'
             : job.state === 'running' ? 'You can keep chatting. Updates every 30 seconds.' : '';
           const another = card.querySelector('.media-chat-another');
-          if (another) another.disabled = pending >= (job.max_pending_requests || 4);
+          if (another) another.disabled = pending >= (job.max_pending_requests || 2);
           if (item.kind === 'image' && job.quote?.width && job.quote?.height) {
             item.width = job.quote.width; item.height = job.quote.height;
             detail.textContent = 'Qwen Image · ' + item.width + ' × ' + item.height;
