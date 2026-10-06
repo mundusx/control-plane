@@ -316,3 +316,25 @@ test("accounting endpoints require dispatcher authority; user quote and history 
   const r = await fetch(`${base}/api/media/quote`, { headers: { "x-test-user": "yes" } });
   assert.equal(r.status, 200); assert.equal((await r.json()).compute_credits, 1199);
 });
+
+test('completed references are deleted immediately, shared pending inputs and generated outputs survive', async t => {
+  const f=await fixture(t);
+  const make=async () => { const r=await f.store.reserve(f.owner,metadata()); await f.store.upload(r.artifact_id,r.upload_ticket.upload_token,png()); return r.artifact_id; };
+  const reference=await make(), generated=await make();
+  const job=async (id, input, state) => {
+    await f.db.query("insert into public.jobs(job_id,status,classification) values($1,'media_completed','{}')",[id]);
+    await f.db.query('insert into public.media_generation_jobs(job_id,owner_user_id,idempotency_key,request,state) values($1,$2,$1,$3,$4)',[id,f.owner,{input_artifact_id:input},state]);
+  };
+  await job('done',reference,'completed');
+  await job('waiting',reference,'queued');
+  await job('output-use',generated,'completed');
+  await f.db.query("insert into public.media_compute_records(job_id,owner_user_id,quote,artifact_id) values('output-use',$1,'{}',$2)",[f.owner,generated]);
+  assert.equal(await f.store.cleanup(),0);
+  assert.ok((await f.store.owned(reference,f.owner)).media_available);
+  await f.db.query("update public.media_generation_jobs set state='completed' where job_id='waiting'");
+  assert.equal(await f.store.cleanup(),1);
+  await assert.rejects(stat(f.store.file(reference)),{code:'ENOENT'});
+  assert.equal((await f.store.owned(reference,f.owner)).media_available,false);
+  assert.ok((await f.store.owned(generated,f.owner)).media_available);
+  assert.equal(await f.store.cleanup(),0);
+});

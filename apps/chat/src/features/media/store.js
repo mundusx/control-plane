@@ -194,6 +194,18 @@ export class MediaArtifactStore {
     try {
       // Row locks prevent cleanup racing a final upload/commit, including across processes.
       const removed = await this.transaction(async (client) => {
+        // Admission takes this same owner lock before attaching a reference.
+        // A fresh statement after locking sees all newly committed consumers.
+        await client.query(`select u.id from public.users u where exists
+          (select 1 from public.media_artifacts a join public.media_generation_jobs j
+            on j.request->>'input_artifact_id'=a.artifact_id::text
+            where a.owner_user_id=u.id and a.file_deleted_at is null and j.state='completed')
+          order by u.id for update`);
+        await client.query(`update public.media_artifacts a set expires_at=$1
+          where a.file_deleted_at is null and a.expires_at>$1
+            and exists (select 1 from public.media_generation_jobs j where j.state='completed' and j.request->>'input_artifact_id'=a.artifact_id::text)
+            and not exists (select 1 from public.media_generation_jobs j where j.state in ('queued','running') and j.request->>'input_artifact_id'=a.artifact_id::text)
+            and not exists (select 1 from public.media_compute_records c where c.artifact_id=a.artifact_id)`, [new Date(this.now())]);
         const result = await client.query(`select artifact_id,content_type from public.media_artifacts
           where expires_at <= $1 and file_deleted_at is null order by expires_at limit 100 for update skip locked`, [new Date(this.now())]);
         for (const row of result.rows) {
