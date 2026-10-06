@@ -34,6 +34,10 @@ export class MediaQueue {
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
       if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed || (old.request.input_sha256 ?? old.request.input_artifact_id)!==(task.input_sha256 ?? task.input_artifact_id))) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,created_at:old.created_at,quote:saved.quote}; }
+      if (task.input_artifact_id) {
+        const reference=(await db.query('select * from public.media_artifacts where artifact_id=$1 for update',[task.input_artifact_id])).rows[0];
+        if (!reference || reference.owner_user_id!==owner || reference.status!=='ready' || reference.file_deleted_at || new Date(reference.expires_at).getTime()<=this.store.now()) throw httpError(410,'Reference image expired');
+      }
       // Queue supported requests even while contributors are offline. Live fleet
       // checks, policy and capacity remain enforced when a worker claims work.
       if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
@@ -143,7 +147,9 @@ export class MediaQueue {
       await db.query("update public.jobs set status='media_completed',completed_at_epoch=$2 where job_id=$1",[row.job_id,Math.floor(this.store.now()/1000)]);
       await db.query("update public.media_generation_jobs set state='completed',completed_at=$2 where job_id=$1",[row.job_id,new Date(this.store.now())]);
     });
-    return this.accounting.settle(input);
+    const settled = await this.accounting.settle(input);
+    await this.store.cleanup().catch(() => console.error('Reference image cleanup failed; the scheduled sweep will retry'));
+    return settled;
   }
   async fail(node,input) { return this.store.transaction(async db=>{
     await this.lease(db,node,input);
