@@ -12,7 +12,7 @@ export function createMediaClientHttpController({ service, authStore, readJsonBo
     else if (match && !match[1] && request.method === 'POST') {
       const result = await service.submit(session.id, await readJsonBody(request));
       response.setHeader('Location', result.status_url);
-      response.setHeader('Retry-After', '15');
+      response.setHeader('Retry-After', '30');
       sendJson(response, 202, result);
     } else if (match?.[1] && !match[2] && request.method === 'GET') sendJson(response, 200, await service.status(session.id, match[1]));
     else if (match?.[2] && request.method === 'POST') sendJson(response, 200, await service.result(session.id, match[1]));

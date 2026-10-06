@@ -32,7 +32,7 @@ export class MediaClientService {
   describe(job) {
     return { ...job, status_url: `${this.origin}/v1/media/jobs/${job.job_id}`,
       terminal: ['completed', 'failed', 'cancelled'].includes(job.state),
-      poll_after_seconds: ['queued', 'running'].includes(job.state) ? 15 : null,
+      poll_after_seconds: ['queued', 'running'].includes(job.state) ? 30 : null,
       next_action: job.state === 'completed' ? 'get_media_result' :
         ['queued', 'running'].includes(job.state) ? 'check_job_status' : 'report_failure' };
   }
