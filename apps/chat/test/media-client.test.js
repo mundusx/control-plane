@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MediaClientService } from '../src/features/media/client-service.js';
+import { MediaClientService, videoQuality } from '../src/features/media/client-service.js';
 import { createMediaClientHttpController } from '../src/features/media/client-http.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
@@ -14,12 +14,24 @@ test('client contract bounds durations, maps image/video profiles and does not p
     assert.equal(result.poll_after_seconds,30);
     assert.equal(result.terminal,false);
     assert.equal(result.status_url,`https://chat.example/v1/media/jobs/${id}`);
-    assert.equal(submitted.at(-1).input.profile_id,`wan22-14b-480p-${seconds*16+1}f-v1`);
+    assert.equal(submitted.at(-1).input.profile_id,`wan22-t2v-lightning-14b-480p-${seconds*16+1}f-v1`);
   }
   await service.submit('owner',{kind:'image',prompt:'test',idempotency_key:id});
   assert.equal(submitted.at(-1).input.profile_id,'qwen-image-fp8-832x480-v1');
   for (const duration_seconds of [0,11,2.5,'5']) await assert.rejects(service.submit('owner',{kind:'video',duration_seconds}),{statusCode:400});
   await assert.rejects(service.submit('owner',{kind:'image',duration_seconds:5}),{statusCode:400});
+});
+
+test('fast video is default and explicit definition requests use more steps at 480p', async () => {
+  for (const prompt of ['a cat playing','not HD, a cat playing']) assert.equal(videoQuality({prompt}),'fast');
+  for (const prompt of ['a cat in HD','best definition of a cat','highest quality sunset']) assert.equal(videoQuality({prompt}),'quality');
+  assert.equal(videoQuality({prompt:'HD cat',quality:'fast'}),'fast');
+  const calls=[];
+  const service=new MediaClientService({submit:async(_,item)=>{calls.push(item);return {job_id:id,state:'queued'};}},'https://chat.example');
+  await service.submit('owner',{kind:'video',prompt:'best definition sunset'});
+  assert.equal(calls.at(-1).profile_id,'wan22-14b-480p-49f-v1');
+  await service.submit('owner',{kind:'video',prompt:'HD reference animation',input_artifact_id:id});
+  assert.equal(calls.at(-1).profile_id,'wan22-i2v-14b-480p-49f-v1');
 });
 
 test('status does not rotate links; result checks ownership, completion and expiry',async()=>{

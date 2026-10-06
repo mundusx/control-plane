@@ -94,7 +94,8 @@ test('HTTP video flow authenticates users and signed workers then serves an anon
  const origin='http://127.0.0.1:'+server.address().port;
  const user={Cookie:'session=test','X-MundusX-CSRF':'test','Content-Type':'application/json'};
  const presets=await (await fetch(origin+'/api/media/profiles',{headers:user})).json();
- assert.equal(presets.profiles.length,10);
+ assert.equal(presets.profiles.length,20);
+ assert.equal(presets.profiles.filter(p=>p.steps===4).length,10);
  assert.ok(presets.profiles.every(p=>p.model==='Wan-AI/Wan2.2-T2V-A14B'&&p.fps===16&&p.width===832&&p.height===480));
  assert.equal((await fetch(origin+'/api/media/jobs')).status,401);
  assert.equal((await fetch(origin+'/api/media/worker/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
