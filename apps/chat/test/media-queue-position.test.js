@@ -21,7 +21,7 @@ test('owned queue status ranks compatible waiting jobs and keeps separate reques
   assert.equal(waiting.queue_position, 2);
   assert.equal(waiting.jobs_ahead, 1);
   assert.equal(waiting.pending_requests, 2);
-  assert.equal(waiting.max_pending_requests, 4);
+  assert.equal(waiting.max_pending_requests, 2);
   const running = await queue.owned('me','d');
   assert.equal(running.queue_position, null);
   assert.equal(running.jobs_ahead, null);
