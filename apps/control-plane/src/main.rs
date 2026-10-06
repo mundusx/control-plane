@@ -1,3 +1,4 @@
+mod chat_api_keys;
 mod native_stream;
 mod global_skills;
 mod chat_gateway;
@@ -689,10 +690,10 @@ fn should_enable_live_stream(
     _native_tool_turn: bool,
     mode: Option<&str>,
     record: &JobRecord,
-    streaming_node_available: bool,
+    streaming_node_known: bool,
 ) -> bool {
     let direct_mode = mode.is_none_or(|value| value.eq_ignore_ascii_case("chat"));
-    wants_stream && direct_mode && !record.graph_execution_enabled && streaming_node_available
+    wants_stream && direct_mode && !record.graph_execution_enabled && streaming_node_known
 }
 
 fn chat_job_execution_mode(
@@ -702,6 +703,10 @@ fn chat_job_execution_mode(
     sensitive_history: bool,
     native_tool_turn: bool,
 ) -> JobExecutionMode {
+    // OpenAI-compatible streaming must remain a single worker turn. A graph
+    // cannot expose one coherent token stream while its planner and reducer
+    // stages are still running, so auto decomposition makes ordinary chat look
+    // stalled until the complete graph has finished.
     if wants_stream || mode_selected || metadata_request || sensitive_history || native_tool_turn {
         JobExecutionMode::Single
     } else {
@@ -6815,6 +6820,28 @@ fn handle_connection_with_streams(
     let request = parse_request(&request_text);
     let (clean_path, query) = split_path_and_query(&request.path);
 
+    if chat_api_keys::protected(&request.method, clean_path) {
+        let raw = std::env::var("MUNDUSX_CHAT_API_KEYS").ok();
+        let failure = match chat_api_keys::parse(raw.as_deref()) {
+            Ok(None) => None,
+            Ok(Some(keys)) => {
+                let identity = chat_api_keys::authenticate(
+                    header_value(&request.headers, "authorization"), &keys, operator_auth_token().as_deref(),
+                );
+                if identity.is_some() { None } else {
+                    Some(("401 Unauthorized", "A valid API key is required", "invalid_api_key"))
+                }
+            }
+            Err(_) => Some(("503 Service Unavailable", "Chat API key configuration is invalid", "api_key_configuration_error")),
+        };
+        if let Some((status, message, code)) = failure {
+            let _ = stream.write_all(json_response(status, serde_json::json!({
+                "error": { "message": message, "type": "authentication_error", "code": code }
+            })).as_bytes());
+            return;
+        }
+    }
+
     if let Some(response) = admin_login::handle(&request.method, clean_path, query, &request.headers) {
         let _ = stream.write_all(response.as_bytes());
         return;
@@ -8717,6 +8744,7 @@ fn handle_connection_with_streams(
                             "conversation_id": conversation_id,
                             "deleted": persisted,
                             "persisted": persisted,
+                            "credits_affected": false,
                             "reason": if persisted { serde_json::Value::Null } else { serde_json::Value::String("conversation storage was not found".to_string()) }
                         }),
                     ),
@@ -8731,6 +8759,7 @@ fn handle_connection_with_streams(
                         "conversation_id": conversation_id,
                         "deleted": false,
                         "persisted": false,
+                        "credits_affected": false,
                         "reason": "conversation storage is not configured"
                     }),
                 ),
@@ -8947,11 +8976,20 @@ fn handle_connection_with_streams(
                     let mut guard = state.lock().expect("state lock");
                     let submitted =
                         guard.submit_job_with_mode(job_request, mode.clone(), now_unix_seconds());
-                    let streaming_node_available = guard.nodes.values().any(|node| {
+                    // Preserve the caller's streaming contract while a known
+                    // streaming worker reconnects after a control-plane
+                    // restart. Requiring the worker to be healthy at this
+                    // exact instant permanently downgraded requests arriving
+                    // during the heartbeat gap to buffered delivery, so the
+                    // browser saw no token until a large generation finished.
+                    // The scheduler still requires healthy/runtime-ready
+                    // state before assigning the streaming job.
+                    let streaming_node_known = guard.nodes.values().any(|node| {
                         node.policy_allowed
-                            && node.worker_health.as_ref().is_some_and(|health| {
-                                health.healthy && health.runtime_ready && health.streaming_supported
-                            })
+                            && node
+                                .worker_health
+                                .as_ref()
+                                .is_some_and(|health| health.streaming_supported)
                     });
                     // Plan first with buffered delivery so the graph remains authoritative.
                     // Only direct jobs are upgraded to live worker deltas.
@@ -8961,7 +8999,7 @@ fn handle_connection_with_streams(
                         native_tool_turn,
                         mode.as_deref(),
                         &submitted,
-                        streaming_node_available,
+                        streaming_node_known,
                     );
                     if live_stream_job {
                         guard
@@ -9669,7 +9707,8 @@ mod tests {
         parse_conversation_path, parse_harness_attempt_route,
         parse_harness_attempt_transition_route, parse_harness_task_route, parse_request,
         read_http_request, requires_device_signature, requires_operator_auth, resume_token_matches,
-        resume_token_sha256, select_harness_runner, should_enable_live_stream,
+        chat_job_execution_mode, resume_token_sha256, select_harness_runner,
+        should_enable_live_stream,
         status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
         HarnessAttemptRoute, HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource,
         SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
@@ -9724,7 +9763,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn live_streaming_requires_a_direct_plan_and_streaming_node() {
+    fn live_streaming_waits_for_a_known_streaming_node_to_reconnect() {
         let mut state = ControlPlaneState::default();
         let direct = state.submit_job(
             JobRequest {
@@ -9767,6 +9806,18 @@ mod tests {
         let mut graph = direct;
         graph.graph_execution_enabled = true;
         assert!(!should_enable_live_stream(true, false, None, &graph, true));
+    }
+
+    #[test]
+    fn streamed_chat_uses_one_direct_job_instead_of_an_auto_graph() {
+        assert_eq!(
+            chat_job_execution_mode(true, false, false, false, false),
+            JobExecutionMode::Single
+        );
+        assert_eq!(
+            chat_job_execution_mode(false, false, false, false, false),
+            JobExecutionMode::Auto
+        );
     }
 
     fn chat_message(role: &str, content: &str) -> ChatMessage {
@@ -9876,6 +9927,7 @@ mod tests {
 
     fn healthy_worker_health(checked_at: &str) -> WorkerHealthReport {
         WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),

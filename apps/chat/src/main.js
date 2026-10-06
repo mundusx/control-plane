@@ -1,7 +1,24 @@
+import { resolveMediaIntent } from './features/media/intent-resolver.js';
+import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
+import { persistMediaChatTurn } from './features/media/chat-history.js';
+import { mediaChatIntent, mayNeedMediaClassification } from './features/media/chat-intent.js';
+import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
+import { MediaQueue } from './features/media/queue.js';
+import { MediaClientService } from './features/media/client-service.js';
+import { createMediaClientHttpController } from './features/media/client-http.js';
+import { videoPage } from "./features/media/page.js";
 import { splitMarkdownCode } from "./markdown-code.js";
+import { parseChatApiKeys, authenticateChatApiKey } from "./chat-api-keys.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
 import { projectCompletionGaps } from "./project-completion.js";
+import { webResearchRequest, fetchWebResearch } from "./web-research.js";
 import { createServer } from "node:http";
+import { MediaArtifactStore } from "./features/media/store.js";
+import { mediaAdmission } from "./features/media/admission.js";
+import { mediaFleet } from "./features/media/routing.js";
+import { liveCapabilityAvailability } from "./features/media/availability.js";
+import { mediaPlanner } from "./features/media/planner.js";
+import { createMediaHttpController } from "./features/media/http-controller.js";
 import { handleAdminLogin } from "./features/admin-login.js";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -86,6 +103,7 @@ const MODEL_CONTEXT_TOKENS = 131_072;
 // be restored without rebuilding the output-cleaning and redaction pipeline.
 const CHAT_VERIFIER_ENABLED = false;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const EHDA_LOGO_PATH = resolve(MODULE_DIR, "../public/ehda-logo.png");
 const LOGO_PATH = resolve(MODULE_DIR, "../public/mundusx-logo.png");
 const MARIE_PERSONA_PATH = resolve(MODULE_DIR, "../../../docs/marie-persona.md");
 const ATLAS_PERSONA_PATH = resolve(MODULE_DIR, "../../../docs/atlas-persona.md");
@@ -172,7 +190,11 @@ export function configFromEnv(env = process.env) {
     String(env.MUNDUSX_HARNESS_UI_ENABLED ?? "").trim().toLowerCase(),
   );
   return {
+    chatApiKeys: parseChatApiKeys(env.MUNDUSX_CHAT_API_KEYS),
     auth: authConfigFromEnv(env),
+    webResearchUrl: (env.MUNDUSX_WEB_RESEARCH_URL ?? "").trim().replace(/\/$/, ""),
+    webResearchToken: (env.MUNDUSX_WEB_RESEARCH_TOKEN ?? "").trim(),
+    mediaDirectory: (env.MUNDUSX_MEDIA_DIR ?? "").trim(),
     port: Number(env.PORT ?? "3002"),
     controlPlaneUrl: normalizeControlPlaneOrigin(
       env.MUNDUSX_CONTROL_PLANE_URL ?? DEFAULT_CONTROL_PLANE_URL,
@@ -906,7 +928,6 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .account-advanced summary { cursor:pointer; padding:10px 8px; color:var(--muted); font-size:12px; font-weight:600; border-radius:8px; }
     .account-advanced summary:hover { background:var(--panel-2); }
     .account-advanced summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-    @media (max-width:860px) { .account-advanced { display:none; } }
     .account-menu-header {
       width: 100%;
       display: flex;
@@ -1775,6 +1796,22 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       box-shadow: 0 10px 28px rgba(15, 23, 42, 0.07);
     }
     .composer-left-actions { grid-column:1; grid-row:1; align-self:center; display:flex; align-items:center; gap:2px; min-width:0; }
+    .composer-plus { width:36px;height:36px;display:grid;place-items:center;border:0;border-radius:50%;background:transparent;color:var(--text);font:inherit;font-size:28px;line-height:1;cursor:pointer; }
+    .composer-plus:hover,.composer-plus[aria-expanded="true"] { background:var(--panel-2); }
+    .composer-plus:focus-visible { outline:2px solid var(--blue);outline-offset:2px; }
+    .composer-menu { position:absolute;left:12px;bottom:calc(100% + 8px);z-index:12;width:min(280px,calc(100vw - 48px));padding:7px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 12px 36px rgba(15,23,42,.16); }
+    .composer-menu[hidden],.reference-chip[hidden] { display:none; }
+    .composer-menu .tool-toggle { width:100%;min-height:42px;padding:10px 12px;border-radius:10px;color:var(--text);font-size:14px;text-align:left; }
+    .composer-menu .tool-toggle:hover { background:var(--panel-2); }
+    .composer-menu #enter-to-send-toggle { display:flex; }
+    .composer-menu .mutation-toggle { width:100%;max-width:none;margin:4px 0; }
+    .reference-chip { display:flex;align-items:center;gap:8px;max-width:100%;margin:0 0 8px;padding:7px 12px;border:1px solid var(--line);border-radius:12px;background:var(--panel);font-size:12px;color:var(--text); }
+    .reference-chip span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+    .reference-chip button { margin-left:auto;border:0;background:transparent;color:var(--muted);font:inherit;font-size:18px;cursor:pointer; }
+    .composer-availability { display:flex;justify-content:center;flex-wrap:wrap;gap:5px 14px;margin-top:8px;color:var(--muted-2);font-size:11px;line-height:1.5; }
+    .composer-availability span::before { content:"";display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:5px;vertical-align:middle;background:var(--muted-2); }
+    .composer-availability span[data-state="available"]::before { background:#16a36a; }
+    .composer-availability span[data-state="busy"]::before { background:#c79230; }
     .runtime-picker { display:inline-flex; align-items:center; gap:4px; padding:0 4px; color:var(--muted-2); }
     .runtime-picker select { max-width:150px; border:0; border-radius:9px; padding:7px 24px 7px 7px; color:var(--text); background:var(--panel-2); font:inherit; font-size:12px; cursor:pointer; }
     .runtime-picker select:focus-visible { outline:2px solid color-mix(in srgb,var(--blue) 45%,transparent); outline-offset:1px; }
@@ -1991,6 +2028,12 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .auth-google[aria-disabled="true"] { pointer-events:none; opacity:.5; }
     .auth-google svg { width:20px; height:20px; flex:0 0 auto; }
     .auth-privacy { font-size:12px; }
+    .auth-method[hidden], .auth-google[hidden], .auth-privacy[hidden] { display:none !important; }
+    .auth-password { display:grid; gap:12px; }
+    .auth-password label { display:grid; gap:6px; font-size:13px; text-align:left; }
+    .auth-password input { width:100%; box-sizing:border-box; padding:12px; border:1px solid var(--line-strong); border-radius:10px; }
+    .auth-password button { min-height:46px; border:0; border-radius:10px; background:var(--gradient); color:white; font-weight:700; cursor:pointer; }
+    .auth-divider { text-align:center; font-size:12px; color:var(--muted); }
     .auth-message { min-height: 20px; font-size: 13px; color: var(--muted); }
     .account-widget[hidden] { display:none; }
     .repository-path { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
@@ -2202,7 +2245,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .shell { grid-template-columns:minmax(0,268px) minmax(0,1fr); }
     aside { padding:20px 13px 16px; }
     .brand-block { gap:10px; padding:0 2px 2px; align-items:flex-start; }
-    .brand-mark { width:48px; height:48px; flex:0 0 48px; color:var(--text); filter:drop-shadow(0 2px 4px rgba(0,0,0,.08)); }
+    .brand-mark { width:48px; height:48px; flex:0 0 48px; object-fit:contain; filter:drop-shadow(0 2px 4px rgba(0,0,0,.08)); }
+    html[data-theme="dark"] .brand-mark { filter:invert(1) drop-shadow(0 2px 4px rgba(0,0,0,.08)); }
     .brand-copy { min-width:0; padding-top:1px; }
     .brand-name { font-family: "Space Grotesk", system-ui, sans-serif; font-size:17px; font-weight:500; letter-spacing:-.015em; }
     .brand-ehda { margin-top:1px; color:var(--muted); font-size:12px; font-weight:550; letter-spacing:.08em; }
@@ -2238,7 +2282,20 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .brand-motto { margin-right:auto; display:flex; align-items:center; gap:12px; color:var(--muted-2); font-family: "Space Grotesk", system-ui, sans-serif; font-size:12px; }
     .brand-motto::after { content:"A BETTER TOMORROW"; font-family: "Space Grotesk", system-ui, sans-serif; font-size:10px; font-weight:650; letter-spacing:.14em; }
     .brand-motto-separator { width:1px; height:13px; background:var(--line-strong); }
-    @media (max-width:860px) { .shell{grid-template-columns:1fr}.brand-motto{display:none} }
+    .mobile-chat-controls,.mobile-rail-close,.mobile-rail-backdrop { display:none; }
+    @media (max-width:860px) {
+      .shell{grid-template-columns:1fr}.brand-motto{display:none}
+      .mobile-chat-controls { display:flex; align-items:center; gap:6px; }
+      .mobile-chat-controls button,.mobile-rail-close { display:grid; place-items:center; width:40px; height:40px; padding:8px; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--text); cursor:pointer; }
+      .mobile-chat-controls svg { width:20px; height:20px; }
+      .mobile-rail-close { position:absolute; top:10px; right:10px; font-size:24px; }
+      .shell.mobile-rail-open > aside { display:grid; position:fixed; inset:0 auto 0 0; z-index:30; width:min(320px,calc(100vw - 48px)); height:100dvh; padding-top:60px; box-shadow:12px 0 40px rgba(0,0,0,.2); }
+      .shell.mobile-rail-open .mobile-rail-backdrop { display:block; position:fixed; inset:0; z-index:25; border:0; background:rgba(0,0,0,.35); }
+      .workspace-nav { display:none; }
+      .history-menu-button { opacity:1; }
+      .history-context-menu { z-index:45; }
+    }
+  ${mediaChatCss}
   </style>
 </head>
 <body data-auth-required="${config.auth?.required ? "true" : "false"}">
@@ -2247,15 +2304,23 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       <button class="auth-close" id="auth-close" type="button" aria-label="Close sign-in">&times;</button>
       <div class="auth-brand"><span>Ehda</span></div>
       <div><h1 id="auth-title">Continue your chat</h1><p>Sign in to send your message and keep your conversations synced.</p></div>
-      <a class="auth-google" id="auth-google" href="/api/auth/google/start?return_to=/"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.6 0-4.81-1.76-5.6-4.13H3.06v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.4 13.93A6 6 0 0 1 6.09 12c0-.67.11-1.32.31-1.93V7.45H3.06A10 10 0 0 0 2 12c0 1.61.39 3.14 1.06 4.55l3.34-2.62Z"/><path fill="#EA4335" d="M12 5.94c1.47 0 2.79.51 3.83 1.5l2.87-2.88A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.94 5.45l3.34 2.62c.79-2.37 3-4.13 5.6-4.13Z"/></svg><span>Continue with Google</span></a>
-      <p class="auth-privacy">Google verifies your identity. Your Google password is never shared with MundusX.</p>
+      <form id="auth-password" class="auth-password auth-method" hidden>
+        <label>Username<input id="auth-username" name="username" autocomplete="username" required maxlength="128" /></label>
+        <label>Password<input id="auth-password-input" name="password" type="password" autocomplete="current-password" required maxlength="1024" /></label>
+        <button id="auth-password-submit" type="submit">Sign in</button>
+      </form>
+      <div id="auth-divider" class="auth-divider auth-method" hidden>or</div>
+      <a class="auth-google" id="auth-google" hidden href="/api/auth/google/start?return_to=/"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.6 0-4.81-1.76-5.6-4.13H3.06v2.62A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.4 13.93A6 6 0 0 1 6.09 12c0-.67.11-1.32.31-1.93V7.45H3.06A10 10 0 0 0 2 12c0 1.61.39 3.14 1.06 4.55l3.34-2.62Z"/><path fill="#EA4335" d="M12 5.94c1.47 0 2.79.51 3.83 1.5l2.87-2.88A9.62 9.62 0 0 0 12 2a10 10 0 0 0-8.94 5.45l3.34 2.62c.79-2.37 3-4.13 5.6-4.13Z"/></svg><span>Continue with Google</span></a>
+      <p id="auth-google-privacy" class="auth-privacy" hidden>Google verifies your identity. Your Google password is never shared with MundusX.</p>
       <div class="auth-message" id="auth-message" aria-live="polite"></div>
     </div>
   </div>
   <div class="shell" data-control-plane="${escapeHtml(config.controlPlaneUrl)}">
-    <aside>
+    <button class="mobile-rail-backdrop" id="mobile-rail-backdrop" type="button" aria-label="Close history" tabindex="-1"></button>
+    <aside id="chat-sidebar" aria-label="Chat navigation">
+      <button class="mobile-rail-close" id="mobile-rail-close" type="button" aria-label="Close history">&times;</button>
       <div class="brand-block">
-        <svg class="brand-mark" viewBox="0 0 64 64" role="img" aria-label="Mercedes-Benz three-pointed star"><circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="32" cy="32" r="24" fill="none" stroke="currentColor" stroke-width=".8" opacity=".62"/><path d="M32 8.5 35 29l18.9 12.8-20.2-8.1L32 56l-1.7-22.3-20.2 8.1L29 29 32 8.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <img class="brand-mark" src="/assets/ehda-logo.png" width="48" height="48" alt="EHDA" />
         <div class="brand-copy">
           <div class="brand-name">Mercedes-Benz</div>
           <div class="brand-ehda">Ehda</div>
@@ -2273,7 +2338,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       <div class="guest-widget" id="guest-widget">
         <strong>Try MundusX</strong>
         <p>Explore Chat and Projects. Sign in when you want to send, save conversations, or connect your local agent.</p>
-        <button class="guest-login" id="guest-login" type="button">Log in with Google</button>
+        <button class="guest-login" id="guest-login" type="button">Log in</button>
       </div>
       <div class="account-widget" id="account-widget" hidden>
         <div class="account-menu" id="account-menu">
@@ -2309,6 +2374,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     <main id="chat-main" class="is-empty-chat">
       <canvas class="mesh-canvas" id="mesh-canvas" aria-hidden="true"></canvas>
       <header>
+        <div class="mobile-chat-controls">
+          <button id="mobile-history" type="button" aria-label="Open chat history" title="History" aria-controls="chat-sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+          <button id="mobile-new-chat" type="button" aria-label="New chat" title="New chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
         <div class="brand-motto"><span>Mercedes-Benz</span><span class="brand-motto-separator" aria-hidden="true"></span></div>
         <div class="theme-switch" role="group" aria-label="Color theme"><button class="theme-option" id="theme-light" type="button" aria-label="Use light theme" aria-pressed="true">☀</button><button class="theme-option" id="theme-dark" type="button" aria-label="Use dark theme" aria-pressed="false">☾</button></div>
         <span class="runtime-status-sentinel" id="runtime-status" data-state="working"><span class="status-dot"></span><span id="runtime-status-text">Checking</span></span>
@@ -2322,15 +2391,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         </div>
       </section>
       <form id="chat-form">
+        <div class="reference-chip" id="media-reference-preview" hidden><span id="media-reference-name"></span><button id="media-reference-clear" type="button" aria-label="Remove reference image">&times;</button></div>
         ${config.harnessUiEnabled ? `<div class="project-context-menu" id="project-context-menu" hidden><div class="project-context-menu-header"><strong>Projects</strong><button id="project-context-new" type="button">+ New project</button></div><div class="project-context-list" id="project-context-list"></div><button class="project-context-choice project-context-none" id="project-context-none" type="button"><span aria-hidden="true">○</span><span>No project</span></button></div>` : ""}
         <div class="composer">
           <textarea id="prompt" name="prompt" rows="1" placeholder="Ask everyone..." autocomplete="off" required></textarea>
           <div class="composer-actions">
             <span class="composer-left-actions">
+              <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachments and tools" aria-haspopup="dialog" aria-expanded="false" aria-controls="composer-menu">+</button>
+              <input id="media-reference" type="file" accept="image/png" aria-label="Reference image for video" hidden>
+              <div class="composer-menu" id="composer-menu" role="dialog" aria-label="Attachments and tools" hidden>
+              <button class="tool-toggle" id="media-reference-open" type="button"><span aria-hidden="true">＋</span> Add image for video</button>
               ${config.harnessUiEnabled ? `<span class="active-project-context" id="active-project-context"><button class="tool-toggle project-context-open" id="active-project-open" type="button" aria-pressed="false" title="Choose a project"><span class="kbd" aria-hidden="true">⌁</span><strong id="active-project-name">Choose project</strong></button><button class="project-context-clear" id="active-project-clear" type="button" aria-label="Leave active project" title="Leave active project" hidden>&times;</button></span>` : ""}
               <select class="mutation-toggle" id="mutation-toggle" aria-label="Project access" title="Access is saved for this project" hidden><option value="ask">Ask before edits</option><option value="full">Full access</option></select>
-            </span>
             <button class="tool-toggle" id="enter-to-send-toggle" type="button" aria-pressed="false" title="Toggle sending messages with Enter"><span class="kbd">&#8629;</span><span id="enter-to-send-label">Enter to Send</span></button>
+              </div>
+            </span>
             <span class="voice-controls" id="voice-controls">
               <button class="voice-button" id="voice-mic" type="button" aria-label="Start voice input" title="Voice input">${ICON_MIC}</button>
               <button class="voice-button" id="voice-speak" type="button" aria-label="Speak replies" aria-pressed="false" title="Speak replies">${ICON_VOLUME}</button>
@@ -2339,6 +2414,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           </div>
           <button class="send" id="send" type="submit" aria-label="Send">${ICON_ARROW_UP}</button>
         </div>
+        <div class="composer-availability" id="composer-availability" aria-label="Contributor availability"><span>Checking contributors…</span></div>
         <div class="fine-print">MundusX may produce inaccurate information.</div>
       </form>
     </main>
@@ -2351,6 +2427,37 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const form = document.getElementById("chat-form");
     const mainEl = document.getElementById("chat-main");
     const promptEl = document.getElementById("prompt");
+    const composerPlusEl = document.getElementById("composer-plus");
+    const composerMenuEl = document.getElementById("composer-menu");
+    const mediaReferenceEl = document.getElementById("media-reference");
+    function setComposerMenuOpen(open, restoreFocus = false) {
+      composerMenuEl.hidden = !open;
+      composerPlusEl.setAttribute("aria-expanded", String(open));
+      if (open) {
+        const projects = document.getElementById("project-context-menu");
+        if (projects) projects.hidden = true;
+        document.getElementById("media-reference-open").focus();
+      } else if (restoreFocus) composerPlusEl.focus();
+    }
+    function renderMediaReference() {
+      const file = mediaReferenceEl.files?.[0];
+      document.getElementById("media-reference-preview").hidden = !file;
+      document.getElementById("media-reference-name").textContent = file ? "Reference: " + file.name : "";
+    }
+    composerPlusEl.addEventListener("click", () => setComposerMenuOpen(composerMenuEl.hidden));
+    document.getElementById("media-reference-open").addEventListener("click", () => {
+      setComposerMenuOpen(false); mediaReferenceEl.click();
+    });
+    mediaReferenceEl.addEventListener("change", renderMediaReference);
+    document.getElementById("media-reference-clear").addEventListener("click", () => {
+      mediaReferenceEl.value = ""; renderMediaReference(); promptEl.focus();
+    });
+    document.addEventListener("click", event => {
+      if (!event.target.closest("#composer-menu, #composer-plus")) setComposerMenuOpen(false);
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !composerMenuEl.hidden) { setComposerMenuOpen(false, true); event.preventDefault(); }
+    });
     const sendEl = document.getElementById("send");
     const messagesViewportEl = document.getElementById("messages");
     const messagesEl = document.getElementById("conversation");
@@ -2359,6 +2466,22 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const historyListEl = document.getElementById("history-list");
     const historyMenuEl = document.getElementById("history-context-menu");
     const newChatEl = document.getElementById("new-chat");
+    const mobileHistoryEl = document.getElementById("mobile-history");
+    const mobileRailCloseEl = document.getElementById("mobile-rail-close");
+    function setMobileHistoryOpen(open, restoreFocus = true) {
+      document.querySelector(".shell").classList.toggle("mobile-rail-open", open);
+      mobileHistoryEl.setAttribute("aria-expanded", String(open));
+      if (open) mobileRailCloseEl.focus();
+      else if (restoreFocus) mobileHistoryEl.focus();
+    }
+    mobileHistoryEl.addEventListener("click", () => setMobileHistoryOpen(true));
+    mobileRailCloseEl.addEventListener("click", () => setMobileHistoryOpen(false));
+    document.getElementById("mobile-rail-backdrop").addEventListener("click", () => setMobileHistoryOpen(false));
+    document.getElementById("mobile-new-chat").addEventListener("click", () => newChatEl.click());
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && mobileHistoryEl.getAttribute("aria-expanded") === "true") setMobileHistoryOpen(false);
+    });
+    window.matchMedia("(max-width: 860px)").addEventListener("change", () => setMobileHistoryOpen(false, false));
     const accountBarEl = document.getElementById("account-bar");
     const guestWidgetEl = document.getElementById("guest-widget");
     const guestLoginEl = document.getElementById("guest-login");
@@ -2397,6 +2520,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const authGateEl = document.getElementById("auth-gate");
     const authMessageEl = document.getElementById("auth-message");
     const authGoogleEl = document.getElementById("auth-google");
+    const authPasswordEl = document.getElementById("auth-password");
+    const authUsernameEl = document.getElementById("auth-username");
+    const authPasswordInputEl = document.getElementById("auth-password-input");
+    const authPasswordSubmitEl = document.getElementById("auth-password-submit");
     const authCloseEl = document.getElementById("auth-close");
     const accountWidgetEl = document.getElementById("account-widget");
     const accountSettingsEl = document.getElementById("account-settings");
@@ -2672,6 +2799,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     async function bootstrapAuthentication() {
       const providers = await nativeFetch("/api/auth/providers").then((value) => value.json()).catch(() => ({}));
       authGoogleEl?.setAttribute("aria-disabled", String(!providers.google));
+      authGoogleEl.hidden = !providers.google;
+      authPasswordEl.hidden = !providers.hard_user;
+      document.getElementById("auth-divider").hidden = !(providers.google && providers.hard_user);
+      document.getElementById("auth-google-privacy").hidden = !providers.google;
       try {
         const response = await nativeFetch("/api/auth/session");
         if (!response.ok) throw new Error("Sign in required");
@@ -2725,15 +2856,34 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         accountWidgetEl.hidden = true;
         guestWidgetEl.hidden = false;
         updateRunnerSetupState();
-        authMessageEl.textContent = providers.google ? "" : "Google sign-in is not configured yet.";
+        authMessageEl.textContent = providers.google || providers.hard_user ? "" : "Sign-in is currently unavailable. Contact the administrator.";
         authGateEl.hidden = true;
       }
     }
 
     function openAuthentication() {
       authGateEl.hidden = false;
-      authGoogleEl?.focus();
+      if (!authPasswordEl.hidden) authUsernameEl?.focus();
+      else if (!authGoogleEl.hidden) authGoogleEl?.focus();
     }
+
+    authPasswordEl?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      authPasswordSubmitEl.disabled = true;
+      authMessageEl.textContent = "Signing in…";
+      try {
+        const response = await nativeFetch("/api/auth/hard-user/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: authUsernameEl.value, password: authPasswordInputEl.value }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Sign-in failed");
+        authPasswordInputEl.value = "";
+        authMessageEl.textContent = "";
+        await bootstrapAuthentication();
+      } catch (error) { authMessageEl.textContent = error.message || "Sign-in failed"; }
+      finally { authPasswordInputEl.value = ""; authPasswordSubmitEl.disabled = false; }
+    });
 
     function closeAuthentication() {
       authGateEl.hidden = true;
@@ -3198,7 +3348,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           projectReadinessEl.dataset.state = "offline";
         }
         if (projectReadinessTitleEl) projectReadinessTitleEl.textContent = "Sign in to connect a local project";
-        if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Use Google sign-in, then MundusX can check only your own connected devices.";
+        if (projectReadinessTextEl) projectReadinessTextEl.textContent = "Sign in, then MundusX can check only your own connected devices.";
         if (projectRunnerSetupEl) projectRunnerSetupEl.hidden = true;
         updateProjectCreateAvailability();
         return [];
@@ -3516,6 +3666,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     activeProjectOpenEl?.addEventListener("click", (event) => {
       if (!projectsAvailableOnDevice()) return;
       event.stopPropagation();
+      setComposerMenuOpen(false);
       if (projectContextMenuEl) projectContextMenuEl.hidden = !projectContextMenuEl.hidden;
     });
     activeProjectClearEl?.addEventListener("click", () => {
@@ -3653,7 +3804,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (!localRunnerReady) {
         harnessResultEl.textContent = currentUser
           ? "A connected local coding agent is required before creating this project."
-          : "Sign in with Google before connecting a local project.";
+          : "Sign in before connecting a local project.";
         if (!currentUser) openAuthentication();
         return;
       }
@@ -3737,9 +3888,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (readyNodeCount === null) {
         setStatus("working", "Checking");
       } else if (readyNodeCount > 0) {
-        setStatus("ready", "Ready");
+        setStatus("ready", "Chat ready");
       } else {
-        setStatus("standby", "Standby - no ready nodes");
+        setStatus("standby", "Chat unavailable");
       }
     }
 
@@ -3981,6 +4132,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     }
 
     newChatEl?.addEventListener("click", () => {
+      setMobileHistoryOpen(false, false);
       setWorkspaceDestination("chats");
       setActiveProject(null);
       pendingRunnerAction = null;
@@ -4000,10 +4152,18 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       promptEl.focus();
     });
 
+    const mediaChatIntent = ${mediaChatIntent.toString()};
+    const mayNeedMediaClassification = ${mayNeedMediaClassification.toString()};
+    const mediaUi = (${installMediaChatUi.toString()})({
+      detect: mediaChatIntent, cache: appendCachedConversationTurn,
+      identity: () => currentUser?.id,
+      activeConversation: () => activeHistoryId, scroll: () => scrollChatToLatest(),
+    });
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const message = promptEl.value.trim();
-      if (!message) return;
+      if (!message || sendEl.disabled) return;
       if (!currentUser && document.body.dataset.authRequired === "true") {
         sessionStorage.setItem(pendingAuthPromptKey, message);
         openAuthentication();
@@ -4012,6 +4172,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // Freeze the selected workspace for this submission. Account refreshes,
       // runner polling, and responsive UI updates may all refresh activeProject
       // while an async request is being dispatched.
+      let mediaIntent = mediaChatIntent(message);
       const submittedProject = projectSelectedForSubmission();
       const conversationId = getConversationId();
       const priorConversationTurns = readCachedConversation(conversationId);
@@ -4019,7 +4180,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         submittedProject && isProjectExecutionContinuation(message, priorConversationTurns),
       );
       const mutatingProjectRequest = Boolean(
-        submittedProject && (requiresLocalProjectAction(message) || projectExecutionContinuation),
+        !mediaIntent && submittedProject && (requiresLocalProjectAction(message) || projectExecutionContinuation),
       );
       const allowProjectMutation = mutatingProjectRequest && (
         projectPermissionMode(submittedProject.slug) === "full"
@@ -4038,6 +4199,32 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const pending = addMessage("Submitting to MundusX...", "assistant", "Queued");
 
       try {
+        if (!mediaIntent && mayNeedMediaClassification(message)) {
+          try {
+            const detected = await fetch('/api/media/intent', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message}) });
+            if (detected.ok) mediaIntent = (await detected.json()).intent;
+          } catch {}
+        }
+        if (mediaIntent) {
+          if (mediaIntent.error) {
+            await mediaUi.submit(pending, message, conversationId, mediaIntent);
+            setStatus("ready", "Ready");
+            return;
+          }
+          const reference = document.getElementById('media-reference')?.files?.[0];
+          if (reference && mediaIntent.kind !== 'video') throw new Error('Reference images currently support video generation only.');
+          let inputArtifactId;
+          if (reference) {
+            const uploaded = await fetch('/api/media/reference', { method:'POST', headers:{'Content-Type':'image/png'}, body:reference });
+            const data = await uploaded.json();
+            if (!uploaded.ok) throw new Error(data.error || 'Reference upload failed');
+            inputArtifactId = data.artifact_id;
+          }
+          await mediaUi.submit(pending, message, conversationId, mediaIntent, inputArtifactId);
+          if (reference) { document.getElementById('media-reference').value = ''; renderMediaReference(); }
+          setStatus("ready", "Ready");
+          return;
+        }
         if (submittedProject && mutatingProjectRequest) {
           const executionPrompt = projectExecutionContinuation
             ? buildProjectExecutionContinuationPrompt(message, priorConversationTurns)
@@ -4091,7 +4278,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         if (!handledLocally) await tryLiveChatTurn(pending, chatMessage, conversationId);
         syncNetworkRuntimeStatus(true);
       } catch (error) {
-        failConversationStream(conversationId, pending, message, error);
+        const recovered = await recoverInterruptedConversationStream(conversationId, message, error);
+        if (!recovered) failConversationStream(conversationId, pending, message, error);
       } finally {
         sendEl.disabled = false;
         promptEl.focus();
@@ -4896,6 +5084,57 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       return true;
     }
 
+    function isRecoverableBrowserStreamError(error) {
+      const message = String(error?.message || error || "");
+      return error instanceof TypeError ||
+        /network\s*error|failed to fetch|load failed|stream ended before completion|connection.*(?:closed|reset)/i.test(message);
+    }
+
+    async function recoverInterruptedConversationStream(conversationId, message, error) {
+      const state = conversationStreamStates.get(conversationId);
+      if (!state || !state.completionId || !isRecoverableBrowserStreamError(error)) return false;
+      state.status = "reconnecting";
+      state.error = null;
+      renderConversationStreamState(state);
+
+      // Chat keeps generating after a browser/edge disconnect and checkpoints
+      // the same completion row in the conversation store. Re-read that row
+      // instead of submitting the user's prompt again, which could duplicate a
+      // long answer or repeat side effects.
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        let turns;
+        try {
+          turns = await fetchConversationMessages(conversationId);
+        } catch {
+          continue;
+        }
+        const checkpoint = [...turns].reverse().find((turn) =>
+          turn.role === "assistant" &&
+          (turn.job_id || turn.payload?.job_id) === state.completionId,
+        );
+        if (!checkpoint) continue;
+        const checkpointOutput = String(checkpoint.content || checkpoint.payload?.output || "");
+        if (checkpointOutput.length >= state.output.length) {
+          state.output = checkpointOutput;
+          renderConversationStreamState(state);
+        }
+        if (checkpoint.metadata?.partial !== true && checkpoint.payload?.metadata?.partial !== true) {
+          completeConversationStream(state, {
+            status: "completed",
+            output: state.output,
+            job_id: state.completionId,
+            execution_mode: "single",
+            finish_reason: "stop",
+            stream_mode: "recovered-checkpoint",
+          });
+          return true;
+        }
+      }
+      state.message = message;
+      return false;
+    }
+
     function renderStreamingJob(node, output, completionId) {
       const body = node.querySelector(".message-body");
       body.textContent = "";
@@ -4964,6 +5203,16 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         body.appendChild(meta);
         setStatus("working", "Streaming");
         scrollChatToLatest();
+        return;
+      }
+      if (state.status === "reconnecting") {
+        if (state.output) renderStreamingJob(node, state.output, state.completionId);
+        const body = node.querySelector(".message-body");
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "Connection changed · restoring this answer from its saved checkpoint";
+        body.appendChild(meta);
+        setStatus("working", "Reconnecting");
         return;
       }
       if (state.output) {
@@ -6116,9 +6365,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         const response = await fetch("/api/network");
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || "network unavailable");
-        readyNodeCount = payload.online_count;
+        const capabilities=payload.capability_availability;
+        readyNodeCount = capabilities?.chat?.nodes ?? null;
+        const availabilityEl=document.getElementById("composer-availability");
+        availabilityEl.replaceChildren();
+        for (const [key,label] of [["chat","Chat"],["image","Images"],["video","Video"],["image_to_video","Image to video"]]) {
+          const item=capabilities?.[key];
+          const indicator=document.createElement("span");
+          indicator.dataset.state=item?.state || "unknown";
+          indicator.textContent=label+" "+(item?.state || "status unknown");
+          indicator.title=item ? item.nodes+" contributor(s), "+item.free_slots+" free slot(s)"+(item.duration_seconds?.length?"; verified durations: "+item.duration_seconds.join(", ")+" seconds":"") : "Live contributor status could not be confirmed";
+          availabilityEl.append(indicator);
+        }
         syncNetworkRuntimeStatus(false);
       } catch {
+        document.getElementById("composer-availability").textContent="Contributor status temporarily unavailable";
         readyNodeCount = 0;
         if (isIdleRuntimeStatus()) setStatus("error", "Offline");
       }
@@ -6163,11 +6424,43 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         }),
         ...local.filter((item) => !remoteIds.has(item.conversationId || item.id)),
       ].slice(0, 50);
-      localStorage.setItem(historyKey, JSON.stringify(merged));
-      if (!activeHistoryId && merged.length) {
-        activeHistoryId = merged[0].conversationId || merged[0].id;
+      const retained = await retainRestorableHistory(merged);
+      const checkedIds = new Set(merged.map((item) => item.conversationId || item.id));
+      retained.unshift(...readHistory().filter((item) => !checkedIds.has(item.conversationId || item.id)));
+      localStorage.setItem(historyKey, JSON.stringify(retained));
+      if (activeHistoryId && checkedIds.has(activeHistoryId) && !retained.some((item) => (item.conversationId || item.id) === activeHistoryId)) {
+        activeHistoryId = null;
+        localStorage.removeItem(conversationIdKey);
+      }
+      if (!activeHistoryId && retained.length) {
+        activeHistoryId = retained[0].conversationId || retained[0].id;
         localStorage.setItem(conversationIdKey, activeHistoryId);
       }
+    }
+
+    async function retainRestorableHistory(items) {
+      const retained = [];
+      for (let offset = 0; offset < items.length; offset += 4) {
+        const batch = await Promise.all(items.slice(offset, offset + 4).map(async (item) => {
+          const id = item.conversationId || item.id;
+          if (readCachedConversation(id).length || conversationStreamStates.has(id)) return item;
+          try {
+            const turns = await fetchConversationMessages(id, 1);
+            if (turns.length || readCachedConversation(id).length || conversationStreamStates.has(id)) return item;
+            localStorage.removeItem(conversationCachePrefix + id);
+            return null;
+          } catch (error) {
+            if (error.statusCode === 404) {
+              localStorage.removeItem(conversationCachePrefix + id);
+              return null;
+            }
+            // An outage cannot prove that a conversation is empty.
+            return item;
+          }
+        }));
+        retained.push(...batch.filter(Boolean));
+      }
+      return retained;
     }
 
     function readHistory() {
@@ -6223,6 +6516,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             row.classList.add("active");
           }
           main.addEventListener("click", async () => {
+            setMobileHistoryOpen(false);
             await loadHistoryItem(item);
           });
           const menuButton = document.createElement("button");
@@ -6267,10 +6561,21 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       clearConversation();
 
       let turns = [];
+      let historyUnavailable = false;
       try {
         turns = await fetchConversationMessages(conversationId);
-      } catch {
-        turns = [];
+      } catch (error) {
+        if (loadToken !== activeHistoryLoadToken || activeHistoryId !== conversationId) return;
+        if (error.statusCode === 404) {
+          // The server denied this selection. Never restore a cached copy or
+          // reuse this ID for a new message; only remove this browser's entry.
+          localStorage.removeItem(conversationCachePrefix + conversationId);
+          writeHistory(readHistory().filter((entry) => (entry.conversationId || entry.id) !== conversationId));
+          loadingHistoryConversationId = null;
+          newChatEl.click();
+          return;
+        }
+        historyUnavailable = true;
       }
       if (loadToken !== activeHistoryLoadToken || activeHistoryId !== conversationId) return;
       if (!turns.length) {
@@ -6284,8 +6589,17 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           renderStoredTurn(turn);
         }
       } else {
-        addMessage(item.title || "Untitled conversation", "user");
-        addMessage("This conversation was not saved in the backend yet. Shallow tool results and older local-only items can only restore from this browser cache.", "assistant");
+        if (historyUnavailable) {
+          loadingHistoryConversationId = null;
+          setStatus("error", "History temporarily unavailable. Please retry.");
+          return;
+        }
+        if (!conversationStreamStates.has(conversationId)) {
+          localStorage.removeItem(conversationCachePrefix + conversationId);
+          writeHistory(readHistory().filter((entry) => (entry.conversationId || entry.id) !== conversationId));
+          newChatEl.click();
+          return;
+        }
       }
       loadingHistoryConversationId = null;
       syncNetworkRuntimeStatus(true);
@@ -6316,11 +6630,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       setEmptyChatMode(false);
     }
 
-    async function fetchConversationMessages(conversationId) {
-      const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId) + "/messages");
+    async function fetchConversationMessages(conversationId, limit = 80) {
+      const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId) + "/messages?limit=" + limit);
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || "conversation unavailable");
+      if (!response.ok || payload.unavailable === true || !Array.isArray(payload.messages)) {
+        throw Object.assign(new Error(payload.error || "conversation unavailable"), { statusCode: response.status });
       }
       return Array.isArray(payload.messages) ? payload.messages : [];
     }
@@ -6330,7 +6644,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const node = addMessage("", role);
       const body = node.querySelector(".message-body");
       body.textContent = "";
-      if (role === "assistant" && turn.payload?.client_error) {
+      if (role === "assistant" && (turn.payload?.media_job || turn.metadata?.media_job)) {
+        mediaUi.restore(node, turn.payload?.media_job || turn.metadata.media_job, activeHistoryId);
+        return;
+      } else if (role === "assistant" && turn.payload?.client_error) {
         node.className = "message error";
         body.textContent = turn.content || "The request failed. Please retry.";
         appendRetryAction(body, turn.payload.retry_prompt);
@@ -6487,7 +6804,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (!conversationId) return { ok: true, shallow: true };
       const response = await fetch("/api/conversations/" + encodeURIComponent(conversationId), { method: "DELETE" });
       const payload = await response.json().catch(() => ({}));
-      if (response.ok || response.status === 404 || response.status === 503) {
+      if (response.ok || response.status === 404) {
         return { ok: true, ...payload };
       }
       return { ok: false, error: payload.error || "delete failed" };
@@ -6576,8 +6893,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     <p id="message">Checking the runner connection…</p>
     <div class="device" id="device" hidden></div>
     <button id="approve" hidden>Approve this computer</button>
-    <a class="button" id="sign-in" hidden>Sign in with Google</a>
-    <p class="hint" id="auth-hint" hidden>This browser is not signed in. You can safely authenticate here even if MundusX is open in another browser.</p>
+    <a class="button" id="sign-in" target="_blank" rel="noopener" hidden>Sign in</a>
+    <p class="hint" id="auth-hint" hidden>Sign in in the new tab, then return here and reload to approve this computer.</p>
   </main>
   <script>
     const sessionId = ${JSON.stringify(sessionId)};
@@ -6593,7 +6910,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     const approve = document.getElementById("approve");
     const signIn = document.getElementById("sign-in");
     const authHint = document.getElementById("auth-hint");
-    signIn.href = "/api/auth/google/start?return_to=" + encodeURIComponent(location.pathname + location.search);
+    signIn.href = "/";
     let csrfToken = "";
     async function json(url, options) {
       const response = await fetch(url, options);
@@ -6643,7 +6960,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         approve.textContent = "Try again";
         if (String(error.message).includes("Authentication required")) {
           approve.hidden = true;
-          signIn.textContent = "Re-authenticate with Google";
+          signIn.textContent = "Sign in again";
           signIn.hidden = false;
           authHint.hidden = false;
         }
@@ -6657,6 +6974,29 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
 export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
+  const mediaStore = config.mediaStore ?? (config.mediaDirectory
+    ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
+  const fleet = config.mediaFleet ?? (config.mediaAdmission ? null : mediaFleet(config));
+  const planMedia = config.mediaPlanner ?? mediaPlanner(process.env.MUNDUSX_MEDIA_PLANNER_URL);
+  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia);
+  const mediaIntentCache = new Map();
+  async function detectMediaIntent(owner, message) {
+    const key = owner + ':' + String(message);
+    const existing = mediaIntentCache.get(key);
+    if (existing && existing.expires > Date.now()) return existing.intent;
+    const intent = await resolveMediaIntent(message, config.mediaIntentClassifier ?? (async (text, systemPrompt) => {
+      if (!mediaStore) return null;
+      const job = await submitToolPlannerJob(text, config, fetch, systemPrompt);
+      const output = String(job.output ?? '').replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+      return JSON.parse(output);
+    }));
+    if (mediaIntentCache.size >= 512) mediaIntentCache.delete(mediaIntentCache.keys().next().value);
+    mediaIntentCache.set(key, { intent, expires: Date.now() + 60000 });
+    return intent;
+  }
+  const handleOpenAiMediaRequest = createOpenAiMediaHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
+  const handleMediaClientRequest = createMediaClientHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
+  const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config), fleet });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
   const handleHarnessRequest = createHarnessHttpController({
@@ -6666,6 +7006,7 @@ export function createServerApp(config = configFromEnv()) {
     sendJson,
   });
   const handleMcpRequest = createMcpHttpController({
+    mediaService,
     enabled: config.mcpEnabled,
     authStore,
     harnessService,
@@ -6683,9 +7024,12 @@ export function createServerApp(config = configFromEnv()) {
     readJsonBody,
     sendJson,
   });
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (await handleOpenAiMediaRequest({ request, response, url })) return;
+      if (await handleMediaClientRequest({ request, response, url })) return;
+      if (await handleMediaRequest({ request, response, url })) return;
       if (await handleGlobalSkills({ request, response, url })) return;
       const releaseLocation = releaseDownloadLocation(url.pathname);
       if (["GET", "HEAD"].includes(request.method) && releaseLocation) {
@@ -6695,6 +7039,10 @@ export function createServerApp(config = configFromEnv()) {
           "X-Content-Type-Options": "nosniff",
         });
         return response.end();
+      }
+      if (request.method === "GET" && url.pathname === "/video") {
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        return response.end(videoPage());
       }
       if (request.method === "GET" && url.pathname === "/") {
         return sendHtml(response, page(config));
@@ -6715,6 +7063,9 @@ export function createServerApp(config = configFromEnv()) {
       }
       if (request.method === "GET" && url.pathname === "/agent/connect") {
         return sendHtml(response, runnerConnectPage(url, "agent"));
+      }
+      if (request.method === "GET" && url.pathname === "/assets/ehda-logo.png") {
+        return sendPng(response, await readFile(EHDA_LOGO_PATH));
       }
       if (request.method === "GET" && url.pathname === "/assets/mundusx-logo.png") {
         return sendPng(response, await readFile(LOGO_PATH));
@@ -6811,6 +7162,16 @@ export function createServerApp(config = configFromEnv()) {
       if (request.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
         return sendOpenAiJson(response, 204, null);
       }
+      if (url.pathname.startsWith("/v1/")) {
+        const identity = authenticateChatApiKey(request.headers.authorization, config.chatApiKeys);
+        if (!identity) {
+          response.setHeader("WWW-Authenticate", "Bearer");
+          return sendOpenAiJson(response, 401, {
+            error: { message: "A valid API key is required", type: "authentication_error", code: "invalid_api_key" },
+          });
+        }
+        request.mundusxApiKeyId = identity.id;
+      }
       if (request.method === "GET" && url.pathname === "/v1/models") {
         return sendOpenAiJson(response, 200, openAiModelsResponse());
       }
@@ -6822,6 +7183,7 @@ export function createServerApp(config = configFromEnv()) {
           headers: {
             "Content-Type": "application/json",
             ...(resumeToken ? { "X-MundusX-Resume-Token": resumeToken } : {}),
+            ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
           },
           body: "{}",
         });
@@ -6837,11 +7199,21 @@ export function createServerApp(config = configFromEnv()) {
         return sendOpenAiJson(response, 200, result);
       }
       if (request.method === "GET" && url.pathname === "/api/network") {
-        const result = await fetchNetworkSummary(config);
-        return sendJson(response, 200, result);
+        const [result,capabilities] = await Promise.all([fetchNetworkSummary(config),
+          fleet ? liveCapabilityAvailability(fleet,mediaStore).catch(()=>null) : Promise.resolve(null)]);
+        response.setHeader("Cache-Control", "no-store");
+        return sendJson(response, 200, {...result,capability_availability:capabilities});
+      }
+      if (request.method === "GET" && url.pathname === "/v1/usage/tokens") {
+        const result=await controlPlaneFetch(fetch,config,"/v1/usage/tokens");
+        response.setHeader("Cache-Control","no-store");
+        return sendJson(response,200,result);
       }
       if (request.method === "GET" && url.pathname === "/api/auth/providers") {
         return sendJson(response, 200, authStore.providers());
+      }
+      if (request.method === "POST" && url.pathname === "/api/auth/hard-user/login") {
+        return sendJson(response, 200, await authStore.loginHardUser(request, response, await readJsonBody(request)));
       }
       if (request.method === "GET" && url.pathname === "/api/auth/session") {
         const session = await authStore.session(request);
@@ -6965,14 +7337,63 @@ export function createServerApp(config = configFromEnv()) {
         const conversationId = decodeURIComponent(url.pathname.slice("/api/conversations/".length));
         if (request.mundusxSession) await authStore.authorizeConversation(request.mundusxSession.id, conversationId);
         const result = await deleteChatConversation(conversationId, config, fetch);
-        if (request.mundusxSession) await authStore.removeChatConversation(request.mundusxSession.id, conversationId);
-        return sendJson(response, 200, result);
+        const historyDeleted = request.mundusxSession
+          ? await authStore.removeChatConversation(request.mundusxSession.id, conversationId)
+          : false;
+        // Deleting a project conversation removes only its chat records. This
+        // route has no project identifier and never invokes project deletion,
+        // so the user's local project folder remains intact.
+        return sendJson(response, 200, {
+          ...result,
+          deleted: result.deleted === true || historyDeleted,
+          history_deleted: historyDeleted,
+          project_deleted: false,
+          credits_affected: false,
+        });
       }
       if (request.method === "PATCH" && url.pathname.startsWith("/api/conversations/")) {
         if (!request.mundusxSession) throw httpError(401, "Sign in is required");
         const conversationId = decodeURIComponent(url.pathname.slice("/api/conversations/".length));
         const body = await readJsonBody(request);
         return sendJson(response, 200, await authStore.updateChatConversation(request.mundusxSession.id, conversationId, body));
+      }
+      if (url.pathname === '/api/media/reference' && request.method === 'POST') {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, 'Sign in to upload a reference');
+        authStore.requireCsrf(request, session);
+        const chunks = []; let total = 0;
+        for await (const chunk of request) { total += chunk.length; if (total > 33554432) throw httpError(413, 'Reference image too large'); chunks.push(chunk); }
+        return sendJson(response, 201, { artifact_id: await saveReference(mediaStore, session.id, Buffer.concat(chunks)) });
+      }
+      if (url.pathname === '/api/media/intent' && request.method === 'POST') {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, 'Sign in to request media');
+        authStore.requireCsrf(request, session);
+        const body = await readJsonBody(request);
+        return sendJson(response, 200, { intent: await detectMediaIntent(session.id, body.message) });
+      }
+      if (url.pathname === "/api/media/chat" || /^\/api\/media\/chat\/jobs\/[0-9a-f-]{36}(?:\/result)?$/.test(url.pathname)) {
+        const session = request.mundusxSession ?? await authStore.session(request);
+        if (!session) throw httpError(401, "Sign in to generate media");
+        if (request.method === "POST") authStore.requireCsrf(request, session);
+        response.setHeader("Cache-Control", "private, no-store");
+        if (url.pathname === "/api/media/chat" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const intent = await detectMediaIntent(session.id, body.message);
+          if (!intent || intent.error) throw httpError(400, intent?.error || "Ask to create an image or video");
+          if (!body.conversationId) throw httpError(400, "conversationId is required");
+          await authStore.authorizeConversation(session.id, body.conversationId, true, {title:body.message});
+          const job = await mediaService.submit(session.id, {...intent,input_artifact_id:body.input_artifact_id,idempotency_key:body.idempotency_key});
+          // A queued job must remain recoverable even if history persistence is temporarily unavailable.
+          let historySaved = true;
+          try { await persistMediaChatTurn(mediaStore,session.id,body.conversationId,job,intent); }
+          catch (error) { if (error.statusCode === 409) throw error; historySaved = false; }
+          return sendJson(response,202,{...job,history_saved:historySaved});
+        }
+        const match = url.pathname.match(/^\/api\/media\/chat\/jobs\/([0-9a-f-]{36})(\/result)?$/);
+        if (match && request.method === "GET" && !match[2]) return sendJson(response,200,await mediaService.status(session.id,match[1]));
+        if (match && request.method === "POST" && match[2]) return sendJson(response,200,await mediaService.result(session.id,match[1]));
+        throw httpError(405,"Method not allowed");
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {
         const body = await readJsonBody(request);
@@ -7004,10 +7425,21 @@ export function createServerApp(config = configFromEnv()) {
       }
       return sendJson(response, 404, { error: "not found" });
     } catch (error) {
+      if (response.headersSent) { response.destroy(); return; }
       const status = error.statusCode ?? 500;
       return sendJson(response, status, { error: error.message ?? "request failed" });
     }
   });
+  let mediaCleanup;
+  server.once("listening", () => {
+    if (!mediaStore) return;
+    const sweep = () => void mediaStore.cleanup().catch(() => console.error("Media cleanup failed; it will retry in 60 seconds"));
+    sweep();
+    mediaCleanup = setInterval(sweep, 60_000);
+    mediaCleanup.unref();
+  });
+  server.once("close", () => clearInterval(mediaCleanup));
+  return server;
 }
 
 export async function submitChatTurn(body, config = configFromEnv(), fetchImpl = fetch) {
@@ -7572,6 +8004,34 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     })
     : Promise.resolve(null);
 
+  const research = body?.internalAgentTurn !== true && isToolModeEnabled(body)
+    ? webResearchRequest(message, historyMessages) : null;
+  if (research) {
+    const completionId = normalizeOpenAiCompletionId(body?.requestId);
+    startOpenAiStream(response, "web-research", completionId);
+    response.flushHeaders?.();
+    response.write(": researching\n\n");
+    const heartbeat = setInterval(() => {
+      if (!response.destroyed) response.write(": researching\n\n");
+    }, 10_000);
+    try {
+      const result = await fetchWebResearch(research, config, fetchImpl);
+      const content = redactSensitiveText(result.content);
+      const completion = {
+        id: completionId, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: PUBLIC_MODEL_ID,
+        choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+        mundusx: { tool: "web_research", sources: result.sources, error: result.error },
+      };
+      for (const frame of openAiSseFrames(completion, { buffered: false })) response.write(frame);
+      response.end("data: [DONE]\n\n");
+      await userPersistence;
+      await recordAssistantTurn(conversationId, config, fetchImpl, { status: "completed", output: content, tool: "web_research" });
+      return { content, completionId, finishReason: "stop", tool: "web_research" };
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
   // Keep small, deterministic lookups on the fast Chat path. This does not
   // invoke the planner, discovery, Hermes, or a recoverable background job.
   // It simply answers a focused weather question from wttr.in and emits the
@@ -7603,7 +8063,8 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
         await recordAssistantTurn(conversationId, config, fetchImpl, weatherResult);
         return { content, completionId, finishReason: "stop", tool: "weather" };
       } catch (error) {
-        console.warn(`[weather] direct lookup failed; falling back to live Chat: ${error.message}`);
+        console.warn(`[weather] direct lookup failed: ${error.message}`);
+        throw httpError(503, `Could not retrieve verified weather for ${weatherLocation}. Please try again shortly.`);
       }
     }
   }
@@ -7615,7 +8076,12 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
       : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
-  const inferredMaxTokens = inferMaxTokens(message, body?.maxTokens);
+  // The agnostic route can select a reasoning model after this request is
+  // submitted. Its generation budget includes hidden reasoning, even when
+  // the requested visible answer is short. Preserve explicit caller limits.
+  const inferredMaxTokens = positiveInteger(body?.maxTokens, 0) > 0
+    ? inferMaxTokens(message, body.maxTokens)
+    : Math.max(1024, inferMaxTokens(message));
   const initialMaxTokens = codeProjectContinuation
     ? STREAMING_CONTINUATION_MAX_TOKENS
     : codeGenerationResponse
@@ -7895,9 +8361,21 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   };
   const controller = new AbortController();
   let reader = null;
+  let clientDisconnected = false;
+  const writeResponse = (value) => {
+    if (clientDisconnected || response.destroyed || response.writableEnded) return false;
+    return response.write(value);
+  };
+  const endResponse = (value) => {
+    if (clientDisconnected || response.destroyed || response.writableEnded) return false;
+    response.end(value);
+    return true;
+  };
   const disconnect = () => {
-    controller.abort();
-    reader?.cancel().catch(() => {});
+    // Keep generation alive after a browser or edge disconnect. The durable
+    // completion checkpoint lets the browser reattach without regenerating
+    // the user's request or losing already-produced code.
+    clientDisconnected = true;
   };
   response.once?.("close", disconnect);
   let content = "";
@@ -7907,6 +8385,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let requestBody = { ...body, stream: true };
   let stalledContinuationAttempts = 0;
   let documentationRepairs = 0;
+  let transientStreamRecoveries = 0;
 
   try {
     for (let attempt = 0; ; attempt += 1) {
@@ -7941,10 +8420,14 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       let sawDone = false;
       const streamContinuationProgress = (force = false) => {
         if (attempt === 0 || (!force && attemptContent.length < 128)) return;
-        const candidate = normalizeContinuationBoundary(
-          content,
-          uniqueContinuationSuffix(content, attemptContent),
-        );
+        // Only stream a continuation after the model has repeated the exact
+        // tail anchor supplied in buildContinuationRequestBody.  Heuristic
+        // overlap can legitimately change as more tokens arrive (for example,
+        // when a model restarts a controller and reaches the true boundary
+        // later).  Streaming that provisional suffix made already-visible
+        // text impossible to reconcile at the end of the segment.
+        const candidate = anchoredContinuationSuffix(content, attemptContent);
+        if (candidate === null) return;
         if (!candidate || !candidate.startsWith(streamedContinuationContent)) return;
         const delta = candidate.slice(streamedContinuationContent.length);
         if (!delta) return;
@@ -7963,13 +8446,13 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           return;
         }
         if (!data) {
-          response.write(`${eventText}\n\n`);
+          writeResponse(`${eventText}\n\n`);
           return;
         }
         try {
           const chunk = JSON.parse(data);
           if (chunk?.error) {
-            response.write(`${eventText}\n\n`);
+            writeResponse(`${eventText}\n\n`);
             return;
           }
           completionId ||= String(chunk?.id ?? "").trim() || null;
@@ -8000,7 +8483,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           // made the browser finalize an answer that still looked incomplete.
           if (choice?.finish_reason) {
             if (delta) {
-              response.write(`data: ${JSON.stringify({
+              writeResponse(`data: ${JSON.stringify({
                 ...chunk,
                 choices: [{ ...choice, finish_reason: null }],
               })}\n\n`);
@@ -8010,35 +8493,87 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         } catch {
           // Relay unknown upstream events as-is.
         }
-        response.write(`${eventText}\n\n`);
+        writeResponse(`${eventText}\n\n`);
       };
 
-      while (!sawDone) {
-        const { value, done } = await reader.read();
-        if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
-        if (done) break;
-        parseBuffer += decoder.decode(value, { stream: true });
-        const events = parseBuffer.split(/\r?\n\r?\n/);
-        parseBuffer = events.pop() ?? "";
-        events.forEach(consumeEvent);
-        hooks.onProgress?.({ content, completionId, finishReason });
+      let streamError = null;
+      try {
+        while (!sawDone) {
+          const { value, done } = await reader.read();
+          if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+          if (done) break;
+          parseBuffer += decoder.decode(value, { stream: true });
+          const events = parseBuffer.split(/\r?\n\r?\n/);
+          parseBuffer = events.pop() ?? "";
+          events.forEach(consumeEvent);
+          hooks.onProgress?.({ content, completionId, finishReason });
+        }
+        parseBuffer += decoder.decode();
+        if (!sawDone && parseBuffer.trim()) consumeEvent(parseBuffer);
+        if (!sawDone) streamError = new Error("control-plane stream ended before [DONE]");
+      } catch (error) {
+        streamError = error;
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock?.();
+        reader = null;
       }
-      parseBuffer += decoder.decode();
-      if (!sawDone && parseBuffer.trim()) consumeEvent(parseBuffer);
-      await reader.cancel().catch(() => {});
-      reader.releaseLock?.();
-      reader = null;
-      if (!sawDone) throw new Error("control-plane stream ended before [DONE]");
+
+      if (streamError) {
+        if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+
+        // A later continuation may already have produced verified text before
+        // its socket disappeared. Commit only text behind the explicit anchor;
+        // an unanchored restart is discarded and regenerated from the durable
+        // accumulated prefix.
+        if (attempt > 0 && attemptContent) {
+          const recoveredSuffix = anchoredContinuationSuffix(content, attemptContent);
+          if (recoveredSuffix !== null) {
+            if (
+              streamedContinuationContent &&
+              !recoveredSuffix.startsWith(streamedContinuationContent)
+            ) {
+              throw new Error("interrupted continuation changed after its streamed prefix");
+            }
+            content += recoveredSuffix;
+            writeContinuationContent(
+              response,
+              recoveredSuffix.slice(streamedContinuationContent.length),
+              completionId,
+            );
+          }
+        }
+
+        const canRecover =
+          isRecoverableUpstreamStreamError(streamError) &&
+          transientStreamRecoveries < 3 &&
+          attempt + 1 < maxSegments &&
+          content.length < maxOutputCharacters;
+        if (!canRecover) throw streamError;
+
+        transientStreamRecoveries += 1;
+        finishReason = null;
+        console.warn("[openai-stream-recovery]", JSON.stringify({
+          completionId,
+          attempt: transientStreamRecoveries,
+          cause: streamError.cause?.code ?? streamError.code ?? streamError.message,
+          preservedCharacters: content.length,
+        }));
+        writeResponse(": recovering interrupted upstream stream\n\n");
+        hooks.onProgress?.({ content, completionId, finishReason });
+        if (content) {
+          requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
+        }
+        continue;
+      }
 
       // Remove a redundant Markdown fence before overlap detection.  Doing
       // this afterwards hid the useful overlap when a continuation restarted
       // with ```js followed by an earlier line from the same code block.
-      const boundarySegment = attempt === 0
-        ? attemptContent
-        : normalizeContinuationBoundary(content, attemptContent);
+      const boundarySegment = attempt === 0 ? attemptContent : null;
       const joinedSegment = attempt === 0
         ? boundarySegment
-        : uniqueContinuationSuffix(content, boundarySegment);
+        : finalContinuationSuffix(content, attemptContent);
       if (attempt > 0 && joinedSegment) {
         streamContinuationProgress(true);
         if (
@@ -8065,7 +8600,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         const gaps = projectCompletionGaps(content);
         if (gaps.length && segmentMadeProgress && !reachedContinuationLimit && documentationRepairs < 2) {
           documentationRepairs += 1;
-          response.write(": completing project documentation\n\n");
+          writeResponse(": completing project documentation\n\n");
           requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
           requestBody.messages.at(-1).content += `\nComplete these missing deliverables only:\n${gaps.join("\n")}\nIf the assistant tail is inside a Markdown file fence, finish and close it before the Delivery summary. Do not add new features or repeat earlier files.`;
           continue;
@@ -8083,7 +8618,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         stalledContinuationAttempts < 2
       ) {
         stalledContinuationAttempts += 1;
-        response.write(": retrying stalled project continuation\n\n");
+        writeResponse(": retrying stalled project continuation\n\n");
         requestBody = buildContinuationRequestBody(
           requestBody,
           body.messages,
@@ -8107,7 +8642,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
       if (attemptFinishReason !== "length" || !segmentMadeProgress || reachedContinuationLimit) {
         if (attemptFinishReason === "length") {
-          response.write(`data: ${JSON.stringify({
+          writeResponse(`data: ${JSON.stringify({
             id: completionId,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
@@ -8115,7 +8650,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             choices: [{ index: 0, delta: {}, finish_reason: "length" }],
           })}\n\n`);
         } else {
-          response.write(`data: ${JSON.stringify({
+          writeResponse(`data: ${JSON.stringify({
             id: completionId,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
@@ -8123,15 +8658,15 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             choices: [{ index: 0, delta: {}, finish_reason: attemptFinishReason || "stop" }],
           })}\n\n`);
         }
-        response.write("data: [DONE]\n\n");
+        writeResponse("data: [DONE]\n\n");
         break;
       }
 
       stalledContinuationAttempts = 0;
-      response.write(": continuing project response\n\n");
+      writeResponse(": continuing project response\n\n");
       requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
     }
-    response.end();
+    endResponse();
     await hooks.onComplete?.({ content, completionId, finishReason });
     return { content, completionId, finishReason };
   } catch (error) {
@@ -8142,7 +8677,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
       const payload = { error: { message, type: "mundusx_stream_error" } };
-      response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
+      endResponse(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
     }
     return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
   } finally {
@@ -8223,6 +8758,38 @@ function uniqueContinuationSuffix(existingContent, candidateContent) {
   return candidate;
 }
 
+function isRecoverableUpstreamStreamError(error) {
+  const code = String(error?.cause?.code ?? error?.code ?? "").toUpperCase();
+  if (["UND_ERR_SOCKET", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(code)) return true;
+  return /terminated|socket|premature close|stream ended before \[done\]/i.test(
+    String(error?.message ?? error ?? ""),
+  );
+}
+
+function anchoredContinuationSuffix(existingContent, candidateContent) {
+  const existing = String(existingContent ?? "");
+  const candidate = String(candidateContent ?? "");
+  if (!existing || !candidate) return null;
+  const anchor = existing.slice(-Math.min(256, existing.length));
+  // Very early truncations can leave less than 24 characters. The anchor is
+  // still explicit in the continuation prompt, so eight exact characters are
+  // enough to unlock streaming without falling back to a heuristic overlap.
+  if (anchor.length < 8) return null;
+  const anchorIndex = candidate.indexOf(anchor);
+  if (anchorIndex < 0) return null;
+  return normalizeContinuationBoundary(
+    existing,
+    candidate.slice(anchorIndex + anchor.length),
+  );
+}
+
+function finalContinuationSuffix(existingContent, candidateContent) {
+  const anchored = anchoredContinuationSuffix(existingContent, candidateContent);
+  if (anchored !== null) return anchored;
+  const boundary = normalizeContinuationBoundary(existingContent, candidateContent);
+  return uniqueContinuationSuffix(existingContent, boundary);
+}
+
 function normalizeContinuationBoundary(existingContent, candidateContent) {
   const existing = String(existingContent ?? "");
   const candidate = String(candidateContent ?? "");
@@ -8252,7 +8819,9 @@ function normalizeContinuationBoundary(existingContent, candidateContent) {
 }
 
 function writeContinuationContent(response, content, completionId) {
+  if (response.destroyed || response.writableEnded) return;
   for (let offset = 0; offset < content.length; offset += 4096) {
+    if (response.destroyed || response.writableEnded) return;
     response.write(`data: ${JSON.stringify({
       id: completionId,
       object: "chat.completion.chunk",
@@ -8526,6 +9095,14 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
   const toolMode = isToolModeEnabled(body);
   const toolMessage = message;
   const internalAgentTurn = body?.internalAgentTurn === true;
+  const research = !internalAgentTurn && toolMode ? webResearchRequest(message, body?.historyMessages) : null;
+  if (research) {
+    const result = await fetchWebResearch(research, config, fetchImpl);
+    return recordAssistantTurn(conversationId, config, fetchImpl, {
+      status: "completed", output: result.content, tool: "web_research", sources: result.sources,
+      research_error: result.error, finish_reason: "stop",
+    });
+  }
   const compoundToolPrompt = !internalAgentTurn && isMultiIntentPlanningCandidate(toolMessage);
 
   if (compoundToolPrompt) {
@@ -8611,9 +9188,6 @@ export async function submitChatJob(body, config = configFromEnv(), fetchImpl = 
       if (generalJob) {
         return recordAssistantTurn(conversationId, config, fetchImpl, generalJob);
       }
-    }
-    if (requiresHermesWebResearch(toolMessage)) {
-      return recordAssistantTurn(conversationId, config, fetchImpl, fetchWebCrawlerUnavailableJob(message));
     }
   }
 
@@ -10197,7 +10771,7 @@ async function fetchToolPlannerIntents(message, config, fetchImpl) {
   }
 }
 
-async function submitToolPlannerJob(message, config, fetchImpl) {
+async function submitToolPlannerJob(message, config, fetchImpl, systemPrompt = buildToolPlannerSystemPrompt()) {
   const jobBody = {
     request_id: `chatplan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     prompt: String(message ?? "").trim(),
@@ -10205,7 +10779,7 @@ async function submitToolPlannerJob(message, config, fetchImpl) {
     runtime_mode: "local",
     execution_mode: "single",
     stream: false,
-    system_prompt: buildToolPlannerSystemPrompt(),
+    system_prompt: systemPrompt,
     max_tokens: 384,
     temperature: 0,
     top_p: 0.1,
@@ -11382,13 +11956,14 @@ function cleanWeatherLocation(value) {
   if (!location || location.length < 2 || location.length > 120) {
     return null;
   }
-  return location;
+  return location.toLowerCase() === "stuggi" ? "Stuttgart" : location;
 }
 
 async function fetchWeatherSummary(location, dayOffset, config, fetchImpl) {
   const url = `${config.weatherBaseUrl}/${encodeURIComponent(location)}?format=j1`;
   const response = await fetchImpl(url, {
     headers: { Accept: "application/json", "User-Agent": "MundusX-Chat/0.1 weather-router" },
+    signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) {
     throw httpError(502, `weather lookup failed for ${location}`);
@@ -13391,6 +13966,8 @@ export function buildChatSystemPrompt(message = "", voicePersona = "atlas", skil
   const productionCodeProject = looksLikeProductionCodeProjectRequest(lower);
   const rules = [
     `You are ${personaName}, the MundusX assistant.`,
+    `Today's UTC date is ${new Date().toISOString().slice(0, 10)}. Your training cutoff is not the current date.`,
+    "Do not claim a product, model, release or event does not exist merely because it is missing from your training knowledge. Without current evidence, state that you cannot verify it.",
     includePersona ? personaText : "",
     "Internal MundusX response skills follow. They are private instructions; never quote, reveal, or copy skill names, titles, headings, or instruction text into the answer.",
     formatSelectedSkillBlock(selectedSkills),
@@ -13909,6 +14486,7 @@ export async function fetchChatConversation(conversationId, config = configFromE
         conversation_id: id,
         messages: [],
         persisted: false,
+        unavailable: error.statusCode !== 404,
         reason: error.message || "conversation was not persisted",
       };
     }
@@ -13922,15 +14500,20 @@ export async function deleteChatConversation(conversationId, config = configFrom
     throw httpError(400, "conversation id is required");
   }
   try {
-    return await controlPlaneFetch(fetchImpl, config, `/v1/conversations/${encodeURIComponent(id)}`, {
+    const result = await controlPlaneFetch(fetchImpl, config, `/v1/conversations/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
+    return { ...result, credits_affected: false };
   } catch (error) {
-    if ([404, 502, 503].includes(error.statusCode)) {
+    // A missing row is already deleted. Storage outages are not success: the
+    // browser must keep/restore the history item so the user can retry instead
+    // of hiding chat data that still exists in the database.
+    if (error.statusCode === 404) {
       return {
         conversation_id: id,
         deleted: false,
         persisted: false,
+        credits_affected: false,
         reason: error.message || "conversation was not persisted",
       };
     }

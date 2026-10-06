@@ -63,6 +63,41 @@ test("complete documentation does not cause an extra model request", async () =>
   assert.equal(result.finishReason, "stop");
 });
 
+test("plain and bold delivery summaries complete the response without needless continuation", async () => {
+  const body = "The Student Enrollment API includes the controller, service, repository and entity. " +
+    "Follow README.md and run mvn spring-boot:run, then check Swagger UI. " +
+    "The generated code has not been executed here; H2 storage is in memory and authentication is not included.";
+  for (const label of ["Delivery summary:", "**Delivery summary:**", "**Delivery summary**:", "## Delivery summary\n"]) {
+    const complete = readme + "\n\n" + label + " " + body;
+    assert.deepEqual(projectCompletionGaps(complete), []);
+    const { result, requests, writes } = await runReply(prompt, [complete]);
+    assert.equal(requests.length, 1);
+    assert.equal(result.finishReason, "stop");
+    assert.doesNotMatch(writes, /"finish_reason":"length"/);
+  }
+});
+
+test("summary labels still need content outside and after the README file", () => {
+  assert.equal(projectCompletionGaps(readme + "\n\nDelivery summary:").length, 1);
+  assert.equal(projectCompletionGaps("Delivery summary: Delivered the API.\n\n" + readme).length, 1);
+  assert.equal(projectCompletionGaps(readme.replace(/```$/, "Delivery summary: Delivered the API.\n```" )).length, 1);
+});
+
+test("wrap-ups accept arbitrary headings, plain prose and bullets", async () => {
+  for (const ending of [
+    "The API is ready to review. Run it using README.md. Tests have not been executed here.",
+    "## What you have\nThe API includes enrollment endpoints. H2 data resets on restart.",
+    "- Run mvn spring-boot:run.\n- Open Swagger UI to check the endpoints.\n- No authentication is included.",
+    "**Verification and limitations**\nThis source has not been compiled here.",
+  ]) {
+    const complete = readme + "\n\n" + ending;
+    const { result, requests } = await runReply(prompt, [complete]);
+    assert.deepEqual(projectCompletionGaps(complete), []);
+    assert.equal(requests.length, 1);
+    assert.equal(result.finishReason, "stop");
+  }
+});
+
 test("wrap-up recovery finishes an open README fence before the summary", async () => {
   const first = readme.replace(/```$/, "");
   const { result } = await runReply(prompt, [first, "\n```\n" + summary]);
@@ -77,7 +112,7 @@ test("code-only requests do not acquire a closing summary", async () => {
 });
 
 test("documentation recovery stops after two attempts and reports incomplete", async () => {
-  const { result, requests, writes } = await runReply(prompt, [readme, "\nMore details.", "\nOther details."]);
+  const { result, requests, writes } = await runReply(prompt, [readme, "\n## More details\n", "\n## Other details\n"]);
   assert.equal(requests.length, 3);
   assert.equal(result.finishReason, "length");
   assert.doesNotMatch(writes, /"finish_reason":"stop"/);

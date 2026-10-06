@@ -1,4 +1,5 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import { Pool } from "pg";
 
 const SESSION_COOKIE = "__Host-mx_session";
@@ -152,6 +153,10 @@ export function authConfigFromEnv(env = process.env) {
     githubClientSecret: String(env.MUNDUSX_GITHUB_CLIENT_SECRET ?? "").trim(),
     googleClientId: String(env.MUNDUSX_GOOGLE_CLIENT_ID ?? "").trim(),
     googleClientSecret: String(env.MUNDUSX_GOOGLE_CLIENT_SECRET ?? "").trim(),
+    googleEnabled: !["0", "false", "no"].includes(String(env.MUNDUSX_AUTH_GOOGLE_ENABLED ?? "true").trim().toLowerCase()),
+    hardUserEnabled: ["1", "true", "yes"].includes(String(env.MUNDUSX_AUTH_HARD_USER_ENABLED ?? "false").trim().toLowerCase()),
+    hardUsername: String(env.MUNDUSX_AUTH_HARD_USERNAME ?? "").trim(),
+    hardPassword: String(env.MUNDUSX_AUTH_HARD_PASSWORD ?? ""),
     encryptionKey: encryptionKey(String(env.MUNDUSX_AUTH_ENCRYPTION_KEY ?? "").trim()),
     resendApiKey: String(env.RESEND_API_KEY ?? "").trim(),
     emailFrom: String(env.MUNDUSX_AUTH_EMAIL_FROM ?? "").trim(),
@@ -163,6 +168,10 @@ export class PostgresAuthStore {
     this.config = config;
     this.fetch = fetchImpl;
     this.pool = pool ?? (config.databaseUrl ? new Pool({ connectionString: config.databaseUrl, max: 10, idleTimeoutMillis: 30_000 }) : null);
+    this.hardUserReady = Boolean(config.hardUserEnabled && config.hardUsername?.length && config.hardUsername.length <= 128 &&
+      config.hardPassword?.length >= 12 && config.hardPassword.length <= 1024);
+    this.hardCredential = this.hardUserReady
+      ? scryptSync(config.hardPassword, `${config.publicOrigin}\0${config.hardUsername}`, 32) : null;
   }
 
   ensureReady() {
@@ -172,7 +181,8 @@ export class PostgresAuthStore {
   providers() {
     return {
       github: Boolean(this.config.githubClientId && this.config.githubClientSecret && this.config.encryptionKey),
-      google: Boolean(this.config.googleClientId && this.config.googleClientSecret),
+      google: this.config.googleEnabled !== false && Boolean(this.config.googleClientId && this.config.googleClientSecret),
+      hard_user: this.hardUserReady,
       email: Boolean(this.config.resendApiKey && this.config.emailFrom),
     };
   }
@@ -182,13 +192,53 @@ export class PostgresAuthStore {
     const raw = parseCookies(request.headers.cookie)[SESSION_COOKIE];
     if (!raw) return null;
     const result = await this.pool.query(`
-      select s.session_hash, s.csrf_hash, u.id, u.email, u.display_name, u.role,
+      select s.session_hash, s.csrf_hash, s.provider, u.id, u.email, u.display_name, u.role,
         exists(select 1 from public.github_user_tokens gt where gt.user_id = u.id) as github_connected
       from public.user_sessions s
       join public.users u on u.id = s.user_id
       where s.session_hash = $1 and s.revoked_at is null and s.expires_at > now() and u.status = 'active'
       group by s.session_hash, s.csrf_hash, u.id, u.email, u.display_name, u.role`, [digest(raw)]);
-    return result.rows[0] ?? null;
+    const session = result.rows[0] ?? null;
+    if (session?.provider?.startsWith("hard_user:") &&
+        (!this.hardUserReady || session.provider !== `hard_user:${this.hardCredential.toString("hex")}`)) return null;
+    return session;
+  }
+
+  async loginHardUser(request, response, input = {}) {
+    if (!this.hardUserReady) throw Object.assign(new Error("Username/password login is unavailable"), { statusCode: 503 });
+    if (request.headers.origin !== this.config.publicOrigin) throw Object.assign(new Error("Invalid login origin"), { statusCode: 403 });
+    this.ensureReady();
+    // One configured account: use a durable, global limit, not a spoofable forwarded IP.
+    const rate = await this.pool.query(`insert into public.hard_user_login_limits(bucket,started_at,attempts)
+      values('login',now(),1) on conflict(bucket) do update set
+      attempts=case when hard_user_login_limits.started_at < now()-interval '5 minutes' then 1 else hard_user_login_limits.attempts+1 end,
+      started_at=case when hard_user_login_limits.started_at < now()-interval '5 minutes' then now() else hard_user_login_limits.started_at end
+      returning attempts`);
+    if (rate.rows[0].attempts > 20) throw Object.assign(new Error("Too many sign-in attempts; try again in five minutes"), { statusCode: 429 });
+    const username = typeof input.username === "string" ? input.username.trim() : "";
+    const password = typeof input.password === "string" ? input.password : "";
+    if (username.length > 128 || password.length > 1024) throw Object.assign(new Error("Invalid username or password"), { statusCode: 401 });
+    const candidate = await promisify(scrypt)(password, `${this.config.publicOrigin}\0${this.config.hardUsername}`, 32);
+    const passwordMatches = timingSafeEqual(candidate, this.hardCredential);
+    const usernameMatches = timingSafeEqual(Buffer.from(digest(username), "hex"), Buffer.from(digest(this.config.hardUsername), "hex"));
+    if (!passwordMatches || !usernameMatches) throw Object.assign(new Error("Invalid username or password"), { statusCode: 401 });
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      // Stable local identity; never attach this credential to an existing Google email.
+      const email = `hard-user-${digest(username)}@local.invalid`;
+      const result = await client.query(`insert into public.users(email,display_name,role,last_login_at)
+        values($1,$2,'user',now()) on conflict(email) do update set last_login_at=now(),updated_at=now()
+        returning id,status`, [email, username]);
+      if (result.rows[0].status !== "active") throw Object.assign(new Error("Account is unavailable"), { statusCode: 403 });
+      await this.createSession(response, result.rows[0].id, `hard_user:${this.hardCredential.toString("hex")}`, client);
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      response.removeHeader?.("Set-Cookie");
+      await client.query("rollback");
+      throw error;
+    } finally { client.release(); }
   }
 
   async googleAdminIdentity(request) {
@@ -1349,6 +1399,7 @@ export class PostgresAuthStore {
   }
 
   async finishGoogle(query, response) {
+    if (!this.providers().google) throw Object.assign(new Error("Google login is unavailable"), { statusCode: 503 });
     this.ensureReady();
     const state = String(query.get("state") || "");
     const code = String(query.get("code") || "");

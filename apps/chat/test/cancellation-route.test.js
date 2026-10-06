@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { configFromEnv, createServerApp } from "../src/main.js";
 
-test("public completion cancellation forwards only the private resume token", async (t) => {
+test("authenticated completion cancellation forwards service credentials, not client credentials", async (t) => {
   const nativeFetch = globalThis.fetch;
   const upstreamCalls = [];
   globalThis.fetch = async (url, init) => {
@@ -16,7 +16,11 @@ test("public completion cancellation forwards only the private resume token", as
   t.after(() => { globalThis.fetch = nativeFetch; });
 
   const server = createServerApp({
-    ...configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://gateway.test" }),
+    ...configFromEnv({
+      MUNDUSX_CONTROL_PLANE_URL: "https://gateway.test",
+      MUNDUSX_OPERATOR_TOKEN: "internal-service-token",
+      MUNDUSX_CHAT_API_KEYS: JSON.stringify([{ id: "client", key: "public-client-test-token-0123456789" }]),
+    }),
     authStore: {},
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -30,7 +34,7 @@ test("public completion cancellation forwards only the private resume token", as
     {
       method: "POST",
       headers: {
-        Authorization: "Bearer public-client-token",
+        Authorization: "Bearer public-client-test-token-0123456789",
         "X-MundusX-Resume-Token": "resume-private",
       },
     },
@@ -41,5 +45,5 @@ test("public completion cancellation forwards only the private resume token", as
   assert.equal(upstreamCalls[0].url, "https://gateway.test/v1/chat/completions/chatcmpl-stop/cancel");
   const headers = new Headers(upstreamCalls[0].init.headers);
   assert.equal(headers.get("X-MundusX-Resume-Token"), "resume-private");
-  assert.equal(headers.get("Authorization"), null);
+  assert.equal(headers.get("Authorization"), "Bearer internal-service-token");
 });

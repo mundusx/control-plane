@@ -11,8 +11,10 @@ function browser({ id = "selected", history = [{ conversationId: "selected" }], 
   const storage = new Map();
   const context = vm.createContext({
     activeHistoryId: id, activeHistoryLoadToken: 0, loadingHistoryConversationId: null,
-    conversationIdKey: "user-scoped-key", localStorage: { setItem: (key, value) => storage.set(key, value) },
+    conversationIdKey: "user-scoped-key", localStorage: { setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
     readHistory: () => history, readCachedConversation: () => cached,
+    conversationCachePrefix: "cache:", writeHistory: (items) => { history = items; },
+    newChatEl: { click: () => { context.activeHistoryId = "fresh"; context.activeHistoryLoadToken++; storage.set("user-scoped-key", "fresh"); } },
     fetchConversationMessages: fetchMessages, promptEl: { value: "" },
     renderHistory() {}, setStatus() {}, clearConversation() { rendered.length = 0; },
     renderStoredTurn: (turn) => rendered.push(turn.content), addMessage: (text) => rendered.push(text),
@@ -109,4 +111,28 @@ test("switching chats while task recovery fetches does not switch back", async (
   finish({ ok: true });
   assert.equal(await recovering, false);
   assert.equal(context.activeHistoryId, "other");
+});
+
+
+test("a rejected history selection discards its local cache and opens a fresh chat", async () => {
+  const app = browser({ cached: [{ content: "Must not render a rejected conversation" }],
+    fetchMessages: async () => { throw Object.assign(new Error("Conversation is not available to this user"), { statusCode: 404 }); } });
+  app.storage.set("cache:selected", "stale cache");
+  await app.restore();
+  assert.deepEqual(app.rendered, []);
+  assert.equal(app.context.activeHistoryId, "fresh");
+  assert.equal(app.storage.get("user-scoped-key"), "fresh");
+  assert.equal(app.storage.has("cache:selected"), false);
+  assert.equal(app.context.readHistory().length, 0);
+});
+
+test("a late access rejection cannot reset a newly selected conversation", async () => {
+  let reject;
+  const app = browser({ fetchMessages: (id) => id === "selected" ? new Promise((_, no) => { reject = no; }) : Promise.resolve([{ content: "Other discussion" }]) });
+  const restoring = app.restore();
+  await app.context.loadHistoryItem({ conversationId: "other" });
+  reject(Object.assign(new Error("not available"), { statusCode: 404 }));
+  await restoring;
+  assert.equal(app.context.activeHistoryId, "other");
+  assert.deepEqual(app.rendered, ["Other discussion"]);
 });
