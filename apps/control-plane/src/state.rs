@@ -1248,6 +1248,14 @@ impl ControlPlaneState {
             .saturating_add(
                 self.active_local_slot_count_for_node_at(node_id, current_unix_seconds()),
             )
+            .max(self.reported_media_slots(node_id))
+    }
+
+    fn reported_media_slots(&self, node_id: &str) -> usize {
+        usize::from(self.nodes.get(node_id).is_some_and(|node| {
+            node.state == AgentState::Busy
+                && node.worker_health.as_ref().is_some_and(|health| health.runtime_mode == "media")
+        }))
     }
 
     fn prune_expired_local_slot_leases(&mut self, now_seconds: u64) {
@@ -1414,7 +1422,8 @@ impl ControlPlaneState {
             .unwrap_or(1);
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
-            self.active_local_slot_count_for_node_at(node_id, current_unix_seconds());
+            self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
+                .max(self.reported_media_slots(node_id).saturating_sub(network_active));
         let active = network_active.saturating_add(local_active);
         let available = if Self::node_is_schedulable_state(node) && node.policy_allowed {
             total.saturating_sub(active)
@@ -1439,7 +1448,7 @@ impl ControlPlaneState {
         }
 
         let runtime_mode = worker_health.runtime_mode.to_ascii_lowercase();
-        if runtime_mode == "contributed-cluster" {
+        if runtime_mode == "contributed-cluster" || node.backend == Backend::Vllm {
             let mut capacity = usize::from(worker_health.parallel_slots.max(1))
                 .min(worker_health.capabilities.max_parallel_jobs.max(1) as usize);
             if let Some(max_num_seqs) = worker_health.capabilities.max_num_seqs {
@@ -9168,6 +9177,43 @@ mod tests {
     }
 
     #[test]
+    fn vllm_two_requests_use_two_of_sixteen_slots_and_release_independently() {
+        let mut state = ControlPlaneState::default();
+        state.register(vllm_registration("node-vllm"));
+        let mut heartbeat = ready_vllm_heartbeat("node-vllm", "1");
+        heartbeat.worker_health.parallel_slots = 16;
+        heartbeat.worker_health.capabilities.max_parallel_jobs = 16;
+        state.heartbeat(heartbeat.clone(), "1".into());
+        let mut jobs = Vec::new();
+        for index in 0..2 {
+            let mut request = classification_request("hello world");
+            request.request_id = format!("parallel-{index}");
+            request.model = None;
+            state.submit_job(request, "2".into());
+            jobs.push(state.claim_job("node-vllm", "3".into()).job.expect("claim"));
+        }
+        heartbeat.agent_state = AgentState::Busy;
+        state.heartbeat(heartbeat, "4".into());
+        assert_eq!(state.node_slot_occupancy("node-vllm"), (2, 16, 14));
+        let snapshot = state.snapshot("test");
+        assert_eq!(snapshot["active_parallel_slots"], 2);
+        assert_eq!(snapshot["available_parallel_slots"], 14);
+        for (index, job) in jobs.into_iter().enumerate() {
+            state.complete_job(JobCompletion {
+                job_id: job.job_id,
+                node_id: "node-vllm".into(),
+                worker_id: format!("worker-{index}"),
+                backend: Backend::Vllm,
+                status: if index == 0 { JobStatus::Completed } else { JobStatus::Failed },
+                output: if index == 0 { Some("positive".into()) } else { None },
+                error: if index == 0 { None } else { Some("runtime failed".into()) },
+                latency_ms: Some(10),
+            }, "5".into()).expect("completion");
+            assert_eq!(state.node_slot_occupancy("node-vllm"), (1 - index, 16, 15 + index));
+        }
+    }
+
+    #[test]
     fn snapshot_reports_active_and_available_parallel_slots() {
         let mut state = ControlPlaneState::default();
         state.register(vllm_registration("node-vllm"));
@@ -10776,6 +10822,27 @@ mod tests {
         let snapshot = state.snapshot("memory");
         assert_eq!(snapshot["online_count"].as_u64(), Some(0));
         assert_eq!(snapshot["stopped_count"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn media_busy_heartbeat_reserves_slot_until_ready_or_stale() {
+        let mut state = ControlPlaneState::default();
+        state.register(m_series_registration("media-node"));
+        let mut heartbeat = ready_heartbeat("media-node", "1");
+        heartbeat.agent_state = AgentState::Busy;
+        heartbeat.worker_health.runtime_mode = "media".into();
+        heartbeat.worker_health.parallel_slots = 1;
+        heartbeat.worker_health.capabilities.max_parallel_jobs = 1;
+        state.heartbeat(heartbeat.clone(), "1".into());
+        assert_eq!(state.active_assignment_count_for_node("media-node"), 1);
+        assert_eq!(state.node_slot_occupancy("media-node"), (1, 1, 0));
+        heartbeat.agent_state = AgentState::Ready;
+        state.heartbeat(heartbeat.clone(), "2".into());
+        assert_eq!(state.active_assignment_count_for_node("media-node"), 0);
+        heartbeat.agent_state = AgentState::Busy;
+        state.heartbeat(heartbeat, "3".into());
+        state.run_maintenance("100");
+        assert_eq!(state.active_assignment_count_for_node("media-node"), 0);
     }
 
     #[test]
