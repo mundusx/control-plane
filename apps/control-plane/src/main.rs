@@ -3981,10 +3981,16 @@ fn render_recent_logs(state: &ControlPlaneState) -> String {
     }
 }
 
-fn control_plane_home(
+#[cfg(test)]
+fn control_plane_home(state: &ControlPlaneState, storage_source: StorageSource, sync_status: &SupabaseSyncStatus) -> String {
+    control_plane_home_with_metrics(state, storage_source, sync_status, None)
+}
+
+fn control_plane_home_with_metrics(
     state: &ControlPlaneState,
     storage_source: StorageSource,
     sync_status: &SupabaseSyncStatus,
+    metrics: Option<&serde_json::Value>,
 ) -> String {
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
@@ -3992,12 +3998,12 @@ fn control_plane_home(
     let _paused = snapshot["paused_count"].as_u64().unwrap_or(0);
     let policy_blocked = snapshot["policy_blocked_count"].as_u64().unwrap_or(0);
     let job_events = snapshot["job_events"].as_u64().unwrap_or(0);
-    let credits_ledger = snapshot["credits_ledger"].as_u64().unwrap_or(0);
+    let total_requests = metrics.and_then(|m| m["total_requests"].as_str()).unwrap_or("Unavailable");
+    let generated_tokens = metrics.and_then(|m| m["generated_tokens"].as_str()).unwrap_or("Unavailable");
     let credits_total = snapshot["credits_total"].as_f64().unwrap_or(0.0);
     let queued = snapshot["queued_job_count"].as_u64().unwrap_or(0);
     let assigned = snapshot["assigned_job_count"].as_u64().unwrap_or(0);
     let completed = snapshot["completed_job_count"].as_u64().unwrap_or(0);
-    let failed = snapshot["failed_job_count"].as_u64().unwrap_or(0);
     let healthy_tone = "green";
     let database = sync_status.dashboard_summary();
     let database_tone = sync_status.tone();
@@ -5228,10 +5234,10 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
 
         <section class="secondary-metrics" aria-label="Secondary metrics">
           <a class="card compact metric-link" href="/jobs"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-5"/></svg><div><div class="card-label">Job events</div><div class="card-value">{job_events}</div></div></a>
-          <a class="card compact metric-link" href="/credits" data-live-key="credits-ledger"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg><div><div class="card-label">Credits ledger</div><div class="card-value">{credits_ledger}</div></div></a>
+          <a class="card compact metric-link" href="/jobs" data-live-key="total-requests"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg><div><div class="card-label">Total requests</div><div class="card-value">{total_requests}</div></div></a>
           <a class="card compact metric-link" href="/jobs?status=assigned"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/></svg><div><div class="card-label">Assigned jobs</div><div class="card-value">{assigned}</div></div></a>
           <a class="card compact metric-link" href="/jobs?status=completed"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-5"/></svg><div><div class="card-label">Completed jobs</div><div class="card-value">{completed}</div></div></a>
-          <a class="card compact metric-link" href="/jobs?status=failed"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><div><div class="card-label">Failed jobs</div><div class="card-value">{failed}</div></div></a>
+          <a class="card compact metric-link" href="/v1/usage/tokens" data-live-key="generated-tokens" title="Measured LLM output tokens; excludes input tokens and media"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z"/></svg><div><div class="card-label">Generated tokens</div><div class="card-value">{generated_tokens}</div></div></a>
           <a class="card compact metric-link" href="/registry?policy=blocked"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v8"/><path d="M9 12h6"/></svg><div><div class="card-label">Policy blocked</div><div class="card-value">{policy_blocked}</div></div></a>
         </section>
 
@@ -7476,11 +7482,15 @@ fn handle_connection_with_streams(
             json_response("200 OK", chat_gateway::models_response(model))
         }
         ("GET", "/") => {
+            let metrics = match supabase {
+                Some(DatabaseMirror::Postgres(store)) => store.dashboard_usage_metrics().ok(),
+                _ => None,
+            };
             let snapshot = state.lock().expect("state lock");
             let sync_snapshot = sync_status.lock().expect("sync status lock").clone();
             html_response(
                 "200 OK",
-                &control_plane_home(&snapshot, storage_source, &sync_snapshot),
+                &control_plane_home_with_metrics(&snapshot, storage_source, &sync_snapshot, metrics.as_ref()),
             )
         }
         ("GET", path) if path.starts_with("/nodes/") => {
@@ -11108,6 +11118,20 @@ mod tests {
             guard.nodes["node-heartbeat"].reported_state,
             AgentState::Ready
         );
+    }
+
+    #[test]
+    fn home_page_uses_durable_request_and_measured_output_totals() {
+        let state = ControlPlaneState::default();
+        let sync = SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback);
+        let metrics = serde_json::json!({"total_requests":"2467","generated_tokens":"19056"});
+        let html = crate::control_plane_home_with_metrics(&state, StorageSource::LocalJsonFallback, &sync, Some(&metrics));
+        assert!(html.contains("Total requests</div><div class=\"card-value\">2467"));
+        assert!(html.contains("Generated tokens</div><div class=\"card-value\">19056"));
+        assert!(!html.contains(">Credits ledger<"));
+        assert!(!html.contains(">Failed jobs<"));
+        let unavailable = crate::control_plane_home_with_metrics(&state, StorageSource::LocalJsonFallback, &sync, None);
+        assert!(unavailable.contains("Generated tokens</div><div class=\"card-value\">Unavailable"));
     }
 
     #[test]

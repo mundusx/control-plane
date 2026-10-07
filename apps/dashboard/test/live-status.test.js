@@ -8,28 +8,24 @@ const start = runInNewContext(source + '\nstartControlPlaneLiveStatus;', {});
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const element = (key, innerHTML) => ({ innerHTML, getAttribute: name => name === 'data-live-key' ? key : null });
 
-test('credits total and ledger count stay distinct across live refreshes', async () => {
+test('credits, requests and generated tokens keep distinct live values', async () => {
   const markup = readFileSync(new URL('../../control-plane/src/main.rs', import.meta.url), 'utf8');
-  const cards = [...markup.matchAll(/<a class="card(?: compact)? metric-link" href="\/credits"([^>]*)>/g)];
-  assert.equal(cards.length, 2);
-  const keys = cards.map(card => card[1].match(/data-live-key="([^"]+)"/)?.[1]);
-  assert.deepEqual(keys, ['credits-total', 'credits-ledger']);
-  const card = (key, html) => ({ innerHTML: html, getAttribute: name => name === 'href' ? '/credits' : name === 'data-live-key' ? key : null });
+  for (const key of ['credits-total', 'total-requests', 'generated-tokens']) {
+    assert.ok(markup.includes(`data-live-key="${key}"`));
+  }
   const f = fixture();
-  f.nodes.splice(0, 2, card(keys[0], 'Total credits: 12.50'), card(keys[1], 'Credits ledger: 2'));
-  f.setIncoming([card(keys[0], 'Total credits: 18.75'), card(keys[1], 'Credits ledger: 3')]);
+  f.nodes.splice(0, 2, element('credits-total', '12.50'), element('total-requests', '2'), element('generated-tokens', '1000'));
+  f.setIncoming([element('credits-total', '18.75'), element('total-requests', '3'), element('generated-tokens', '19056')]);
   const controller = start(f.env); await flush();
-  assert.equal(f.nodes[0].innerHTML, 'Total credits: 18.75');
-  assert.equal(f.nodes[1].innerHTML, 'Credits ledger: 3');
+  assert.deepEqual(f.nodes.map(node => node.innerHTML), ['18.75', '3', '19056']);
   await controller.refresh();
-  assert.equal(f.nodes[0].innerHTML, 'Total credits: 18.75');
-  assert.equal(f.nodes[1].innerHTML, 'Credits ledger: 3');
+  assert.deepEqual(f.nodes.map(node => node.innerHTML), ['18.75', '3', '19056']);
   controller.stop();
 });
 
 function fixture() {
-  const nodes = [element('node-state-worker', '1/16 active · 15 free'), element('assigned', '1')];
-  let incoming = [element('node-state-worker', '3/16 active · 13 free'), element('assigned', '3')];
+  const nodes = [element('node-state-worker', '1/16 active Â· 15 free'), element('assigned', '1')];
+  let incoming = [element('node-state-worker', '3/16 active Â· 13 free'), element('assigned', '3')];
   let fail = false;
   const notices = []; const calls = []; const timers = [];
   const document = { hidden: false, querySelectorAll: () => nodes,
@@ -47,13 +43,13 @@ function fixture() {
 
 test('one snapshot updates both three assigned jobs and three occupied slots without reload', async () => {
   const f = fixture(); const controller = start(f.env); await flush();
-  assert.equal(f.nodes[0].innerHTML, '3/16 active · 13 free');
+  assert.equal(f.nodes[0].innerHTML, '3/16 active Â· 13 free');
   assert.equal(f.nodes[1].innerHTML, '3');
   assert.equal(f.calls[0].url, f.env.location.href);
   assert.equal(f.calls[0].options.cache, 'no-store');
-  f.setIncoming([element('node-state-worker', '0/16 active · 16 free'), element('assigned', '0')]);
+  f.setIncoming([element('node-state-worker', '0/16 active Â· 16 free'), element('assigned', '0')]);
   await controller.refresh();
-  assert.equal(f.nodes[0].innerHTML, '0/16 active · 16 free');
+  assert.equal(f.nodes[0].innerHTML, '0/16 active Â· 16 free');
   assert.equal(f.nodes[1].innerHTML, '0');
   controller.stop();
 });
@@ -64,7 +60,7 @@ test('failed or incomplete snapshots preserve counts and explicitly mark them st
   assert.equal(f.nodes[1].innerHTML, '3');
   assert.match(f.notices[0].textContent, /stale/);
   f.fail(); await controller.refresh();
-  assert.equal(f.nodes[0].innerHTML, '3/16 active · 13 free');
+  assert.equal(f.nodes[0].innerHTML, '3/16 active Â· 13 free');
   assert.match(f.notices[0].textContent, /stale/);
   controller.stop();
 });

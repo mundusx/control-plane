@@ -41,6 +41,14 @@ impl PostgresStore {
         tx.commit().map_err(|e|e.to_string())
     }
 
+    pub fn dashboard_usage_metrics(&self) -> Result<serde_json::Value, String> {
+        let mut client = self.connect()?;
+        let row = client.query_one(
+            "select (select count(*)::text from public.jobs), (select completion_tokens::text from public.runtime_token_totals where id=1)", &[]
+        ).map_err(|e| e.to_string())?;
+        Ok(json!({"total_requests": row.get::<_, String>(0), "generated_tokens": row.get::<_, Option<String>>(1)}))
+    }
+
     pub fn runtime_token_totals(&self)->Result<serde_json::Value,String> {
         let mut client = self.connect()?;
         let row=client.query_one("select completion_tokens,prompt_tokens,measured_calls,tracking_started_at::text,last_recorded_at::text from public.runtime_token_totals where id=1",&[]).map_err(|e|e.to_string())?;
