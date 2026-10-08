@@ -39,11 +39,20 @@ impl SupabaseMirror {
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
         let devices: Vec<NodeRecord> = self.fetch_json("devices?select=*")?;
         let jobs: Vec<JobRecord> = self.fetch_json("jobs?select=*")?;
+        let completed_job_total = jobs
+            .iter()
+            .filter(|job| job.status == crate::contracts::JobStatus::Completed)
+            .count();
+        let failed_job_total = jobs
+            .iter()
+            .filter(|job| job.status == crate::contracts::JobStatus::Failed)
+            .count();
         let job_events = self.fetch_job_events()?;
         let credits_ledger: Vec<CreditsLedgerRecord> =
             self.fetch_json("credits_ledger?select=*&order=created_at.asc")?;
 
         let mut state = ControlPlaneState::default();
+        state.initialize_job_totals(completed_job_total, failed_job_total);
         for device in devices {
             state.nodes.insert(device.node_id.clone(), device);
         }

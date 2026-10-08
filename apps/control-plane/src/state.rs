@@ -79,6 +79,12 @@ pub struct ControlPlaneState {
     pub job_events: Vec<JobEventRecord>,
     pub credits_ledger: Vec<CreditsLedgerRecord>,
     #[serde(default)]
+    completed_job_total: usize,
+    #[serde(default)]
+    failed_job_total: usize,
+    #[serde(default)]
+    job_totals_initialized: bool,
+    #[serde(default)]
     pub local_slot_leases: BTreeMap<String, LocalSlotLeaseRecord>,
     #[serde(default)]
     pub harness: crate::harness::HarnessState,
@@ -92,6 +98,29 @@ pub struct MaintenanceResult {
 }
 
 impl ControlPlaneState {
+    pub fn initialize_job_totals(&mut self, completed: usize, failed: usize) {
+        self.completed_job_total = completed;
+        self.failed_job_total = failed;
+        self.job_totals_initialized = true;
+    }
+
+    pub fn ensure_job_totals_from_hot_history(&mut self) {
+        if self.job_totals_initialized {
+            return;
+        }
+        let completed = self
+            .jobs
+            .values()
+            .filter(|job| job.status == JobStatus::Completed)
+            .count();
+        let failed = self
+            .jobs
+            .values()
+            .filter(|job| job.status == JobStatus::Failed)
+            .count();
+        self.initialize_job_totals(completed, failed);
+    }
+
     pub(crate) fn context_demand_for_job(
         job: &JobRecord,
         active_graph_node_id: Option<&str>,
@@ -202,16 +231,26 @@ impl ControlPlaneState {
             .values()
             .filter(|job| job.status == JobStatus::Assigned)
             .count();
-        let completed_job_count = self
+        let recent_completed_job_count = self
             .jobs
             .values()
             .filter(|job| job.status == JobStatus::Completed)
             .count();
-        let failed_job_count = self
+        let recent_failed_job_count = self
             .jobs
             .values()
             .filter(|job| job.status == JobStatus::Failed)
             .count();
+        let completed_job_count = if self.job_totals_initialized {
+            self.completed_job_total
+        } else {
+            recent_completed_job_count
+        };
+        let failed_job_count = if self.job_totals_initialized {
+            self.failed_job_total
+        } else {
+            recent_failed_job_count
+        };
         let (active_parallel_slots, total_parallel_slots, available_parallel_slots) = self
             .nodes
             .values()
@@ -1209,6 +1248,14 @@ impl ControlPlaneState {
             .saturating_add(
                 self.active_local_slot_count_for_node_at(node_id, current_unix_seconds()),
             )
+            .max(self.reported_media_slots(node_id))
+    }
+
+    fn reported_media_slots(&self, node_id: &str) -> usize {
+        usize::from(self.nodes.get(node_id).is_some_and(|node| {
+            node.state == AgentState::Busy
+                && node.worker_health.as_ref().is_some_and(|health| health.runtime_mode == "media")
+        }))
     }
 
     fn prune_expired_local_slot_leases(&mut self, now_seconds: u64) {
@@ -1375,7 +1422,8 @@ impl ControlPlaneState {
             .unwrap_or(1);
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
-            self.active_local_slot_count_for_node_at(node_id, current_unix_seconds());
+            self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
+                .max(self.reported_media_slots(node_id).saturating_sub(network_active));
         let active = network_active.saturating_add(local_active);
         let available = if Self::node_is_schedulable_state(node) && node.policy_allowed {
             total.saturating_sub(active)
@@ -1390,7 +1438,7 @@ impl ControlPlaneState {
             return 1;
         };
 
-        if !worker_health.healthy
+        if worker_health.runtime_mode == "media" || !worker_health.healthy
             || !worker_health.runtime_ready
             || (!matches!(node.backend, Backend::M | Backend::Vllm)
                 && !Self::serves_models_remotely(worker_health)
@@ -1400,7 +1448,7 @@ impl ControlPlaneState {
         }
 
         let runtime_mode = worker_health.runtime_mode.to_ascii_lowercase();
-        if runtime_mode == "contributed-cluster" {
+        if runtime_mode == "contributed-cluster" || node.backend == Backend::Vllm {
             let mut capacity = usize::from(worker_health.parallel_slots.max(1))
                 .min(worker_health.capabilities.max_parallel_jobs.max(1) as usize);
             if let Some(max_num_seqs) = worker_health.capabilities.max_num_seqs {
@@ -1522,7 +1570,7 @@ impl ControlPlaneState {
             return false;
         };
 
-        if !worker_health.healthy
+        if worker_health.runtime_mode == "media" || !worker_health.healthy
             || !worker_health.runtime_ready
             || !Self::worker_runtime_dependencies_ready(worker_health)
         {
@@ -1994,7 +2042,7 @@ impl ControlPlaneState {
             return false;
         };
 
-        if !worker_health.healthy
+        if worker_health.runtime_mode == "media" || !worker_health.healthy
             || !worker_health.runtime_ready
             || !Self::worker_runtime_dependencies_ready(worker_health)
         {
@@ -2954,6 +3002,8 @@ impl ControlPlaneState {
         completion: JobCompletion,
         completed_at: String,
     ) -> Option<JobRecord> {
+        self.ensure_job_totals_from_hot_history();
+        let previous_status = self.jobs.get(&completion.job_id)?.status;
         let completion_was_auto_truncated = completion.status == JobStatus::Completed
             && completion
                 .output
@@ -3082,6 +3132,28 @@ impl ControlPlaneState {
                 }
             }
         };
+
+        if previous_status != updated_job.status {
+            match previous_status {
+                JobStatus::Completed => {
+                    self.completed_job_total = self.completed_job_total.saturating_sub(1)
+                }
+                JobStatus::Failed => {
+                    self.failed_job_total = self.failed_job_total.saturating_sub(1)
+                }
+                _ => {}
+            }
+            match updated_job.status {
+                JobStatus::Completed => {
+                    self.completed_job_total = self.completed_job_total.saturating_add(1)
+                }
+                JobStatus::Failed => {
+                    self.failed_job_total = self.failed_job_total.saturating_add(1)
+                }
+                _ => {}
+            }
+        }
+        self.compact_hot_job_history();
 
         let remaining_assignments = self.active_assignment_count_for_node(&completion.node_id);
         if let Some(node) = self.nodes.get_mut(&completion.node_id) {
@@ -8571,6 +8643,16 @@ pub fn evaluate_policy(
         reasons.push("runtime capability report is not ready".to_string());
     }
 
+    if worker_health.runtime_mode == "media" {
+        let valid = !worker_health.media_profiles.is_empty() && worker_health.media_profiles.iter().all(|profile| {
+            (profile == "qwen-image-fp8-832x480-v1" && worker_health.media_budget_bytes >= 32 * 1024u64.pow(3)) ||
+            (((1..=10).any(|seconds| profile == &format!("wan22-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-14b-704p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-t2v-lightning-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-lightning-14b-480p-{}f-v3", seconds * 16 + 1))) && worker_health.media_budget_bytes >= 64 * 1024u64.pow(3))
+        });
+        if !valid { reasons.push("No verified media profile fits the contributed memory budget".into()); }
+        if worker_health.parallel_slots != 1 { reasons.push("Media requires one execution slot".into()); }
+        return if reasons.is_empty() { (true, None) } else { (false, Some(reasons.join("; "))) };
+    }
+
     if worker_health.model_dir.trim().is_empty() {
         reasons.push("model directory is missing".to_string());
     }
@@ -8695,7 +8777,15 @@ pub fn evaluate_admission_policy(
             ));
         }
 
-        if policy.enforce_model_policy {
+        if policy.enforce_model_policy && worker_health.runtime_mode == "media" {
+            for profile in &worker_health.media_profiles {
+                let model = if profile.starts_with("qwen-") { "Qwen/Qwen-Image" } else if profile.starts_with("wan22-i2v-") { "Wan-AI/Wan2.2-I2V-A14B-Lightning" } else { "Wan-AI/Wan2.2-T2V-A14B" };
+                if !policy.allowed_models.iter().any(|allowed| allowed == model) {
+                    reasons.push(format!("media model {model} is denied by operator model policy"));
+                }
+            }
+        }
+        if policy.enforce_model_policy && worker_health.runtime_mode != "media" {
             match worker_health
                 .model_name
                 .as_deref()
@@ -8877,6 +8967,7 @@ mod tests {
 
     fn healthy_worker_health(checked_at: &str) -> WorkerHealthReport {
         WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),
@@ -9086,6 +9177,43 @@ mod tests {
     }
 
     #[test]
+    fn vllm_two_requests_use_two_of_sixteen_slots_and_release_independently() {
+        let mut state = ControlPlaneState::default();
+        state.register(vllm_registration("node-vllm"));
+        let mut heartbeat = ready_vllm_heartbeat("node-vllm", "1");
+        heartbeat.worker_health.parallel_slots = 16;
+        heartbeat.worker_health.capabilities.max_parallel_jobs = 16;
+        state.heartbeat(heartbeat.clone(), "1".into());
+        let mut jobs = Vec::new();
+        for index in 0..2 {
+            let mut request = classification_request("hello world");
+            request.request_id = format!("parallel-{index}");
+            request.model = None;
+            state.submit_job(request, "2".into());
+            jobs.push(state.claim_job("node-vllm", "3".into()).job.expect("claim"));
+        }
+        heartbeat.agent_state = AgentState::Busy;
+        state.heartbeat(heartbeat, "4".into());
+        assert_eq!(state.node_slot_occupancy("node-vllm"), (2, 16, 14));
+        let snapshot = state.snapshot("test");
+        assert_eq!(snapshot["active_parallel_slots"], 2);
+        assert_eq!(snapshot["available_parallel_slots"], 14);
+        for (index, job) in jobs.into_iter().enumerate() {
+            state.complete_job(JobCompletion {
+                job_id: job.job_id,
+                node_id: "node-vllm".into(),
+                worker_id: format!("worker-{index}"),
+                backend: Backend::Vllm,
+                status: if index == 0 { JobStatus::Completed } else { JobStatus::Failed },
+                output: if index == 0 { Some("positive".into()) } else { None },
+                error: if index == 0 { None } else { Some("runtime failed".into()) },
+                latency_ms: Some(10),
+            }, "5".into()).expect("completion");
+            assert_eq!(state.node_slot_occupancy("node-vllm"), (1 - index, 16, 15 + index));
+        }
+    }
+
+    #[test]
     fn snapshot_reports_active_and_available_parallel_slots() {
         let mut state = ControlPlaneState::default();
         state.register(vllm_registration("node-vllm"));
@@ -9253,6 +9381,49 @@ mod tests {
         assert!(reason
             .as_deref()
             .is_some_and(|value| value.contains("under investigation")));
+    }
+
+    #[test]
+    fn muse_variants_are_admitted_and_routed_with_model_policy_enabled() {
+        for model in ["meta-models/Muse-Glimmer-30B", "RedHatAI/Muse-Glimmer-30B-FP8-block"] {
+            let mut state = ControlPlaneState::default();
+            state.admission_policy.enforce_model_policy = true;
+            state.register(vllm_registration("node-muse"));
+            let mut heartbeat = ready_vllm_heartbeat("node-muse", "1");
+            heartbeat.worker_health.model_name = Some(model.to_string());
+            let node = state.heartbeat(heartbeat, "1".to_string());
+            assert!(node.policy_allowed, "{model}: {:?}", node.policy_reason);
+            let mut request = classification_request("Say hello");
+            request.model = Some(model.to_string());
+            state.submit_job(request, "2".to_string());
+            assert!(state.claim_job("node-muse", "3".to_string()).job.is_some(), "{model}");
+        }
+    }
+
+    #[test]
+    fn muse_catalog_addition_preserves_explicit_operator_restrictions() {
+        let mut policy = AdmissionPolicy::default();
+        policy.enforce_model_policy = true;
+        policy.allowed_models = vec!["Qwen/Qwen3-Coder-30B-A3B-Instruct".to_string()];
+        // Existing persisted lists must not silently expand on deserialization.
+        let policy: AdmissionPolicy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        for (model, expected) in [
+            ("Qwen/Qwen3-Coder-30B-A3B-Instruct", true),
+            ("meta-models/Muse-Glimmer-30B", false),
+            ("RedHatAI/Muse-Glimmer-30B-FP8-block", false),
+        ] {
+            let mut health = healthy_worker_health("1");
+            health.model_name = Some(model.to_string());
+            let (allowed, reason) = evaluate_admission_policy(
+                true, None, &policy, Backend::Vllm,
+                crate::contracts::IDENTITY_TRUST_LOCAL_ENCRYPTED_FALLBACK,
+                100_000, &health,
+            );
+            assert_eq!(allowed, expected, "{model}: {reason:?}");
+            if !expected {
+                assert!(reason.unwrap().contains("denied by operator model policy"));
+            }
+        }
     }
 
     #[test]
@@ -10651,6 +10822,27 @@ mod tests {
         let snapshot = state.snapshot("memory");
         assert_eq!(snapshot["online_count"].as_u64(), Some(0));
         assert_eq!(snapshot["stopped_count"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn media_busy_heartbeat_reserves_slot_until_ready_or_stale() {
+        let mut state = ControlPlaneState::default();
+        state.register(m_series_registration("media-node"));
+        let mut heartbeat = ready_heartbeat("media-node", "1");
+        heartbeat.agent_state = AgentState::Busy;
+        heartbeat.worker_health.runtime_mode = "media".into();
+        heartbeat.worker_health.parallel_slots = 1;
+        heartbeat.worker_health.capabilities.max_parallel_jobs = 1;
+        state.heartbeat(heartbeat.clone(), "1".into());
+        assert_eq!(state.active_assignment_count_for_node("media-node"), 1);
+        assert_eq!(state.node_slot_occupancy("media-node"), (1, 1, 0));
+        heartbeat.agent_state = AgentState::Ready;
+        state.heartbeat(heartbeat.clone(), "2".into());
+        assert_eq!(state.active_assignment_count_for_node("media-node"), 0);
+        heartbeat.agent_state = AgentState::Busy;
+        state.heartbeat(heartbeat, "3".into());
+        state.run_maintenance("100");
+        assert_eq!(state.active_assignment_count_for_node("media-node"), 0);
     }
 
     #[test]
@@ -14331,6 +14523,16 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_uses_durable_job_totals_instead_of_the_hot_window() {
+        let mut state = ControlPlaneState::default();
+        state.initialize_job_totals(12_345, 67);
+
+        let snapshot = state.snapshot("postgres");
+        assert_eq!(snapshot["completed_job_count"].as_u64(), Some(12_345));
+        assert_eq!(snapshot["failed_job_count"].as_u64(), Some(67));
+    }
+
+    #[test]
     fn blocks_unhealthy_m_series_node_from_claiming_jobs() {
         let mut state = ControlPlaneState::default();
         state.register(m_series_registration("node-1"));
@@ -14442,6 +14644,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -15667,6 +15870,7 @@ mod tests {
                 policy_allowed: false,
                 policy_reason: Some("client says blocked".to_string()),
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -15748,6 +15952,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: r"C:\Users\batal\.opengpu\models".to_string(),
                     model_name: Some("Qwen/Qwen2.5-0.5B-Instruct".to_string()),
@@ -16028,6 +16233,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -16104,6 +16310,7 @@ mod tests {
                 policy_allowed: true,
                 policy_reason: None,
                 worker_health: WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
                     healthy: true,
                     model_dir: "/tmp/models".to_string(),
                     model_name: Some("demo".to_string()),
@@ -16271,12 +16478,27 @@ mod tests {
             state.submit_job(request, "3".to_string());
         }
 
-        let claimed = (0..5)
-            .filter_map(|index| state.claim_job("node-1", format!("claim-{index}")).job)
-            .count();
-
-        assert_eq!(claimed, 5);
-        assert_eq!(state.node_slot_occupancy("node-1"), (5, 16, 11));
+        let mut claimed_ids = Vec::new();
+        for index in 0..5 {
+            let claim = state.claim_job("node-1", format!("claim-{index}")).job.unwrap();
+            claimed_ids.push(claim.job_id);
+            let active = index + 1;
+            assert_eq!(state.node_slot_occupancy("node-1"), (active, 16, 16 - active));
+            let snapshot = state.snapshot("memory");
+            assert_eq!(snapshot["assigned_job_count"], active);
+            assert_eq!(snapshot["active_parallel_slots"], active);
+        }
+        // Releasing assignments must update both counters, including 3/16.
+        for (index, id) in claimed_ids.iter().enumerate() {
+            let job = state.jobs.get_mut(id).unwrap();
+            job.status = JobStatus::Completed;
+            for step in &mut job.graph.nodes {
+                step.status = JobGraphNodeStatus::Completed;
+            }
+            let active = 4 - index;
+            assert_eq!(state.node_slot_occupancy("node-1"), (active, 16, 16 - active));
+            assert_eq!(state.snapshot("memory")["assigned_job_count"], active);
+        }
     }
 
     #[test]
@@ -16846,4 +17068,53 @@ mod tests {
         assert_eq!(timeline[0].stage, "repair");
         assert_eq!(timeline[0].status, "planned");
     }
+    #[test]
+    fn media_only_admission_requires_verified_profiles_budget_and_one_slot() {
+        let mut health = healthy_worker_health("1");
+        health.runtime_mode = "media".into();
+        health.model_name = None; health.model_path = None; health.model_dir.clear();
+        health.llama_cli_available = false;
+        health.media_profiles = vec!["wan22-i2v-lightning-14b-480p-161f-v3".into()];
+        health.media_budget_bytes = 96 * 1024u64.pow(3);
+        assert!(evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_budget_bytes = 32 * 1024u64.pow(3);
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_budget_bytes = 96 * 1024u64.pow(3);
+        health.media_profiles = vec!["wan22-unknown".into()];
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
+        assert!(!evaluate_policy(AgentState::Paused, "ac", false, None, &health).0);
+        health.parallel_slots = 2;
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+    }
+
+    #[test]
+    fn media_only_nodes_never_satisfy_llm_job_eligibility() {
+        let mut state = ControlPlaneState::default();
+        state.register(cuda_registration("media-node"));
+        let mut beat = ready_heartbeat("media-node", "1");
+        beat.backend = Backend::Cuda;
+        beat.worker_health.runtime_mode = "media".into();
+        beat.worker_health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
+        beat.worker_health.media_budget_bytes = 64 * 1024u64.pow(3);
+        beat.worker_health.model_name = None;
+        beat.worker_health.llama_cli_available = false;
+        let node = state.heartbeat(beat, "1".into());
+        assert!(!ControlPlaneState::node_worker_can_run_request(&node, &classification_request("hello")));
+        state.submit_job(classification_request("hello"), "2".into());
+        assert!(state.claim_job("media-node", "3".into()).job.is_none());
+    }
+
+    #[test]
+    fn media_only_admission_preserves_operator_model_allowlist() {
+        let mut health = healthy_worker_health("1");
+        health.runtime_mode = "media".into();
+        health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
+        health.media_budget_bytes = 64 * 1024u64.pow(3);
+        let mut policy = AdmissionPolicy { enforce_model_policy: true, allowed_models: vec![], ..AdmissionPolicy::default() };
+        assert!(!evaluate_admission_policy(true, None, &policy, Backend::Cuda, "test", 128000, &health).0);
+        policy.allowed_models.push("Qwen/Qwen-Image".into());
+        assert!(evaluate_admission_policy(true, None, &policy, Backend::Cuda, "test", 128000, &health).0);
+    }
+
 }

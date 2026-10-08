@@ -82,10 +82,11 @@ test("renders a usable chat page", () => {
     }),
   );
 
-  assert.match(html, /<title>Ehda<\/title>/);
-  assert.match(html, /class="brand-ehda">Ehda<\/div>/);
-  assert.match(html, /Powered by Mercedes-Benz Tech Community/);
-  assert.match(html, /A BETTER TOMORROW/);
+  assert.match(html, /<title>MundusX<\/title>/);
+  assert.match(html, /class="brand-name">MundusX<\/div>/);
+  assert.doesNotMatch(html, /Powered by Mercedes-Benz Tech Community/);
+  assert.match(html, /Decentralized AI Network/);
+  assert.doesNotMatch(html, /Ehda \/ Mercedes-Benz Tech Community visual edition/);
   assert.match(html, /id="auth-gate"[^>]*hidden/);
   assert.match(html, /id="auth-google"/);
   assert.match(html, /Continue your chat/);
@@ -247,7 +248,7 @@ test("renders a usable chat page", () => {
   assert.doesNotMatch(html, /raw\.includes\("\r?\n"\)/);
   assert.match(html, /aria-label", role === "user" \? "Your message" : "MundusX response"/);
   assert.doesNotMatch(html, /avatar\.textContent = role === "user" \? "You" : "M"/);
-  assert.match(html, /class="brand-mark" src="\/assets\/ehda-logo\.png"[^>]+alt="EHDA"/);
+  assert.match(html, /src="\/assets\/mundusx-logo\.png"/);
   assert.match(html, /<\/aside>\s*<div class="history-context-menu"/);
   assert.match(html, /uat\.mundusx\.ai/);
   assert.match(html, /\.header-actions \{\s*display: none;/);
@@ -4407,6 +4408,7 @@ test("agent model provider configuration keeps aligned models and credentials", 
 
 test("normal Chat answers a focused weather request directly from wttr.in", async () => {
   const events = [];
+  const encoder = new TextEncoder();
   const response = {
     writableEnded: false,
     writeHead: (status, headers) => events.push({ status, headers }),

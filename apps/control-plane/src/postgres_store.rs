@@ -20,9 +20,60 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     database_url: String,
+    restore_database_url: String,
 }
 
 impl PostgresStore {
+    pub fn record_runtime_token_usage(&self, completion:&JobCompletion, records:&[crate::runtime_usage::RuntimeTokenUsage], active:bool) -> Result<(),String> {
+        let mut client=self.connect()?;
+        let mut tx=client.transaction().map_err(|e|e.to_string())?;
+        if !active {
+            let saved=tx.query("select call_id::text,completion_tokens,prompt_tokens from public.runtime_token_usage where job_id=$1 and worker_id=$2 order by call_index",&[&completion.job_id,&completion.worker_id]).map_err(|e|e.to_string())?;
+            if saved.len()!=records.len() || saved.iter().zip(records).any(|(row,r)| row.get::<_,String>(0)!=r.call_id || row.get::<_,i64>(1)!=r.completion_tokens as i64 || row.get::<_,Option<i64>>(2)!=r.prompt_tokens.map(|n|n as i64)) {
+                return Err("Completed usage report does not match its saved measurement".into());
+            }
+            return tx.commit().map_err(|e|e.to_string());
+        }
+        for (index,r) in records.iter().enumerate() {
+            tx.execute(include_str!("../../../db/statements/record_runtime_token_usage.sql"),
+                &[&r.call_id,&completion.job_id,&completion.node_id,&completion.worker_id,&(index as i32),&(r.completion_tokens as i64),&r.prompt_tokens.map(|n|n as i64)]).map_err(|e|e.to_string())?;
+        }
+        tx.commit().map_err(|e|e.to_string())
+    }
+
+    pub fn dashboard_usage_metrics(&self) -> Result<serde_json::Value, String> {
+        let mut client = self.connect()?;
+        let row = client.query_one(
+            "select (select count(*)::text from public.jobs), (select completion_tokens::text from public.runtime_token_totals where id=1)", &[]
+        ).map_err(|e| e.to_string())?;
+        Ok(json!({"total_requests": row.get::<_, String>(0), "generated_tokens": row.get::<_, Option<String>>(1)}))
+    }
+
+    pub fn runtime_token_totals(&self)->Result<serde_json::Value,String> {
+        let mut client = self.connect()?;
+        let row=client.query_one("select completion_tokens,prompt_tokens,measured_calls,tracking_started_at::text,last_recorded_at::text from public.runtime_token_totals where id=1",&[]).map_err(|e|e.to_string())?;
+        let media_available: bool = client.query_one("select to_regclass('public.media_compute_records') is not null", &[])
+            .map_err(|e| e.to_string())?.get(0);
+        let media = if media_available {
+            let raw: String = client.query_one(include_str!("../../../db/statements/media_usage_totals.sql"), &[])
+                .map_err(|e| e.to_string())?.get(0);
+            serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| e.to_string())?
+        } else {
+            json!({"available": false, "completed_generations": null})
+        };
+        let media_calls = media["completed_generations"].as_str()
+            .and_then(|value| value.parse::<u128>().ok());
+        let output = row.get::<_,i64>(0) as u128;
+        let input = row.get::<_,i64>(1) as u128;
+        let calls = row.get::<_,i64>(2) as u128;
+        Ok(json!({"measured_output_tokens":output.to_string(),"measured_input_tokens":input.to_string(),
+            "total_tokens":(input + output).to_string(), "measured_model_calls":calls.to_string(),
+            "total_recorded_calls": media_calls.map(|count| (calls + count).to_string()),
+            "media":media, "tracking_started_at":row.get::<_,String>(3),
+            "last_recorded_at":row.get::<_,Option<String>>(4),"source":"runtime_reported",
+            "includes_estimates":false,"historical_unmetered_requests":"excluded",
+            "scope":"instrumented LLM calls including retries, plus durable settled media generations; tokens cover LLM calls only"}))
+    }
     pub fn from_env(pool_url: Option<&str>, direct_url: Option<&str>) -> Option<Self> {
         Self::from_values(pool_url, direct_url)
     }
@@ -31,11 +82,21 @@ impl PostgresStore {
         let database_url = pool_url
             .and_then(trimmed)
             .or_else(|| direct_url.and_then(trimmed))?;
-        Some(Self { database_url })
+        let restore_database_url = direct_url
+            .and_then(trimmed)
+            .unwrap_or_else(|| database_url.clone());
+        Some(Self { database_url, restore_database_url })
     }
 
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
-        let mut client = self.connect()?;
+        // Startup hydration can return large historical JSON rows. Keep this
+        // one-time read on the direct connection; ordinary requests stay pooled.
+        let mut client = connect_client(&self.restore_database_url)?;
+        let totals = client
+            .query_one(JOB_TOTALS_SQL, &[])
+            .map_err(|error| format!("postgres job totals restore failed: {error}"))?;
+        let completed_job_total = usize::try_from(totals.get::<_, i64>(0)).unwrap_or(usize::MAX);
+        let failed_job_total = usize::try_from(totals.get::<_, i64>(1)).unwrap_or(usize::MAX);
         let devices: Vec<NodeRecord> = query_json_rows(&mut client, DEVICES_RESTORE_SQL)?;
         let jobs: Vec<JobRecord> = query_json_rows(&mut client, JOBS_RESTORE_SQL)?;
         let job_events: Vec<JobEventRecord> = query_json_rows(&mut client, JOB_EVENTS_RESTORE_SQL)?;
@@ -43,6 +104,7 @@ impl PostgresStore {
             query_json_rows(&mut client, CREDITS_RESTORE_SQL)?;
 
         let mut state = ControlPlaneState::default();
+        state.initialize_job_totals(completed_job_total, failed_job_total);
         for device in devices {
             state.nodes.insert(device.node_id.clone(), device);
         }
@@ -1183,6 +1245,13 @@ where status in ('queued', 'assigned')
 order by submitted_at_epoch asc nulls last, job_id asc
 "#;
 
+const JOB_TOTALS_SQL: &str = r#"
+select
+  count(*) filter (where status = 'completed')::bigint,
+  count(*) filter (where status = 'failed')::bigint
+from public.jobs
+"#;
+
 // The database is the durable history. The process only needs a bounded hot
 // window in memory; restoring every historical event made startup and every
 // snapshot grow without bound as production traffic accumulated.
@@ -1652,6 +1721,7 @@ mod tests {
         DEVICES_UPSERT_SQL, HARNESS_ARTIFACTS_RESTORE_SQL, HARNESS_AUDIT_UPSERT_SQL,
         HARNESS_TASKS_RESTORE_SQL, HARNESS_RESERVATION_UPSERT_SQL, HARNESS_TASK_UPSERT_SQL,
         JOBS_RESTORE_SQL, JOBS_UPSERT_SQL, JOB_EVENTS_RESTORE_SQL, JOB_EVENTS_UPSERT_SQL,
+        JOB_TOTALS_SQL,
     };
 
     #[test]
@@ -1666,6 +1736,10 @@ mod tests {
             store.database_url,
             "postgresql://app@pgbouncer.example/mundusx"
         );
+        assert_eq!(
+            store.restore_database_url,
+            "postgresql://admin@postgres.example/mundusx"
+        );
     }
 
     #[test]
@@ -1678,6 +1752,15 @@ mod tests {
             store.database_url,
             "postgresql://admin@postgres.example/mundusx"
         );
+        assert_eq!(store.restore_database_url, store.database_url);
+    }
+
+    #[test]
+    fn pool_only_configuration_retains_startup_compatibility() {
+        let store = PostgresStore::from_values(
+            Some("postgresql://app@pgbouncer.example/mundusx"), Some(" "),
+        ).expect("store");
+        assert_eq!(store.restore_database_url, store.database_url);
     }
 
     #[test]
@@ -1732,6 +1815,8 @@ mod tests {
 
     #[test]
     fn restore_queries_keep_durable_history_out_of_hot_memory() {
+        assert!(JOB_TOTALS_SQL.contains("status = 'completed'"));
+        assert!(JOB_TOTALS_SQL.contains("status = 'failed'"));
         assert!(JOBS_RESTORE_SQL.contains("status in ('queued', 'assigned')"));
         assert!(JOBS_RESTORE_SQL.contains("limit 512"));
         assert!(JOB_EVENTS_RESTORE_SQL.contains("limit 4096"));

@@ -7,6 +7,7 @@ mod admin_login;
 mod contracts;
 mod harness;
 mod migrations;
+mod runtime_usage;
 mod planner_client;
 mod postgres_store;
 mod state;
@@ -17,7 +18,7 @@ use contracts::{
     is_trusted_identity_path, trust_path_label, validate_capability_registration,
     AdmissionPolicyUpdate, AgentRegistration, AgentState, AppendChatMessageRequest, Backend,
     ChatCompletionRequest, ChatMessagesResponse, CreditsLedgerRecord, Heartbeat, JobCompletion,
-    JobExecutionMode, JobGraphNodeStatus, JobRecord, JobRequest, JobStatus, JobStreamAck,
+    JobExecutionMode, JobGraphNodeStatus, JobRecord, JobRequest, JobStatus,
     JobStreamDelta, LocalSlotLeaseReleaseRequest, LocalSlotLeaseRenewRequest,
     LocalSlotLeaseRequest, NodePolicyOverrideInput, NodeRecord, OperatorContributionPercentUpdate,
     OperatorNodePolicyOverrideUpdate, RoutingMode, RuntimeMode, ToolRewardRequest,
@@ -486,7 +487,6 @@ impl SupabaseSyncStatus {
             format!("enabled ({})", self.restore_source)
         }
     }
-
     fn dashboard_summary(&self) -> String {
         if !self.enabled {
             format!("{} · disabled", self.restore_source)
@@ -496,6 +496,7 @@ impl SupabaseSyncStatus {
             format!("{} · healthy", self.restore_source)
         }
     }
+
 
     fn tone(&self) -> &'static str {
         if !self.enabled {
@@ -1162,6 +1163,7 @@ fn node_last_seen(updated_at: &str) -> String {
 
 fn render_node_classification(node: &NodeRecord) -> String {
     let advertised = node.capabilities.as_ref();
+    let media_health = node.worker_health.as_ref().filter(|health| health.runtime_mode == "media" || !health.media_profiles.is_empty());
     let live = node
         .worker_health
         .as_ref()
@@ -1169,6 +1171,8 @@ fn render_node_classification(node: &NodeRecord) -> String {
     let harness = advertised.and_then(|capabilities| capabilities.harness.as_ref());
     let node_type = if harness.is_some() {
         "harness runner"
+    } else if media_health.is_some_and(|health| health.runtime_mode == "media") {
+        "media contributor"
     } else {
         "inference contributor"
     };
@@ -1232,10 +1236,24 @@ fn render_node_classification(node: &NodeRecord) -> String {
         .or_else(|| advertised.and_then(|profile| profile.physical_memory_mb))
         .map(|mb| format!("{:.1} GiB RAM", f64::from(mb) / 1024.0))
         .unwrap_or_else(|| "memory not reported".to_string());
-    let model_html = if models.is_empty() {
+    let media_html = media_health.map(|health| {
+        let profiles = health.media_profiles.iter().map(|profile| {
+            let operation = if profile.starts_with("qwen-image-") { "Text to image" }
+                else if profile.starts_with("wan22-i2v-") { "Image to video" }
+                else if profile.starts_with("wan22-") { "Text to video" }
+                else { "Media" };
+            format!(r#"<div class="meta"><strong>{operation}:</strong> {}</div>"#, escape_html(profile))
+        }).collect::<Vec<_>>().join("");
+        let profiles = if profiles.is_empty() { r#"<div class="meta">No verified media profiles advertised</div>"#.to_string() } else { profiles };
+        format!(r#"{profiles}<div class="meta">Media memory budget: {:.1} GiB &middot; {} shared media slot(s)</div><div class="meta">Verified profiles reported by contributor; availability and policy shown separately.</div>"#,
+            health.media_budget_bytes as f64 / 1024.0_f64.powi(3), health.parallel_slots)
+    }).unwrap_or_default();
+    let model_html = if models.is_empty() && media_health.is_some_and(|health| health.runtime_mode == "media") {
+        media_html
+    } else if models.is_empty() {
         r#"<div class="meta">Awaiting model advertisement; task suitability unknown</div>"#.to_string()
     } else {
-        models.iter().map(|model| {
+        let model_html = models.iter().map(|model| {
             let tasks = if model.task_capabilities.is_empty() {
                 "task skills not reported".to_string()
             } else { model.task_capabilities.join(", ") };
@@ -1246,7 +1264,8 @@ fn render_node_classification(node: &NodeRecord) -> String {
                 if model.supports_tools { "advertised" } else { "not advertised" },
                 if model.supports_vision { "advertised" } else { "not advertised" },
                 if model.supports_embeddings { "advertised" } else { "not advertised" })
-        }).collect::<Vec<_>>().join("")
+        }).collect::<Vec<_>>().join("");
+        model_html + &media_html
     };
     format!(
         r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
@@ -1406,7 +1425,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
                 <div class="meta">accepted {} &middot; rejected {} &middot; last failure {}</div>
               </div>
               <div><span class="pill" style="background:{};color:{};">{}</span>{}</div>
-              <div>
+              <div data-live-key="node-state-{live_node_id}">
                 <span class="pill" style="background:{};color:{};">{}</span>
                 <div class="meta" style="margin-top:6px;">last reported {}</div>
                 <div class="meta"><strong>{}</strong> &middot; {}/{} active &middot; {} free</div>
@@ -1467,7 +1486,8 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
             policy_fg,
             policy_label,
             policy_reason,
-            escape_html(&node_last_seen(&node.updated_at))
+            escape_html(&node_last_seen(&node.updated_at)),
+            live_node_id = escape_html(&node.node_id)
         ));
     }
 
@@ -2062,8 +2082,8 @@ fn render_node_profile_panel(state: &ControlPlaneState, node_id: &str) -> String
             <div class="node-profile-card"><span>Trust grade</span><strong>{reputation}</strong><div class="meta">Execution reputation, not model skill</div></div>
             <div class="node-profile-card"><span>Total earned</span><strong>{earned:.2}</strong><div class="meta">credits</div></div>
             <div class="node-profile-card"><span>Contribution</span><strong>{contribution}%</strong><div class="meta">operator effective share</div></div>
-            <div class="node-profile-card"><span>Current work</span><strong>{current_work}</strong><div class="meta">active assignment</div></div>
-            <div class="node-profile-card"><span>Execution slots</span><strong>{active_slots}/{total_slots} active</strong><div class="meta">{slot_state} &middot; {available_slots} free</div><div class="meta">{local_slots} local &middot; {network_slots} network</div></div>
+            <div class="node-profile-card" data-live-key="profile-work"><span>Current work</span><strong>{current_work}</strong><div class="meta">active assignment</div></div>
+            <div class="node-profile-card" data-live-key="profile-slots"><span>Execution slots</span><strong>{active_slots}/{total_slots} active</strong><div class="meta">{slot_state} &middot; {available_slots} free</div><div class="meta">{local_slots} local &middot; {network_slots} network</div></div>
           </section>
           <section class="profile-sections">
             <div class="node-profile-card">
@@ -2986,6 +3006,15 @@ fn paged_node_records(
     (page_nodes, pagination)
 }
 
+fn sort_jobs_newest_first(jobs: &mut [JobRecord]) {
+    jobs.sort_by_cached_key(|job| {
+        std::cmp::Reverse((
+            job.submitted_at.parse::<u64>().ok(),
+            job.job_id.clone(),
+        ))
+    });
+}
+
 fn paged_job_records(jobs: Vec<JobRecord>, query: Option<&str>) -> (Vec<JobRecord>, Pagination) {
     let pagination = Pagination::from_query(query).with_total(jobs.len());
     let start = (pagination.page - 1) * pagination.page_size;
@@ -3076,6 +3105,7 @@ fn render_pagination_controls(path: &str, query: Option<&str>, pagination: &Pagi
 #[derive(Clone, Copy)]
 enum OperatorPage {
     Skills,
+    Flow,
     Nodes,
     Jobs,
     Credits,
@@ -3086,6 +3116,7 @@ enum OperatorPage {
 impl OperatorPage {
     fn from_path(path: &str) -> Option<Self> {
         match path {
+            "/flow" => Some(Self::Flow),
             "/skills" => Some(Self::Skills),
             "/nodes" => Some(Self::Nodes),
             "/jobs" => Some(Self::Jobs),
@@ -3098,6 +3129,7 @@ impl OperatorPage {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Flow => "Request Flow",
             Self::Skills => "Global Skills",
             Self::Nodes => "Nodes",
             Self::Jobs => "Jobs",
@@ -3109,6 +3141,7 @@ impl OperatorPage {
 
     fn path(self) -> &'static str {
         match self {
+            Self::Flow => "/flow",
             Self::Skills => "/skills",
             Self::Nodes => "/nodes",
             Self::Jobs => "/jobs",
@@ -3120,6 +3153,7 @@ impl OperatorPage {
 
     fn nav_label(self) -> &'static str {
         match self {
+            Self::Flow => "Flow",
             Self::Skills => "Global Skills",
             Self::Nodes => "Nodes",
             Self::Jobs => "Jobs",
@@ -3131,6 +3165,9 @@ impl OperatorPage {
 
     fn nav_icon(self) -> &'static str {
         match self {
+            Self::Flow => {
+                r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h6v5H3zM15 13h6v5h-6z"/><path d="M9 8.5h3a3 3 0 0 1 3 3V13"/><path d="m12 10 3 3 3-3"/></svg>"#
+            }
             Self::Skills => r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>"#,
             Self::Nodes => {
                 r#"<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/></svg>"#
@@ -3199,7 +3236,7 @@ fn render_admission_policy(state: &ControlPlaneState) -> String {
               <form method="post" action="/actions/admission-policy" class="policy-form">
                 <label class="check"><input type="checkbox" name="enabled" value="1"{enabled_checked}> Enforce admission rules</label>
                 <label class="check"><input type="checkbox" name="require_healthy_runtime" value="1"{runtime_checked}> Require healthy runtime</label>
-                <label class="check"><input type="checkbox" name="require_trusted_identity" value="1"{trusted_checked}> Require trusted identity</label>
+                <label class="check"><input type="checkbox" name="require_trusted_identity" value="1"{trusted_checked}> Require keychain-backed identity</label>
                 <label class="check"><input type="checkbox" name="enforce_model_policy" value="1"{model_policy_checked}> Enforce model admission (unknown models become Under investigation)</label>
                 <div class="policy-grid">
                   <label><span>Minimum system RAM (MB)</span><input type="number" name="min_memory_mb" min="0" step="512" value="{min_memory_mb}"></label>
@@ -3467,7 +3504,7 @@ fn control_plane_operator_page(
     let registry_pagination_html =
         render_pagination_controls("/registry", query, &registry_pagination);
     let mut filtered_jobs = state.jobs.values().cloned().collect::<Vec<_>>();
-    filtered_jobs.reverse();
+    sort_jobs_newest_first(&mut filtered_jobs);
     let filtered_jobs = filter_json_items(filtered_jobs, query, "jobs");
     let (paged_jobs, jobs_pagination) = paged_job_records(filtered_jobs, query);
     let filtered_jobs_html = render_job_records(paged_jobs);
@@ -3488,11 +3525,41 @@ fn control_plane_operator_page(
         .unwrap_or_default();
     let body = match page {
         OperatorPage::Skills => global_skills::page(),
+        OperatorPage::Flow => format!(
+            r#"<section class="flow-intro panel">
+              <div><span class="flow-kicker">Distributed inference lifecycle</span><h2>From customer request to incremental response</h2><p class="meta">Requests can enter from any approved client. The control plane classifies the intent, builds a capability-aware plan from the currently available fleet, fans work out to eligible nodes, and synthesizes the results.</p></div>
+              <div class="flow-live"><span class="status-dot"></span><strong>{nodes}</strong><span>nodes currently available</span></div>
+            </section>
+            <section class="flow-sources" aria-label="Customer request channels">
+              <div class="flow-source"><strong>Chat</strong><span>Text, voice, files</span></div>
+              <div class="flow-source"><strong>Vehicle</strong><span>In-car assistant</span></div>
+              <div class="flow-source"><strong>VS Code</strong><span>Code and agent tasks</span></div>
+              <div class="flow-source"><strong>Smart glasses</strong><span>Vision and ambient input</span></div>
+            </section>
+            <section class="flow-track" aria-label="Request processing stages">
+              <article class="flow-step"><span class="flow-number">01</span><div><h3>Secure intake</h3><p>Authenticate the client, normalize the request, preserve modality and conversation context, then create a traceable job.</p><span class="pill">request accepted</span></div></article>
+              <article class="flow-step"><span class="flow-number">02</span><div><h3>Classify</h3><p>Detect intent, risk, tools, privacy, modality, complexity, latency target and model requirements.</p><span class="pill">classification visible</span></div></article>
+              <article class="flow-step"><span class="flow-number">03</span><div><h3>Plan against the live fleet</h3><p>Compare the task with trusted nodes, admitted models, memory, runtime health, context capacity and current load.</p><span class="pill">single or decomposed graph</span></div></article>
+              <article class="flow-step"><span class="flow-number">04</span><div><h3>Parallel node execution</h3><p>Independent graph sections are claimed by eligible nodes. Dependencies wait; unrelated work proceeds concurrently.</p><span class="pill">fan-out by capability</span></div></article>
+              <article class="flow-step"><span class="flow-number">05</span><div><h3>Synthesize and verify</h3><p>A qualified synthesizer combines completed sections, removes duplication, checks the requested contract and records provenance.</p><span class="pill">quality gate</span></div></article>
+              <article class="flow-step"><span class="flow-number">06</span><div><h3>Return to the customer</h3><p>The final answer uses the originating channel and can include text, code, audio, visual output or structured actions.</p><span class="pill">channel-aware delivery</span></div></article>
+            </section>
+            <section class="batch-panel panel">
+              <div class="batch-copy"><span class="flow-kicker">Progressive delivery</span><h2>Customers do not always wait for the full job</h2><p class="meta">When sections are independently useful, the gateway can release verified batches as soon as they complete. The final synthesis still arrives afterward as the authoritative combined answer.</p></div>
+              <div class="batch-timeline" aria-label="Incremental response batches">
+                <div class="batch batch-ready"><strong>Batch 1</strong><span>First verified section</span><small>send immediately</small></div>
+                <div class="batch batch-ready"><strong>Batch 2</strong><span>More completed work</span><small>append to response</small></div>
+                <div class="batch batch-working"><strong>Batch 3</strong><span>Nodes still processing</span><small>progress update</small></div>
+                <div class="batch batch-final"><strong>Final</strong><span>Synthesized result</span><small>close stream</small></div>
+              </div>
+              <p class="batch-rule"><strong>Safety rule:</strong> stream only self-contained, verified sections. Hold dependent, sensitive or contract-critical output until synthesis completes.</p>
+            </section>"#,
+        ),
         OperatorPage::Nodes => format!(
             r#"{filters}
             <section class="grid four">
               <a class="metric metric-link" href="/nodes?state=online"><span>Online</span><strong>{nodes}</strong></a>
-              <a class="metric metric-link" href="/nodes?trust=trusted"><span>Trusted</span><strong>{trusted}</strong></a>
+              <a class="metric metric-link" href="/nodes?trust=trusted"><span>Keychain-backed identities</span><strong>{trusted}</strong></a>
               <a class="metric metric-link" href="/nodes?state=paused"><span>Paused</span><strong>{paused}</strong></a>
               <a class="metric metric-link" href="/nodes?policy=blocked"><span>Policy blocked</span><strong>{policy_blocked}</strong></a>
             </section>
@@ -3517,9 +3584,9 @@ fn control_plane_operator_page(
             {job_detail_html}
             <section class="panel">
               <h2>Job Queue</h2>
+              <p class="meta">Newest submitted jobs first.</p>
               <p class="meta">Review who handled each request, what model/runtime was used, when it completed, and the output or error summary. Retry and cancel controls can attach here when mutating job actions are enabled.</p>
-              {filtered_jobs_html}
-              {jobs_pagination_html}
+              <div data-live-key="job-list">{filtered_jobs_html}{jobs_pagination_html}</div>
             </section>"#,
             filters = control_filter_form(page, query, &jobs_api_href),
             job_detail_html = job_detail_html
@@ -3527,8 +3594,8 @@ fn control_plane_operator_page(
         OperatorPage::Credits => format!(
             r#"{filters}
             <section class="grid two">
-              <a class="metric metric-link" href="/credits"><span>Total credits</span><strong>{credits_total:.2}</strong></a>
-              <a class="metric metric-link" href="/credits"><span>Ledger entries</span><strong>{credits_ledger}</strong></a>
+              <a class="metric metric-link" href="/credits" data-live-key="credits-total"><span>Total credits</span><strong>{credits_total:.2}</strong></a>
+              <a class="metric metric-link" href="/credits" data-live-key="credits-ledger"><span>Ledger entries</span><strong>{credits_ledger}</strong></a>
             </section>
             {credits_detail_html}
             <section class="panel">
@@ -3544,7 +3611,7 @@ fn control_plane_operator_page(
             r#"{filters}
             <section class="grid four">
               <a class="metric metric-link" href="/registry"><span>Registered</span><strong>{registered}</strong></a>
-              <a class="metric metric-link" href="/registry?trust=trusted"><span>Trusted</span><strong>{trusted}</strong></a>
+              <a class="metric metric-link" href="/registry?trust=trusted"><span>Keychain-backed identities</span><strong>{trusted}</strong></a>
               <a class="metric metric-link" href="/registry?policy=blocked"><span>Policy blocked</span><strong>{policy_blocked}</strong></a>
               <div class="metric"><span>Storage</span><strong>{storage_value}</strong></div>
             </section>
@@ -3608,9 +3675,9 @@ fn control_plane_operator_page(
     </script>
     <style>
 button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ font-family:"JetBrains Mono",ui-monospace,monospace; }}
-      :root {{ color-scheme: dark; --bg:#020711; --surface:#06101d; --line:rgba(73,159,255,.22); --line-strong:rgba(45,164,255,.48); --text:#f6fbff; --muted:#9baac0; --blue:#33a8ff; }}
+      :root {{ color-scheme: dark; --bg:#050607; --surface:#0b0d10; --line:rgba(148,163,184,.2); --line-strong:rgba(96,165,250,.48); --text:#f6f7f9; --muted:#9ca3af; --blue:#60a5fa; }}
       * {{ box-sizing: border-box; }}
-      body {{ margin:0; min-height:100vh; background:linear-gradient(135deg,#020711,#050b16 52%,#01040b); color:var(--text); font-family: "Space Grotesk", system-ui, sans-serif; }}
+      body {{ margin:0; min-height:100vh; background:linear-gradient(135deg,#030405 0%,#0b0d10 52%,#020203 100%); color:var(--text); font-family: "Space Grotesk", system-ui, sans-serif; }}
       a {{ color:inherit; text-decoration:none; }}
       a:focus-visible {{ outline:0; box-shadow:0 0 0 3px rgba(37,215,255,.2); }}
       .motion-lift {{ transition:transform .18s ease,border-color .12s ease,background .12s ease,box-shadow .18s ease,color .12s ease; will-change:transform; }}
@@ -3618,9 +3685,12 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .motion-glow {{ transition:transform .18s ease,filter .18s ease,box-shadow .18s ease; will-change:transform; }}
       .motion-glow:hover,.motion-glow:focus-visible {{ transform:scale(1.04); filter:drop-shadow(0 0 22px rgba(37,215,255,.52)); }}
       .shell {{ display:grid; grid-template-columns:250px minmax(0,1fr); min-height:100vh; }}
-      .sidebar {{ position:sticky; top:0; height:100vh; border-right:1px solid var(--line); background:linear-gradient(180deg,rgba(2,9,18,.96),rgba(2,8,16,.9)); padding:26px 16px 18px; display:flex; flex-direction:column; gap:22px; }}
+      .sidebar {{ position:sticky; top:0; height:100vh; border-right:1px solid var(--line); background:linear-gradient(180deg,rgba(5,6,7,.98),rgba(10,11,13,.95)); padding:26px 16px 18px; display:flex; flex-direction:column; gap:22px; }}
       .brand {{ display:flex; align-items:center; gap:12px; font-family: "Space Grotesk", system-ui, sans-serif; font-size:22px; color:#fff; border-radius:8px; }}
       .brand-mark {{ width:54px; height:54px; border-radius:50%; object-fit:contain; filter:drop-shadow(0 0 16px rgba(70,174,255,.34)); }}
+      .brand-copy {{ display:grid; gap:2px; }}
+      .brand-copy strong {{ letter-spacing:.16em; }}
+      .brand-copy small {{ color:var(--muted); font:10px Inter,"Segoe UI",sans-serif; letter-spacing:.12em; text-transform:uppercase; }}
       .nav {{ display:grid; gap:8px; }}
       .nav-group {{ margin:10px 13px 0; color:#718096; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }}
       .nav-item {{ min-height:54px; display:flex; align-items:center; gap:14px; border:1px solid transparent; border-radius:7px; padding:0 13px; color:#b9c5d6; }}
@@ -3639,7 +3709,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .toolbar .button {{ width:100%; }}
       .panel .button {{ margin-top:10px; margin-right:8px; }}
       .topbar .button {{ margin-left:auto; }}
-      input,select,textarea {{ width:100%; min-height:42px; border:1px solid var(--line); border-radius:8px; background:#030b14; color:var(--text); padding:10px 12px; font:inherit; }}
+      input,select,textarea {{ width:100%; min-height:42px; border:1px solid var(--line); border-radius:8px; background:#090a0c; color:var(--text); padding:10px 12px; font:inherit; }}
       input[type="checkbox"] {{ width:auto; min-height:auto; accent-color:var(--blue); }}
       .policy-form {{ display:grid; gap:14px; margin-top:14px; }}
       .policy-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
@@ -3657,11 +3727,38 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .grid {{ display:grid; gap:14px; margin-bottom:18px; }}
       .grid.four {{ grid-template-columns:repeat(4,minmax(0,1fr)); }}
       .grid.two {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
-      .metric,.panel {{ border:1px solid var(--line); background:linear-gradient(180deg,rgba(8,23,41,.92),rgba(3,10,19,.92)); border-radius:8px; padding:18px; }}
+      .metric,.panel {{ border:1px solid var(--line); background:linear-gradient(180deg,rgba(17,19,22,.96),rgba(8,9,11,.96)); border-radius:8px; padding:18px; }}
       .metric-link {{ display:block; transition:border-color .12s ease,background .12s ease,transform .18s ease; }}
-      .metric-link:hover,.metric-link:focus-visible {{ border-color:var(--line-strong); background:linear-gradient(180deg,rgba(12,35,61,.94),rgba(4,14,26,.94)); transform:translateY(-1px); outline:none; }}
+      .metric-link:hover,.metric-link:focus-visible {{ border-color:var(--line-strong); background:linear-gradient(180deg,rgba(23,26,30,.98),rgba(10,11,13,.98)); transform:translateY(-1px); outline:none; }}
       .metric span {{ color:var(--muted); display:block; font-size:13px; text-transform:uppercase; }}
       .metric strong {{ display:block; margin-top:7px; font-size:28px; }}
+      .flow-intro {{ display:flex; align-items:center; justify-content:space-between; gap:24px; margin-bottom:18px; }}
+      .flow-intro h2,.batch-copy h2 {{ font-size:24px; margin:5px 0 8px; }}
+      .flow-kicker {{ color:#60a5fa; font-size:11px; font-weight:800; letter-spacing:.16em; text-transform:uppercase; }}
+      .flow-live {{ min-width:170px; display:grid; grid-template-columns:auto 1fr; align-items:center; gap:3px 10px; border-left:1px solid var(--line); padding-left:22px; }}
+      .flow-live strong {{ font-size:30px; }}
+      .flow-live span:last-child {{ grid-column:1 / -1; color:var(--muted); font-size:12px; }}
+      .flow-sources {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:14px; }}
+      .flow-source {{ position:relative; border:1px solid var(--line); border-radius:8px; padding:15px 16px 15px 38px; background:rgba(17,19,22,.92); }}
+      .flow-source::before {{ content:""; position:absolute; left:16px; top:20px; width:9px; height:9px; border-radius:50%; background:#60a5fa; box-shadow:0 0 14px rgba(96,165,250,.7); }}
+      .flow-source strong,.flow-source span {{ display:block; }}
+      .flow-source span {{ margin-top:4px; color:var(--muted); font-size:12px; }}
+      .flow-track {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin-bottom:18px; }}
+      .flow-step {{ min-width:0; display:grid; grid-template-columns:auto 1fr; gap:14px; border:1px solid var(--line); border-radius:8px; padding:18px; background:linear-gradient(145deg,rgba(19,21,25,.98),rgba(8,9,11,.98)); }}
+      .flow-step h3 {{ margin:0 0 7px; font-size:16px; }}
+      .flow-step p {{ min-height:66px; margin:0 0 12px; color:var(--muted); font-size:13px; line-height:1.5; }}
+      .flow-number {{ color:#60a5fa; font:700 12px ui-monospace,SFMono-Regular,Consolas,monospace; }}
+      .flow-step .pill {{ border:1px solid rgba(96,165,250,.28); background:rgba(96,165,250,.08); color:#bfdbfe; font-size:10px; letter-spacing:.08em; text-transform:uppercase; }}
+      .batch-panel {{ display:grid; grid-template-columns:minmax(240px,.8fr) minmax(420px,1.5fr); gap:24px; }}
+      .batch-timeline {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; align-items:stretch; }}
+      .batch {{ position:relative; display:flex; flex-direction:column; gap:7px; border:1px solid var(--line); border-radius:8px; padding:14px; background:#090b0e; }}
+      .batch:not(:last-child)::after {{ content:"›"; position:absolute; right:-9px; top:40%; z-index:2; color:#60a5fa; font-size:18px; }}
+      .batch span,.batch small {{ color:var(--muted); font-size:11px; line-height:1.35; }}
+      .batch small {{ margin-top:auto; color:#93c5fd; }}
+      .batch-ready {{ border-color:rgba(52,211,153,.38); }}
+      .batch-working {{ border-color:rgba(251,191,36,.38); }}
+      .batch-final {{ border-color:rgba(96,165,250,.55); background:rgba(37,99,235,.08); }}
+      .batch-rule {{ grid-column:1 / -1; margin:0; border-top:1px solid var(--line); padding-top:14px; color:var(--muted); font-size:12px; }}
       .table {{ display:grid; overflow-x:auto; }}
       .thead,.row {{ display:grid; grid-template-columns:minmax(210px,1.15fr) minmax(130px,.7fr) minmax(170px,.95fr) minmax(90px,.45fr) minmax(90px,.45fr) minmax(340px,1.8fr) minmax(130px,.7fr) minmax(110px,.55fr); gap:14px; min-width:1280px; padding:14px 0; border-bottom:1px solid var(--line); }}
       .node-table .thead,.node-table .row {{ grid-template-columns:minmax(190px,1fr) minmax(120px,.6fr) minmax(180px,.9fr) minmax(310px,1.7fr) minmax(140px,.7fr) minmax(140px,.7fr) minmax(150px,.8fr) minmax(100px,.5fr); }}
@@ -3691,12 +3788,13 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .pager-actions {{ display:flex; gap:10px; }}
       .pager .button[aria-disabled="true"] {{ opacity:.45; pointer-events:none; }}
       .sidebar-bottom {{ margin-top:auto; display:grid; gap:16px; min-width:0; }}
-      .side-card {{ min-width:0; max-width:100%; border:1px solid var(--line); border-radius:8px; background:rgba(6,18,32,.78); padding:16px; overflow:hidden; }}
+      .sidebar-vehicle {{ width:100%; height:92px; object-fit:contain; object-position:center bottom; filter:drop-shadow(0 12px 16px rgba(0,0,0,.7)); }}
+      .side-card {{ min-width:0; max-width:100%; border:1px solid var(--line); border-radius:8px; background:rgba(14,16,19,.9); padding:16px; overflow:hidden; }}
       .status-dot {{ width:9px; height:9px; border-radius:50%; background:#25d7ff; box-shadow:0 0 16px rgba(37,215,255,.7); }}
       .operator {{ display:flex; align-items:center; gap:12px; }}
       .operator > div:last-child {{ min-width:0; }}
       .operator .meta {{ overflow-wrap:anywhere; word-break:break-word; line-height:1.35; }}
-      .avatar {{ width:42px; height:42px; flex:0 0 42px; border-radius:12px; background:linear-gradient(135deg,#14539e,#071f3c); display:grid; place-items:center; font-weight:700; }}
+      .avatar {{ width:42px; height:42px; flex:0 0 42px; border-radius:12px; background:linear-gradient(135deg,#30343a,#111317); display:grid; place-items:center; font-weight:700; }}
       .foot {{ color:var(--muted); font-size:12px; margin-top:22px; overflow-wrap:anywhere; }}
       html[data-theme="light"] {{
         color-scheme: light;
@@ -3735,7 +3833,10 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       html[data-theme="light"] .metric,
       html[data-theme="light"] .panel,
       html[data-theme="light"] .node-profile-card,
-      html[data-theme="light"] .side-card {{
+      html[data-theme="light"] .side-card,
+      html[data-theme="light"] .flow-source,
+      html[data-theme="light"] .flow-step,
+      html[data-theme="light"] .batch {{
         border-color:#dfe5ec;
         background:rgba(255,255,255,.96);
         box-shadow:0 6px 20px rgba(16,24,40,.055);
@@ -3770,22 +3871,23 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         background:linear-gradient(135deg,#dbeafe,#eef4ff);
         color:#075fd8;
       }}
-      @media (max-width: 900px) {{ .shell {{ grid-template-columns:1fr; }} .sidebar {{ position:relative; height:auto; }} .sidebar-bottom {{ display:none; }} .toolbar,.grid.four,.grid.two,.node-profile-grid,.profile-sections,.profile-kv {{ grid-template-columns:1fr; }} .profile-head {{ flex-direction:column; }} .pager {{ align-items:stretch; flex-direction:column; }} .pager-actions {{ display:grid; grid-template-columns:1fr 1fr; }} main {{ padding:22px; }} }}
+      @media (max-width: 1100px) {{ .flow-track {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .batch-panel {{ grid-template-columns:1fr; }} }}
+      @media (max-width: 900px) {{ .shell {{ grid-template-columns:1fr; }} .sidebar {{ position:relative; height:auto; }} .sidebar-bottom {{ display:none; }} .toolbar,.grid.four,.grid.two,.node-profile-grid,.profile-sections,.profile-kv,.flow-track,.flow-sources {{ grid-template-columns:1fr; }} .flow-intro {{ align-items:flex-start; flex-direction:column; }} .flow-live {{ width:100%; border-left:0; border-top:1px solid var(--line); padding:14px 0 0; }} .batch-timeline {{ grid-template-columns:1fr 1fr; }} .profile-head {{ flex-direction:column; }} .pager {{ align-items:stretch; flex-direction:column; }} .pager-actions {{ display:grid; grid-template-columns:1fr 1fr; }} main {{ padding:22px; }} }}
       @media (prefers-reduced-motion: reduce) {{ *,*::before,*::after {{ animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; transition-duration:.01ms!important; }} .motion-lift:hover,.motion-lift:focus-visible,.motion-glow:hover,.motion-glow:focus-visible {{ transform:none; }} }}
     </style>
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar" aria-label="Control plane navigation">
-        <a class="brand motion-glow" href="/" aria-label="EHDA control plane home"><img class="brand-mark" alt="Control plane logo" src="{logo_path}" /> <span>EHDA</span></a>
+        <a class="brand motion-glow" href="/" aria-label="MundusX control plane home"><img class="brand-mark" alt="MundusX logo" src="{logo_path}" /><span class="brand-copy"><strong>MundusX</strong><small>Control Plane</small></span></a>
         <nav class="nav"><a class="nav-item motion-lift" href="/"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6"/></svg>Overview</a>{nav}</nav>
         <div class="sidebar-bottom">
           <div class="side-card">
-            <div style="display:flex;align-items:center;gap:12px;"><span class="status-dot"></span><span>Control Plane Status</span></div>
-            <div style="color:#39d98a;margin-top:10px;">⌄ &nbsp;Healthy</div>
+            <div style="display:flex;align-items:center;gap:12px;"><span class="status-dot"></span><span>MundusX Control Plane</span></div>
+            <div style="color:#54b9ff;margin-top:10px;">Healthy</div>
           </div>
           <div id="admin-account"></div>
-          <div class="foot" style="display:flex;justify-content:space-between;border-top:1px solid rgba(116,139,164,.14);padding-top:18px;"><span>© 2026 EHDA</span><span>v1.0.0</span></div>
+          <div class="foot">MundusX Control Plane<br/>v1.0.0</div>
         </div>
       </aside>
       <main>
@@ -3828,8 +3930,10 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         }});
       }})();
     </script>
+    <script>{live_status_script}</script>
   </body>
 </html>"#,
+        live_status_script = include_str!("live-status.js"),
         title = page.title(),
         logo_path = CONTROL_PLANE_LOGO_PATH,
         nav = nav,
@@ -3837,10 +3941,52 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
     )
 }
 
-fn control_plane_home(
+fn render_recent_logs(state: &ControlPlaneState) -> String {
+    let rows = state
+        .job_events
+        .iter()
+        .rev()
+        .take(4)
+        .map(|event| {
+            let label = event.event_type.replace('_', " ");
+            let context = event
+                .job_id
+                .as_deref()
+                .or(event.node_id.as_deref())
+                .map(|value| {
+                    format!(
+                        r#"<span class="log-context">{}</span>"#,
+                        escape_html(value)
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                r#"<li><span class="log-dot"></span><time>{}</time><span class="log-level">INFO</span><span class="log-message">{}{}</span></li>"#,
+                escape_html(&event.created_at),
+                escape_html(&label),
+                context
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        r#"<li class="log-empty"><span class="log-dot"></span><span class="log-message">No operational events recorded yet.</span></li>"#
+            .to_string()
+    } else {
+        rows.join("")
+    }
+}
+
+#[cfg(test)]
+fn control_plane_home(state: &ControlPlaneState, storage_source: StorageSource, sync_status: &SupabaseSyncStatus) -> String {
+    control_plane_home_with_metrics(state, storage_source, sync_status, None)
+}
+
+fn control_plane_home_with_metrics(
     state: &ControlPlaneState,
     storage_source: StorageSource,
     sync_status: &SupabaseSyncStatus,
+    metrics: Option<&serde_json::Value>,
 ) -> String {
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
@@ -3848,12 +3994,12 @@ fn control_plane_home(
     let _paused = snapshot["paused_count"].as_u64().unwrap_or(0);
     let policy_blocked = snapshot["policy_blocked_count"].as_u64().unwrap_or(0);
     let job_events = snapshot["job_events"].as_u64().unwrap_or(0);
-    let credits_ledger = snapshot["credits_ledger"].as_u64().unwrap_or(0);
+    let total_requests = metrics.and_then(|m| m["total_requests"].as_str()).unwrap_or("Unavailable");
+    let generated_tokens = metrics.and_then(|m| m["generated_tokens"].as_str()).unwrap_or("Unavailable");
     let credits_total = snapshot["credits_total"].as_f64().unwrap_or(0.0);
     let queued = snapshot["queued_job_count"].as_u64().unwrap_or(0);
     let assigned = snapshot["assigned_job_count"].as_u64().unwrap_or(0);
     let completed = snapshot["completed_job_count"].as_u64().unwrap_or(0);
-    let failed = snapshot["failed_job_count"].as_u64().unwrap_or(0);
     let healthy_tone = "green";
     let database = sync_status.dashboard_summary();
     let database_tone = sync_status.tone();
@@ -3894,6 +4040,7 @@ fn control_plane_home(
             r#"<span class="pill pill-amber">deploy: unavailable</span>"#.to_string()
         });
     let topology_slots = render_topology_slots(state);
+    let recent_logs = render_recent_logs(state);
 
     format!(
         r##"<!doctype html>
@@ -3902,7 +4049,7 @@ fn control_plane_home(
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Space+Grotesk:wght@400;500;600;700&amp;display=swap">
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Control Plane</title>
+    <title>MundusX Control Plane</title>
     <script>
       (() => {{
         try {{
@@ -3918,17 +4065,17 @@ fn control_plane_home(
 button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ font-family:"JetBrains Mono",ui-monospace,monospace; }}
       :root {{
         color-scheme: dark;
-        --bg: #070d14;
-        --surface: rgba(14, 21, 29, 0.96);
-        --surface-2: rgba(17, 25, 35, 0.92);
-        --panel: rgba(10, 17, 24, 0.96);
-        --line: rgba(116, 139, 164, 0.22);
-        --line-strong: rgba(64, 148, 255, 0.56);
-        --text: #f2f6fb;
-        --muted: #a5b0c0;
-        --blue: #4094ff;
-        --cyan: #4094ff;
-        --purple: #704cff;
+        --bg: #050607;
+        --surface: rgba(13, 15, 18, 0.96);
+        --surface-2: rgba(18, 20, 24, 0.92);
+        --panel: rgba(9, 10, 12, 0.94);
+        --line: rgba(148, 163, 184, 0.2);
+        --line-strong: rgba(45, 164, 255, 0.48);
+        --text: #f6fbff;
+        --muted: #9baac0;
+        --blue: #33a8ff;
+        --cyan: #25d7ff;
+        --purple: #9b6cff;
         --green: #39d98a;
         --orange: #f18f3b;
         --amber: #edb73f;
@@ -3942,8 +4089,9 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         margin: 0;
         min-height: 100vh;
         background:
-          radial-gradient(circle at 72% 0%, rgba(31, 89, 142, 0.08), transparent 31%),
-          linear-gradient(135deg, #071019 0%, #070c12 60%, #050a10 100%);
+          radial-gradient(circle at 48% 32%, rgba(255, 255, 255, 0.045), transparent 30%),
+          radial-gradient(circle at 78% 10%, rgba(96, 165, 250, 0.04), transparent 25%),
+          linear-gradient(135deg, #020203 0%, #0c0e11 52%, #030304 100%);
         color: var(--text);
         font-family: "Space Grotesk", system-ui, sans-serif;
       }}
@@ -3992,29 +4140,47 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         position: sticky;
         top: 0;
         height: 100vh;
-        border-right: 1px solid #26303b;
-        background: linear-gradient(180deg, rgba(10, 17, 25, 0.98), rgba(9, 16, 24, 0.93));
-        padding: 28px 18px 18px;
+        border-right: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(4, 5, 6, 0.99), rgba(11, 12, 14, 0.96));
+        padding: 26px 16px 18px;
         display: flex;
         flex-direction: column;
         gap: 22px;
       }}
       .brand {{
         display: flex;
+        flex-direction: column;
         align-items: center;
-        gap: 12px;
+        justify-content: center;
+        gap: 10px;
+        min-height: 112px;
         font-family: "Space Grotesk", system-ui, sans-serif;
-        font-size: 26px;
-        font-weight: 750;
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
         color: #fff;
         border-radius: 8px;
       }}
       .brand-mark {{
-        width: 38px;
-        height: 38px;
-        border-radius: 0;
+        width: 82px;
+        height: 82px;
+        border-radius: 50%;
         object-fit: contain;
         filter: drop-shadow(0 0 16px rgba(70, 174, 255, 0.34));
+      }}
+      .brand-copy {{
+        display: grid;
+        gap: 4px;
+        text-align: center;
+      }}
+      .brand-copy strong {{
+        font-size: 17px;
+        letter-spacing: 0.22em;
+      }}
+      .brand-copy small {{
+        color: var(--muted);
+        font: 10px Inter, "Segoe UI", sans-serif;
+        letter-spacing: 0.15em;
       }}
       .nav {{
         display: grid;
@@ -4054,12 +4220,19 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         gap: 16px;
         min-width: 0;
       }}
+      .sidebar-vehicle {{
+        width: 100%;
+        height: 108px;
+        object-fit: contain;
+        object-position: center bottom;
+        filter: drop-shadow(0 13px 18px rgba(0, 0, 0, 0.72));
+      }}
       .side-card {{
         min-width: 0;
         max-width: 100%;
         border: 1px solid var(--line);
         border-radius: 8px;
-        background: rgba(6, 18, 32, 0.78);
+        background: rgba(14, 16, 19, 0.92);
         padding: 16px;
         overflow: hidden;
       }}
@@ -4088,7 +4261,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         height: 42px;
         flex: 0 0 42px;
         border-radius: 12px;
-        background: linear-gradient(135deg, #14539e, #071f3c);
+        background: linear-gradient(135deg, #34383f, #121418);
         display: grid;
         place-items: center;
         font-weight: 700;
@@ -4136,7 +4309,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .refresh-button {{
         border: 1px solid var(--line);
         border-radius: 8px;
-        background: rgba(4, 12, 23, 0.72);
+        background: rgba(14, 16, 19, 0.9);
         color: var(--text);
         min-height: 42px;
         display: inline-flex;
@@ -4196,14 +4369,15 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       }}
       .secondary-metrics {{
         display: grid;
-        grid-template-columns: repeat(7, minmax(0, 1fr));
-        gap: 13px;
-        margin-top: 14px;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 18px;
+        margin-top: 18px;
       }}
       .card {{
         border: 1px solid var(--line);
         background:
-          linear-gradient(145deg, rgba(19, 28, 38, 0.96), rgba(12, 19, 27, 0.95));
+          radial-gradient(circle at 86% 80%, rgba(96, 165, 250, 0.055), transparent 38%),
+          linear-gradient(180deg, rgba(19, 21, 25, 0.97), rgba(8, 9, 11, 0.98));
         border-radius: 8px;
         padding: 18px;
         position: relative;
@@ -4237,7 +4411,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         border-color: rgba(237, 183, 63, 0.42);
         background:
           radial-gradient(circle at 86% 80%, rgba(237, 183, 63, 0.14), transparent 38%),
-          linear-gradient(180deg, rgba(8, 23, 41, 0.92), rgba(3, 10, 19, 0.92));
+          linear-gradient(180deg, rgba(19, 21, 25, 0.97), rgba(8, 9, 11, 0.98));
       }}
       .planner-status-card[data-tone="green"] {{
         border-color: rgba(57, 217, 138, 0.4);
@@ -4289,9 +4463,95 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         gap: 16px;
         margin-top: 16px;
       }}
+      .work-column {{
+        display: grid;
+        gap: 18px;
+        align-content: start;
+        min-width: 0;
+      }}
+      .planner-health {{
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--green);
+        font-size: 16px;
+        margin: 10px 0 22px;
+      }}
+      .planner-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+        padding-top: 18px;
+        border-top: 1px solid rgba(73, 159, 255, 0.14);
+      }}
+      .planner-grid > div + div {{
+        border-left: 1px solid rgba(73, 159, 255, 0.14);
+        padding-left: 18px;
+      }}
+      .planner-value {{
+        margin-top: 7px;
+        font-size: 17px;
+      }}
+      .planner-value.good {{ color: var(--green); }}
+      .credit-periods {{
+        display: grid;
+        gap: 0;
+        margin-top: 16px;
+      }}
+      .credit-periods div {{
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 16px 0;
+        border-top: 1px solid rgba(73, 159, 255, 0.12);
+      }}
+      .recent-logs {{
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 10px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 12px;
+      }}
+      .recent-logs li {{
+        display: grid;
+        grid-template-columns: 8px minmax(78px, auto) auto minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }}
+      .log-dot {{
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--blue);
+        box-shadow: 0 0 10px rgba(51, 168, 255, 0.7);
+      }}
+      .recent-logs time {{ color: #a9b8ca; }}
+      .log-level {{
+        border-radius: 5px;
+        padding: 2px 6px;
+        background: rgba(57, 217, 138, 0.11);
+        color: var(--green);
+      }}
+      .log-message {{
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #cbd6e4;
+      }}
+      .log-context {{
+        margin-left: 8px;
+        color: var(--muted);
+      }}
+      .log-empty {{
+        grid-template-columns: 8px minmax(0, 1fr) !important;
+      }}
       .section {{
         border: 1px solid var(--line);
-        background: linear-gradient(145deg, rgba(15, 23, 32, 0.96), rgba(10, 17, 24, 0.96));
+        background: linear-gradient(180deg, rgba(18, 20, 23, 0.96), rgba(7, 8, 10, 0.98));
         border-radius: 8px;
         overflow: hidden;
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -4379,14 +4639,14 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
       .topology-center::before {{
         inset: 0;
         z-index: 2;
-        background: linear-gradient(145deg, rgba(126, 220, 255, 0.98), rgba(44, 147, 255, 0.76) 42%, rgba(128, 86, 255, 0.72));
-        filter: drop-shadow(0 0 16px rgba(45, 174, 255, 0.54));
+        background: linear-gradient(145deg, rgba(226, 232, 240, 0.9), rgba(100, 116, 139, 0.64) 48%, rgba(30, 33, 38, 0.92));
+        filter: drop-shadow(0 0 16px rgba(148, 163, 184, 0.24));
       }}
       .topology-center::after {{
         inset: 2px;
         z-index: 3;
-        background: radial-gradient(circle at 50% 45%, rgba(50, 161, 255, 0.42), rgba(5, 20, 36, 0.98) 66%);
-        box-shadow: inset 0 0 24px rgba(51, 168, 255, 0.28);
+        background: radial-gradient(circle at 50% 45%, rgba(71, 77, 87, 0.42), rgba(7, 8, 10, 0.99) 66%);
+        box-shadow: inset 0 0 24px rgba(148, 163, 184, 0.12);
       }}
       .topology-center:hover {{
         transform: translate(-50%, -50%) scale(1.03);
@@ -4837,6 +5097,10 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         .sidebar {{
           position: relative;
           height: auto;
+          width: 100%;
+          min-width: 0;
+          max-width: 100vw;
+          overflow: hidden;
           border-right: 0;
           border-bottom: 1px solid var(--line);
         }}
@@ -4849,13 +5113,22 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         .table .row {{ grid-template-columns: 1.1fr 0.9fr 0.7fr 0.7fr 1fr 1fr 0.7fr; }}
       }}
       @media (max-width: 820px) {{
+        .sidebar {{ padding: 14px; gap: 12px; }}
+        .brand {{ min-height: 68px; flex-direction: row; justify-content: flex-start; font-size: 11px; }}
+        .brand-mark {{ width: 54px; height: 54px; }}
         .main {{ padding: 22px 14px; }}
         .topbar,
         .actions {{ flex-direction: column; align-items: stretch; }}
-        .nav {{ grid-template-columns: 1fr 1fr; }}
+        .nav {{ width: 100%; min-width: 0; display: flex; overflow-x: auto; gap: 8px; padding-bottom: 5px; scrollbar-width: none; }}
+        .nav::-webkit-scrollbar {{ display: none; }}
+        .nav-item {{ flex: 0 0 auto; min-height: 46px; white-space: nowrap; }}
         .primary-metrics,
         .secondary-metrics,
-        .credits-layout {{ grid-template-columns: 1fr; }}
+        .credits-layout,
+        .planner-grid {{ grid-template-columns: 1fr; }}
+        .planner-grid > div + div {{ border-left: 0; padding-left: 0; padding-top: 14px; border-top: 1px solid rgba(73, 159, 255, 0.14); }}
+        .recent-logs li {{ grid-template-columns: 8px auto minmax(0, 1fr); }}
+        .recent-logs time {{ display: none; }}
         h1 {{ font-size: 30px; }}
         .topology {{ height: 470px; }}
         .orbit {{ inset: 112px 20px 82px; }}
@@ -4899,7 +5172,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
   <body>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Control plane navigation">
-        <a class="brand motion-glow" href="/" aria-label="Control plane home"><img class="brand-mark" alt="Control plane logo" src="{logo_path}" /> <span>Control Plane</span></a>
+        <a class="brand motion-glow" href="/" aria-label="MundusX control plane home"><img class="brand-mark" alt="MundusX logo" src="{logo_path}" /><span class="brand-copy"><strong>MundusX</strong><small>Control Plane</small></span></a>
         <nav class="nav">
           <a class="nav-item motion-lift active" href="/"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>Overview</a>
           <span class="nav-group">Operations</span>
@@ -4914,11 +5187,12 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         </nav>
         <div class="sidebar-bottom">
           <div class="side-card">
-            <div style="display:flex;align-items:center;gap:12px;"><span class="status-dot"></span><span>Control Plane Status</span></div>
-            <div style="color:#54b9ff;margin-top:10px;">Healthy</div>
+            <div style="display:flex;align-items:center;gap:12px;"><span class="status-dot"></span><span>MundusX Control Plane</span></div>
+            <div style="color:var(--green);margin-top:10px;">Healthy</div>
+            <div class="meta" style="margin-top:8px;">All systems operational</div>
           </div>
           <div id="admin-account"></div>
-          <div class="foot">Control Plane<br/>v1.0.0</div>
+          <div class="foot">MundusX Control Plane<br/>v1.0.0</div>
         </div>
       </aside>
 
@@ -4926,7 +5200,7 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         <header class="topbar">
           <div>
             <div class="title-line">
-              <h1>Control Plane</h1>
+              <h1>MundusX Control Plane</h1>
               <svg class="shield-mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v8"/><path d="M9 12h6"/></svg>
             </div>
             <div class="sub">Real-time overview of your compute network, security posture, jobs, storage, and audit trail.</div>
@@ -4948,53 +5222,77 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
 
         <section class="primary-metrics" aria-label="Primary metrics">
           <a class="card metric-link" href="/nodes?state=online"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="16" r="2.5"/><circle cx="19" cy="16" r="2.5"/><path d="M10 7 6.5 14"/><path d="m14 7 3.5 7"/><path d="M7.5 16h9"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Online nodes</div><div class="card-value">{nodes}</div><div class="delta">Open Nodes</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 33 C14 28 16 17 27 19 C36 21 35 34 47 31 C60 28 54 12 69 11 C82 11 77 25 89 22 C101 19 102 8 120 4" stroke="#188fff" stroke-width="2"/></svg></a>
-          <a class="card metric-link" href="/registry?trust=trusted"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Trusted nodes</div><div class="card-value">{trusted}</div><div class="delta">Open Registry</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C10 14 18 34 27 19 S41 23 50 16 S66 27 74 13 S92 19 120 3" stroke="#188fff" stroke-width="2"/></svg></a>
+          <a class="card metric-link" href="/registry?trust=trusted"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label" title="Nodes whose identity keys use the system keychain">Keychain-backed identities</div><div class="card-value">{trusted}</div><div class="delta">Open Registry</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C10 14 18 34 27 19 S41 23 50 16 S66 27 74 13 S92 19 120 3" stroke="#188fff" stroke-width="2"/></svg></a>
           <a class="card metric-link" href="/jobs?status=queued"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Queued jobs</div><div class="card-value">{queued}</div><div class="delta">Open Jobs</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 34 C12 33 12 13 27 9 C39 6 42 31 55 28 C68 25 69 11 82 15 C95 19 99 17 120 4" stroke="#188fff" stroke-width="2"/></svg></a>
-          <a class="card metric-link" href="/credits"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Total credits</div><div class="card-value">{credits_total:.2}</div><div class="delta">Open Credits</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C12 12 19 27 30 20 S44 26 55 16 S70 20 80 7 S99 32 120 18" stroke="#188fff" stroke-width="2"/></svg></a>
+          <a class="card metric-link" href="/credits" data-live-key="credits-total"><div class="metric-icon"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></div><div style="position:absolute;left:104px;top:22px;"><div class="card-label">Total credits</div><div class="card-value">{credits_total:.2}</div><div class="delta">Open Credits</div></div><svg class="sparkline" viewBox="0 0 120 44" fill="none"><path d="M0 30 C12 12 19 27 30 20 S44 26 55 16 S70 20 80 7 S99 32 120 18" stroke="#188fff" stroke-width="2"/></svg></a>
         </section>
 
         <section class="secondary-metrics" aria-label="Secondary metrics">
           <a class="card compact metric-link" href="/jobs"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-5"/></svg><div><div class="card-label">Job events</div><div class="card-value">{job_events}</div></div></a>
-          <a class="card compact metric-link" href="/credits"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg><div><div class="card-label">Credits ledger</div><div class="card-value">{credits_ledger}</div></div></a>
+          <a class="card compact metric-link" href="/jobs" data-live-key="total-requests"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg><div><div class="card-label">Total requests</div><div class="card-value">{total_requests}</div></div></a>
           <a class="card compact metric-link" href="/jobs?status=assigned"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="7" r="4"/></svg><div><div class="card-label">Assigned jobs</div><div class="card-value">{assigned}</div></div></a>
           <a class="card compact metric-link" href="/jobs?status=completed"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-5"/></svg><div><div class="card-label">Completed jobs</div><div class="card-value">{completed}</div></div></a>
-          <a class="card compact metric-link" href="/jobs?status=failed"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><div><div class="card-label">Failed jobs</div><div class="card-value">{failed}</div></div></a>
+          <a class="card compact metric-link" href="/v1/usage/tokens" data-live-key="generated-tokens" title="Measured LLM output tokens; excludes input tokens and media"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z"/></svg><div><div class="card-label">Generated tokens</div><div class="card-value">{generated_tokens}</div></div></a>
           <a class="card compact metric-link" href="/registry?policy=blocked"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v8"/><path d="M9 12h6"/></svg><div><div class="card-label">Policy blocked</div><div class="card-value">{policy_blocked}</div></div></a>
-          <a class="card compact metric-link planner-status-card" data-tone="{planner_tone}" href="/v1/planner/status"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Z"/><path d="M12 8v8"/><path d="M8 12h8"/></svg><div><div class="card-label">Planner Service</div><div class="card-value">{planner_status}</div><div class="delta">{planner_mode} - {planner_provider} - {planner_latency} - {planner_configured}</div></div></a>
         </section>
 
         <section class="work-grid">
-          <div class="section">
-            <div class="section-head">
-              <div class="section-title-row"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="16" r="2.5"/><circle cx="19" cy="16" r="2.5"/><path d="M10 7 6.5 14"/><path d="m14 7 3.5 7"/><path d="M7.5 16h9"/></svg><div><h2 class="section-title">Network Topology</h2><div class="meta">Live view of compute network</div></div></div>
-              <div class="legend"><span><i class="legend-dot"></i>Online</span><span><i class="legend-dot trusted"></i>Trusted</span><span><i class="legend-dot paused"></i>Paused</span><span><i class="legend-dot offline"></i>Offline</span></div>
-            </div>
-            <div class="section-body">
-              <div class="topology">
-                <div class="orbit"></div><div class="grid-ring"></div>
-                <div class="radial"></div><div class="radial r2"></div><div class="radial r3"></div><div class="radial r4"></div><div class="radial r5"></div><div class="radial r6"></div><div class="radial r7"></div><div class="radial r8"></div>
-                <div class="topology-center motion-glow"><span class="logo-signal s1" aria-hidden="true"></span><span class="logo-signal s2" aria-hidden="true"></span><span class="logo-signal s3" aria-hidden="true"></span><img class="center-logo" alt="Compute topology logo" src="{logo_path}" /></div>
-                {topology_slots}
+          <div class="work-column">
+            <div class="section">
+              <div class="section-head">
+                <div class="section-title-row"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="16" r="2.5"/><circle cx="19" cy="16" r="2.5"/><path d="M10 7 6.5 14"/><path d="m14 7 3.5 7"/><path d="M7.5 16h9"/></svg><div><h2 class="section-title">Network Topology</h2><div class="meta">Live view of compute network</div></div></div>
+                <div class="legend"><span><i class="legend-dot"></i>Online</span><span><i class="legend-dot trusted"></i>Keychain-backed</span><span><i class="legend-dot paused"></i>Paused</span><span><i class="legend-dot offline"></i>Offline</span></div>
               </div>
-              <div class="panel-footer">{nodes} nodes registered</div>
+              <div class="section-body">
+                <div class="topology">
+                  <div class="orbit"></div><div class="grid-ring"></div>
+                  <div class="radial"></div><div class="radial r2"></div><div class="radial r3"></div><div class="radial r4"></div><div class="radial r5"></div><div class="radial r6"></div><div class="radial r7"></div><div class="radial r8"></div>
+                  <div class="topology-center motion-glow"><span class="logo-signal s1" aria-hidden="true"></span><span class="logo-signal s2" aria-hidden="true"></span><span class="logo-signal s3" aria-hidden="true"></span><img class="center-logo" alt="Compute topology logo" src="{logo_path}" /></div>
+                  {topology_slots}
+                </div>
+                <div class="panel-footer">{nodes} nodes registered</div>
+              </div>
+            </div>
+            <div class="section">
+              <div class="section-head">
+                <h2 class="section-title">Recent Logs</h2>
+                <a class="api-link" href="/v1/job-events?page=1&page_size=25">View all</a>
+              </div>
+              <div class="section-body">
+                <ul class="recent-logs">{recent_logs}</ul>
+              </div>
             </div>
           </div>
 
-          <div class="section">
-            <div class="section-head">
-              <div class="section-title-row"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg><h2 class="section-title">Credits Overview</h2></div>
-              <span class="endpoint-button" style="min-height:34px;">7D</span>
+          <div class="work-column">
+            <div class="section planner-status-card" data-tone="{planner_tone}">
+              <div class="section-head">
+                <div class="section-title-row"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7v5M5 16v-4h14v4"/></svg><h2 class="section-title">Planner Status</h2></div>
+              </div>
+              <div class="section-body">
+                <div class="meta">Service Status</div>
+                <div class="planner-health"><span class="live-dot"></span>{planner_status}</div>
+                <div class="planner-grid">
+                  <div><div class="meta">Provider</div><div class="planner-value">{planner_provider}</div><div class="meta">{planner_mode} · {planner_configured}</div></div>
+                  <div><div class="meta">Latency</div><div class="planner-value good">{planner_latency}</div></div>
+                </div>
+              </div>
             </div>
-            <div class="section-body">
-              <div class="credits-layout">
-                <div><div class="meta">Total Credits</div><div class="credit-total">{credits_total:.2}</div></div>
-                <svg viewBox="0 0 180 82" fill="none"><path d="M0 56 C12 14 20 78 35 42 S51 70 64 18 S82 64 96 36 S118 46 130 22 S155 35 180 18" stroke="#248fff" stroke-width="2"/></svg>
+
+            <div class="section">
+              <div class="section-head">
+                <h2 class="section-title">Planner Overview</h2>
+                <span class="endpoint-button" style="min-height:34px;">7D</span>
               </div>
-              <p class="meta" style="font-size:15px;line-height:1.7;">Credits are accrued through the append-only ledger and exposed at <code>/v1/credits</code>.</p>
-              <div class="info-box">
-                <div style="display:flex;gap:12px;align-items:flex-start;"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><div>Policy-aware nodes stay visible in the registry, but quiet nodes are excluded from scheduling.<br/>Current database status: <code>{database}</code></div></div>
+              <div class="section-body">
+                <div class="credits-layout">
+                  <div><div class="meta">Total Credits</div><div class="credit-total">{credits_total:.2}</div></div>
+                  <svg viewBox="0 0 180 82" fill="none"><path d="M0 56 C12 14 20 78 35 42 S51 70 64 18 S82 64 96 36 S118 46 130 22 S155 35 180 18" stroke="#248fff" stroke-width="2"/></svg>
+                </div>
+                <div class="credit-periods"><div><span>Today</span><strong>{credits_total:.2}</strong></div><div><span>This Week</span><strong>{credits_total:.2}</strong></div><div><span>This Month</span><strong>{credits_total:.2}</strong></div></div>
+                <div class="info-box">Database status: <code>{database}</code></div>
+                <div class="api-strip links" aria-label="Developer APIs"><span class="meta">Developer APIs</span><a class="api-link" href="/health">health json</a><a class="api-link" href="/v1/status">status json</a><a class="api-link" href="/v1/nodes?page=1&page_size=25">nodes json</a><a class="api-link" href="/v1/jobs?page=1&page_size=25">jobs json</a></div>
               </div>
-              <div class="api-strip links" aria-label="Developer APIs"><span class="meta">Developer APIs</span><a class="api-link" href="/health">health json</a><a class="api-link" href="/v1/status">status json</a><a class="api-link" href="/v1/nodes?page=1&page_size=25">nodes json</a><a class="api-link" href="/v1/jobs?page=1&page_size=25">jobs json</a><a class="api-link" href="/v1/credits?page=1&page_size=25">credits json</a></div>
             </div>
           </div>
         </section>
@@ -5020,9 +5318,12 @@ button,input,select,textarea {{ font-family:inherit; }} code,pre,kbd,samp {{ fon
         sync();
       }})();
     </script>
+    <script>{live_status_script}</script>
   </body>
 </html>"##,
+        live_status_script = include_str!("live-status.js"),
         logo_path = CONTROL_PLANE_LOGO_PATH,
+        recent_logs = recent_logs,
         deploy_badge = deploy_badge,
         planner_tone = planner_tone,
         planner_status = escape_html(planner_status),
@@ -5478,13 +5779,13 @@ fn control_filter_form(page: OperatorPage, query: Option<&str>, api_path: &str) 
     let api_href = escape_html(api_path);
 
     match page {
-        OperatorPage::Skills => String::new(),
+        OperatorPage::Skills | OperatorPage::Flow => String::new(),
         OperatorPage::Nodes | OperatorPage::Registry => format!(
             r#"<form class="toolbar" method="get" action="{action}">
               <input name="search" aria-label="Search" placeholder="Search node id, host, model, backend" value="{search}" />
               <select name="state" aria-label="Filter state"><option value="">All states</option><option value="online"{online}>Online</option><option value="ready"{ready}>Ready</option><option value="busy"{busy}>Busy</option><option value="paused"{paused}>Paused</option><option value="stopped"{stopped}>Stopped</option></select>
               <select name="backend" aria-label="Filter backend"><option value="">All backends</option><option value="vllm"{vllm}>vLLM</option><option value="cuda"{cuda}>CUDA</option><option value="m"{m}>M-series</option><option value="auto"{auto}>Auto</option></select>
-              <select name="trust" aria-label="Filter trust"><option value="">All trust</option><option value="trusted"{trusted}>Trusted</option><option value="untrusted"{untrusted}>Untrusted</option></select>
+              <select name="trust" aria-label="Filter trust"><option value="">All identity storage</option><option value="trusted"{trusted}>Keychain-backed</option><option value="untrusted"{untrusted}>Other identity storage</option></select>
               <select name="policy" aria-label="Filter policy"><option value="">All policy</option><option value="allowed"{policy_allowed}>Allowed</option><option value="blocked"{policy_blocked}>Blocked</option></select>
               <input name="recorded_after" aria-label="Heartbeat after timestamp" placeholder="heartbeat after timestamp" value="{start}" />
               <input name="recorded_before" aria-label="Heartbeat before timestamp" placeholder="heartbeat before timestamp" value="{end}" />
@@ -7171,11 +7472,15 @@ fn handle_connection_with_streams(
             json_response("200 OK", chat_gateway::models_response(model))
         }
         ("GET", "/") => {
+            let metrics = match supabase {
+                Some(DatabaseMirror::Postgres(store)) => store.dashboard_usage_metrics().ok(),
+                _ => None,
+            };
             let snapshot = state.lock().expect("state lock");
             let sync_snapshot = sync_status.lock().expect("sync status lock").clone();
             html_response(
                 "200 OK",
-                &control_plane_home(&snapshot, storage_source, &sync_snapshot),
+                &control_plane_home_with_metrics(&snapshot, storage_source, &sync_snapshot, metrics.as_ref()),
             )
         }
         ("GET", path) if path.starts_with("/nodes/") => {
@@ -8326,7 +8631,7 @@ fn handle_connection_with_streams(
                 json_response("200 OK", guard.jobs_snapshot())
             } else {
                 let mut jobs = guard.jobs.values().cloned().collect::<Vec<_>>();
-                jobs.reverse();
+                sort_jobs_newest_first(&mut jobs);
                 let jobs = filter_json_items(jobs, query, "jobs");
                 json_response("200 OK", paginated_items_response(jobs, query, "jobs"))
             }
@@ -9239,6 +9544,7 @@ fn handle_connection_with_streams(
 
                     let mut streamed_content = String::new();
                     let mut native_stream = native_stream::NativeStream::default();
+                    let mut native_delta_decoder = native_stream::DeltaDecoder::default();
                     let completed_result = if live_stream_job {
                         chat_gateway::wait_for_job_with_stream(
                             &state,
@@ -9248,14 +9554,21 @@ fn handle_connection_with_streams(
                             |delta| {
                                 let event = match delta {
                                     Some(delta) if native_tool_turn => {
-                                        let delta: serde_json::Value = serde_json::from_str(delta)
-                                            .map_err(|e| format!("invalid native stream delta: {e}"))?;
-                                        native_stream.push(&delta)?;
-                                        chat_gateway::sse_frame(&format!("data: {}\n\n", serde_json::json!({
-                                            "id": completion_id, "object":"chat.completion.chunk",
-                                            "created":created, "model":public_model,
-                                            "choices":[{"index":0,"delta":delta,"finish_reason":null}]
-                                        })))
+                                        let deltas = native_delta_decoder.push(delta)?;
+                                        if deltas.is_empty() {
+                                            chat_gateway::sse_keep_alive().to_string()
+                                        } else {
+                                            let mut events = String::new();
+                                            for delta in deltas {
+                                                native_stream.push(&delta)?;
+                                                events.push_str(&format!("data: {}\n\n", serde_json::json!({
+                                                    "id": completion_id, "object":"chat.completion.chunk",
+                                                    "created":created, "model":public_model,
+                                                    "choices":[{"index":0,"delta":delta,"finish_reason":null}]
+                                                })));
+                                            }
+                                            chat_gateway::sse_frame(&events)
+                                        }
                                     }
                                     Some(delta) => {
                                         streamed_content.push_str(delta);
@@ -9465,17 +9778,21 @@ fn handle_connection_with_streams(
                     let result = live_streams
                         .lock()
                         .expect("live stream registry lock")
-                        .push(&delta.job_id, delta.sequence, delta.delta);
+                        .push_for_active_job(&delta.job_id, delta.sequence, delta.delta);
                     match result {
                         Ok(outcome) => json_response(
                             "200 OK",
-                            serde_json::to_value(JobStreamAck {
-                                job_id: delta.job_id,
-                                sequence: delta.sequence,
-                                accepted: outcome == chat_gateway::PushDeltaResult::Accepted,
-                                duplicate: outcome == chat_gateway::PushDeltaResult::Duplicate,
-                            })
-                            .expect("stream ack json"),
+                            serde_json::json!({
+                                "job_id": delta.job_id,
+                                "sequence": delta.sequence,
+                                "accepted": outcome != chat_gateway::PushDeltaResult::Duplicate,
+                                "duplicate": outcome == chat_gateway::PushDeltaResult::Duplicate,
+                                "delivery": if outcome == chat_gateway::PushDeltaResult::FinalCompletion {
+                                    "final_completion"
+                                } else {
+                                    "live"
+                                },
+                            }),
                         ),
                         Err(error) => {
                             json_response("409 Conflict", serde_json::json!({ "error": error }))
@@ -9488,11 +9805,44 @@ fn handle_connection_with_streams(
                 serde_json::json!({ "error": error.to_string() }),
             ),
         },
+        ("GET", "/v1/usage/tokens") => match supabase {
+            Some(DatabaseMirror::Postgres(store)) => match store.runtime_token_totals() {
+                Ok(value)=>json_response("200 OK",value),
+                Err(_)=>json_response("503 Service Unavailable",serde_json::json!({"error":"Measured token statistics temporarily unavailable"})),
+            },
+            _=>json_response("503 Service Unavailable",serde_json::json!({"error":"Measured token statistics require PostgreSQL"})),
+        },
         ("POST", "/v1/jobs/complete") => match serde_json::from_str::<JobCompletion>(&request.body)
         {
             Ok(completion) => {
+                let token_usage=match runtime_usage::parse(&request.body) {
+                    Ok(records)=>records,
+                    Err(error)=>return stream.write_all(json_response("400 Bad Request",serde_json::json!({"error":error})).as_bytes()).unwrap_or(()),
+                };
                 let completion_clone = completion.clone();
                 let mut guard = state.lock().expect("state lock");
+                if !token_usage.is_empty() {
+                    if header_value(&request.headers,"x-mundusx-node-id") != Some(completion.node_id.as_str()) {
+                        return stream.write_all(json_response("403 Forbidden",serde_json::json!({"error":"Runtime usage identity mismatch"})).as_bytes()).unwrap_or(());
+                    }
+                    let active=guard.jobs.get(&completion.job_id).is_some_and(|job| {
+                        (!job.graph_execution_enabled && job.status==contracts::JobStatus::Assigned)
+                        || job.graph.nodes.iter().any(|n| n.status==contracts::JobGraphNodeStatus::Running && n.assigned_node_id.as_deref()==Some(completion.node_id.as_str()))
+                    });
+                    let valid=guard.jobs.get(&completion.job_id).is_some_and(|job| {
+                        (!job.graph_execution_enabled && job.assigned_node_id.as_deref()==Some(completion.node_id.as_str())
+                            && (active || job.worker_id.as_deref()==Some(completion.worker_id.as_str())))
+                        || job.graph.nodes.iter().any(|n| n.assigned_node_id.as_deref()==Some(completion.node_id.as_str())
+                            && (matches!(n.status,contracts::JobGraphNodeStatus::Running)
+                                || n.worker_id.as_deref()==Some(completion.worker_id.as_str())))
+                    });
+                    if !valid {return stream.write_all(json_response("403 Forbidden",serde_json::json!({"error":"Runtime usage must belong to the assigned worker"})).as_bytes()).unwrap_or(());}
+                    let stored=match supabase {
+                        Some(DatabaseMirror::Postgres(store))=>store.record_runtime_token_usage(&completion,&token_usage,active),
+                        _=>Err("Runtime usage storage is unavailable".into()),
+                    };
+                    if stored.is_err() {return stream.write_all(json_response("503 Service Unavailable",serde_json::json!({"error":"Could not persist runtime usage; retry completion"})).as_bytes()).unwrap_or(());}
+                }
                 let record = guard.complete_job(completion, now_unix_seconds());
                 let mut completion_event = None;
                 let mut credit_award = None;
@@ -9705,7 +10055,7 @@ fn main() {
     let supabase = DatabaseMirror::from_env();
     let bind_addr = control_plane_bind_addr().expect("resolve bind address");
     let listener = TcpListener::bind(&bind_addr).expect("bind control plane");
-    let (restored_state, storage_source, sync_status) = match supabase.as_ref() {
+    let (mut restored_state, storage_source, sync_status) = match supabase.as_ref() {
         Some(db) => match db.restore_state() {
             Ok(state) => {
                 println!("restore: {}", db.label());
@@ -9736,6 +10086,7 @@ fn main() {
             )
         }
     };
+    restored_state.ensure_job_totals_from_hot_history();
     let state = Arc::new(Mutex::new(restored_state));
     let live_streams = Arc::new(Mutex::new(chat_gateway::LiveStreamRegistry::default()));
     let chat_admission = Arc::new(chat_gateway::ChatAdmissionController::from_env());
@@ -9825,8 +10176,9 @@ mod tests {
         status_snapshot_with_deploy_fingerprint, trust_grade, trust_grade_badge,
         HarnessAttemptRoute, HttpRequestReadError, OperatorAuthMode, OperatorPage, StorageSource,
         SupabaseSyncStatus, AUTH_DISABLED_ENV, CONTROL_PLANE_ENVIRONMENT_ENV,
-        CONTROL_PLANE_LOGO_PATH, DATABASE_DIRECT_URL_ENV, DATABASE_POOL_URL_ENV,
-        LEGACY_DATABASE_URL_ENV, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES, OPERATOR_TOKEN_ENV,
+        CONTROL_PLANE_LOGO_PATH, DATABASE_DIRECT_URL_ENV,
+        DATABASE_POOL_URL_ENV, LEGACY_DATABASE_URL_ENV, LEGACY_OPERATOR_TOKEN_ENV, MAX_BODY_BYTES,
+        OPERATOR_TOKEN_ENV,
     };
 
     #[test]
@@ -10054,6 +10406,7 @@ mod tests {
 
     fn healthy_worker_health(checked_at: &str) -> WorkerHealthReport {
         WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),
@@ -10758,6 +11111,20 @@ mod tests {
     }
 
     #[test]
+    fn home_page_uses_durable_request_and_measured_output_totals() {
+        let state = ControlPlaneState::default();
+        let sync = SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback);
+        let metrics = serde_json::json!({"total_requests":"2467","generated_tokens":"19056"});
+        let html = crate::control_plane_home_with_metrics(&state, StorageSource::LocalJsonFallback, &sync, Some(&metrics));
+        assert!(html.contains("Total requests</div><div class=\"card-value\">2467"));
+        assert!(html.contains("Generated tokens</div><div class=\"card-value\">19056"));
+        assert!(!html.contains(">Credits ledger<"));
+        assert!(!html.contains(">Failed jobs<"));
+        let unavailable = crate::control_plane_home_with_metrics(&state, StorageSource::LocalJsonFallback, &sync, None);
+        assert!(unavailable.contains("Generated tokens</div><div class=\"card-value\">Unavailable"));
+    }
+
+    #[test]
     fn home_page_renders_reference_dashboard_shell() {
         let mut state = ControlPlaneState::default();
         state.submit_job(
@@ -10786,18 +11153,22 @@ mod tests {
             &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
         );
 
-        assert!(html.contains("Control Plane"));
-        assert!(html.contains("Control plane logo"));
+        assert!(html.contains("MundusX Control Plane"));
+        assert!(html.contains("MundusX logo"));
         assert!(html.contains(CONTROL_PLANE_LOGO_PATH));
+        assert!(!html.contains("Mercedes-Benz emblem"));
+        assert!(!html.contains("sidebar-vehicle\" src="));
+        assert!(html.contains(r#"id="admin-account""#));
+        assert!(!html.contains("operator@ehda.local"));
         assert!(html.contains("Status API"));
         assert!(html.contains("Network Topology"));
-        assert!(html.contains("Credits Overview"));
-        assert!(html.contains("Planner Service"));
-        assert!(html.contains("planner:"));
+        assert!(html.contains("Planner Overview"));
+        assert!(html.contains("Planner Status"));
+        assert!(html.contains("Recent Logs"));
         assert!(html.contains("database: local-json-fallback · healthy"));
         assert!(!html.contains("storage: local-json-fallback"));
         assert!(!html.contains("database sync:"));
-        assert!(html.contains(r#"href="/v1/planner/status""#));
+        assert!(!html.contains(r#"class="nav-item motion-lift" href="/v1/planner/status""#));
         assert!(html.contains(r#"href="/nodes""#));
         assert!(html.contains(r#"href="/jobs""#));
         assert!(html.contains(r#"href="/credits""#));
@@ -10870,6 +11241,26 @@ mod tests {
         assert!(html.contains(r#"html[data-theme="light"] body"#));
         assert!(html.contains(r#"html[data-theme="light"] .sidebar"#));
         assert!(html.contains(r#"html[data-theme="light"] .metric"#));
+    }
+
+    #[test]
+    fn home_page_labels_database_backend_and_health_modes() {
+        let state = ControlPlaneState::default();
+        let supabase_html = control_plane_home(
+            &state,
+            StorageSource::Supabase,
+            &SupabaseSyncStatus::enabled(StorageSource::Supabase),
+        );
+        let json_html = control_plane_home(
+            &state,
+            StorageSource::LocalJsonOnly,
+            &SupabaseSyncStatus::disabled(StorageSource::LocalJsonOnly),
+        );
+
+        assert!(supabase_html.contains("database: supabase · healthy"));
+        assert!(json_html.contains("database: local-json-only · disabled"));
+        assert!(!supabase_html.contains("storage:"));
+        assert!(!json_html.contains("Supabase synchronization:"));
     }
 
     #[test]
@@ -10955,6 +11346,9 @@ mod tests {
         assert!(html.contains("model readiness"));
         assert!(html.contains("local runtime ready"));
         assert!(html.contains("operator effective share"));
+        assert!(html.contains("data-live-key=\"node-state-node-1\""));
+        assert!(html.contains("data-live-key=\"profile-slots\""));
+        assert!(html.contains("function startControlPlaneLiveStatus"));
         assert!(html.contains(r#"href="/nodes/node-1""#));
         assert!(html.contains(r#"href="/nodes?node_id=node-1""#));
     }
@@ -10970,6 +11364,30 @@ mod tests {
         assert_eq!(trust_grade_badge(92, 4, 0).2, "high trust");
         assert_eq!(trust_grade_badge(45, 1, 1).2, "warning");
         assert_eq!(trust_grade_badge(20, 1, 5).2, "poor trust");
+    }
+
+    #[test]
+    fn media_node_classification_displays_verified_profiles_without_llm_warning() {
+        let mut state = ControlPlaneState::default();
+        register_ready_node(&mut state, "node-media", "GX10", "1");
+        let node = state.nodes.get_mut("node-media").unwrap();
+        let health = node.worker_health.as_mut().unwrap();
+        health.runtime_mode = "media".into();
+        health.capabilities.models.clear();
+        health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into(), "wan22-14b-480p-49f-v1".into(), "wan22-i2v-lightning-14b-480p-81f-v3".into(), "<untrusted>".into()];
+        health.media_budget_bytes = 104481695334;
+        health.parallel_slots = 1;
+        let html = crate::render_node_classification(node);
+        assert!(html.contains("media contributor"));
+        assert!(html.contains("Text to image:</strong> qwen-image-fp8-832x480-v1"));
+        assert!(html.contains("Text to video:</strong> wan22-14b-480p-49f-v1"));
+        assert!(html.contains("Image to video:</strong> wan22-i2v-lightning-14b-480p-81f-v3"));
+        assert!(html.contains("97.3 GiB"));
+        assert!(html.contains("1 shared media slot(s)"));
+        assert!(html.contains("&lt;untrusted&gt;"));
+        assert!(!html.contains("Awaiting model advertisement"));
+        node.worker_health.as_mut().unwrap().media_profiles.clear();
+        assert!(crate::render_node_classification(node).contains("No verified media profiles advertised"));
     }
 
     #[test]
@@ -11559,8 +11977,7 @@ mod tests {
         assert!(html.contains("min-height:54px"));
         assert!(html.contains("sidebar-bottom"));
         assert!(html.contains("overflow-wrap:anywhere"));
-        assert!(html.contains("© 2026 EHDA"));
-        assert!(html.contains("v1.0.0"));
+        assert!(html.contains("MundusX Control Plane<br/>v1.0.0"));
         assert!(html.contains(r#"value="node-new""#));
         assert!(html.contains(r#"name="state""#));
         assert!(html.contains(r#"value="online" selected"#));
@@ -11573,6 +11990,32 @@ mod tests {
         assert!(OperatorPage::from_path("/harness").is_none());
         assert!(html.contains(r#"href="/nodes?state=online""#));
         assert!(html.contains(r#"href="/v1/nodes?page=1&amp;page_size=25&amp;search=node-new&amp;start=1&amp;end=99&amp;state=online&amp;backend=m&amp;trust=trusted&amp;policy=allowed""#));
+    }
+
+    #[test]
+    fn request_flow_explains_multichannel_fanout_synthesis_and_batch_delivery() {
+        let state = ControlPlaneState::default();
+        let html = control_plane_operator_page(
+            &state,
+            StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+            OperatorPage::Flow,
+            None,
+        );
+
+        assert!(html.contains("Request Flow"));
+        assert!(html.contains("Chat"));
+        assert!(html.contains("Vehicle"));
+        assert!(html.contains("VS Code"));
+        assert!(html.contains("Smart glasses"));
+        assert!(html.contains("Classify"));
+        assert!(html.contains("Plan against the live fleet"));
+        assert!(html.contains("Parallel node execution"));
+        assert!(html.contains("Synthesize and verify"));
+        assert!(html.contains("Customers do not always wait for the full job"));
+        assert!(html.contains("Batch 1"));
+        assert!(html.contains("stream only self-contained, verified sections"));
+        assert!(!html.contains(r#"href="/flow""#));
     }
 
     #[test]
@@ -11705,6 +12148,62 @@ mod tests {
         assert!(html.contains(r#"href="/nodes?page=1&amp;page_size=10&amp;state=online""#));
         assert!(html.contains(r#"href="/nodes?page=3&amp;page_size=10&amp;state=online""#));
         assert!(html.contains(r#"href="/v1/nodes?page=1&amp;page_size=10&amp;state=online""#));
+    }
+
+    #[test]
+    fn jobs_page_orders_by_numeric_submission_time_before_pagination() {
+        let mut state = ControlPlaneState::default();
+        for (id, submitted_at) in [
+            ("z-old", "9"),
+            ("a-new", "100"),
+            ("b-new", "100"),
+            ("y-middle", "10"),
+            ("zz-invalid", "unknown"),
+        ] {
+            state.submit_job(
+                JobRequest {
+                    request_id: id.to_string(),
+                    prompt: "Sort regression".to_string(),
+                    preferred_backend: Backend::Auto,
+                    routing_mode: RoutingMode::Normal,
+                    runtime_mode: RuntimeMode::Local,
+                    execution_mode: JobExecutionMode::Single,
+                    stream: false,
+                    model: None,
+                    system_prompt: None,
+                    max_tokens: Some(128),
+                    max_tokens_source: None,
+                    temperature: None,
+                    top_p: None,
+                    seed: None,
+                },
+                submitted_at.to_string(),
+            );
+        }
+        let mut jobs = state.jobs.values().cloned().collect::<Vec<_>>();
+        crate::sort_jobs_newest_first(&mut jobs);
+        assert_eq!(
+            jobs.iter().map(|job| job.job_id.as_str()).collect::<Vec<_>>(),
+            ["b-new", "a-new", "y-middle", "z-old", "zz-invalid"]
+        );
+        for (page, expected, absent) in [
+            (1, ["b-new", "a-new"], "y-middle"),
+            (2, ["y-middle", "z-old"], "a-new"),
+        ] {
+            let query = format!("page={page}&page_size=2&status=queued");
+            let html = control_plane_operator_page(
+                &state,
+                StorageSource::LocalJsonFallback,
+                &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback),
+                OperatorPage::Jobs,
+                Some(&query),
+            );
+            let first = html.find(&format!("/jobs/{}", expected[0])).unwrap();
+            let second = html.find(&format!("/jobs/{}", expected[1])).unwrap();
+            assert!(first < second);
+            assert!(!html.contains(&format!("/jobs/{absent}")));
+            assert!(html.contains("Newest submitted jobs first."));
+        }
     }
 
     #[test]

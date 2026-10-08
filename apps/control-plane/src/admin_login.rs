@@ -9,7 +9,7 @@ const SESSION_COOKIE: &str = "__Host-mx_admin";
 const STATE_COOKIE: &str = "__Host-mx_admin_state";
 const SESSION_SECONDS: u64 = 8 * 60 * 60;
 const MAX_ENTRIES: usize = 4096;
-const DEFAULT_PUBLIC_ORIGIN: &str = "https://uat.mundusx.ai";
+const DEFAULT_PUBLIC_ORIGIN: &str = "https://control.mundusx.ai";
 const LEGACY_PUBLIC_ORIGIN: &str = "https://mundusx.ai";
 
 #[derive(Default)]
@@ -343,29 +343,29 @@ mod tests {
     #[test]
     fn verifies_signature_audience_nonce_and_expiry() {
         let secret = "test-secret-that-is-at-least-32-characters";
-        let value = serde_json::json!({"kind":"mundusx-admin-login-v1","email":"admin@example.com","nonce":"challenge","audience":"https://uat.mundusx.ai","expires":1060});
+        let value = serde_json::json!({"kind":"mundusx-admin-login-v1","email":"admin@example.com","nonce":"challenge","audience":"https://control.mundusx.ai","expires":1060});
         let token = signed(value, secret);
         assert!(
-            verify_assertion(&token, "challenge", "https://uat.mundusx.ai", secret, 1000).is_some()
+            verify_assertion(&token, "challenge", "https://control.mundusx.ai", secret, 1000).is_some()
         );
         for (nonce, audience, key, time) in [
-            ("wrong", "https://uat.mundusx.ai", secret, 1000),
+            ("wrong", "https://control.mundusx.ai", secret, 1000),
             ("challenge", "https://other.example", secret, 1000),
             (
                 "challenge",
-                "https://uat.mundusx.ai",
+                "https://control.mundusx.ai",
                 "another-secret-that-is-at-least-32-characters",
                 1000,
             ),
-            ("challenge", "https://uat.mundusx.ai", secret, 1060),
-            ("challenge", "https://uat.mundusx.ai", secret, 0),
+            ("challenge", "https://control.mundusx.ai", secret, 1060),
+            ("challenge", "https://control.mundusx.ai", secret, 0),
         ] {
             assert!(verify_assertion(&token, nonce, audience, key, time).is_none());
         }
         assert!(verify_assertion(
             &(token + "00"),
             "challenge",
-            "https://uat.mundusx.ai",
+            "https://control.mundusx.ai",
             secret,
             1000
         )
@@ -432,7 +432,7 @@ mod tests {
                 .env("MUNDUSX_ADMIN_TEST_CHILD", "1")
                 .env("MUNDUSX_ADMIN_LOGIN_ENABLED", "true")
                 .env("MUNDUSX_ADMIN_EMAILS", "admin@example.com")
-                .env("MUNDUSX_ADMIN_PUBLIC_ORIGIN", "https://uat.mundusx.ai")
+                .env("MUNDUSX_ADMIN_PUBLIC_ORIGIN", "https://control.mundusx.ai")
                 .env("MUNDUSX_ADMIN_CHAT_ORIGIN", "https://chat.mundusx.ai")
                 .env(
                     "MUNDUSX_ADMIN_SSO_SECRET",
@@ -505,7 +505,7 @@ mod tests {
         let nonce = state_header.split_once('=').unwrap().1;
         headers.insert("cookie".into(), state_header.into());
         let token = signed(
-            serde_json::json!({"kind":"mundusx-admin-login-v1","email":"admin@example.com","nonce":nonce,"audience":"https://uat.mundusx.ai","expires":now()+60}),
+            serde_json::json!({"kind":"mundusx-admin-login-v1","email":"admin@example.com","nonce":nonce,"audience":"https://control.mundusx.ai","expires":now()+60}),
             "test-secret-that-is-at-least-32-characters",
         );
         let query = format!("assertion={token}");
@@ -533,7 +533,7 @@ mod tests {
         assert!(handle("POST", "/auth/logout", None, &headers)
             .unwrap()
             .starts_with("HTTP/1.1 403"));
-        headers.insert("origin".into(), "https://uat.mundusx.ai".into());
+        headers.insert("origin".into(), "https://control.mundusx.ai".into());
         assert!(session_authorized("POST", &headers));
         std::env::set_var("MUNDUSX_ADMIN_EMAILS", "");
         assert!(!session_authorized("GET", &headers));
