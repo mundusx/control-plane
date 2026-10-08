@@ -7,7 +7,7 @@ This service powers the canonical MundusX browser chat at `https://chat.mundusx.
 ## Run locally
 
 ```powershell
-$env:MUNDUSX_CONTROL_PLANE_URL = "https://uat.mundusx.ai"
+$env:MUNDUSX_CONTROL_PLANE_URL = "https://control.mundusx.ai"
 $env:PORT = "3002"
 pnpm --filter @mundusx/chat dev
 ```
@@ -30,7 +30,7 @@ Recommended Railway settings:
 Required environment:
 
 ```text
-MUNDUSX_CONTROL_PLANE_URL=https://uat.mundusx.ai
+MUNDUSX_CONTROL_PLANE_URL=https://control.mundusx.ai
 ```
 
 Optional environment:
@@ -131,7 +131,7 @@ Railway provides `PORT`; the app reads it automatically.
 | Name | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3002` | HTTP port for the chat app |
-| `MUNDUSX_CONTROL_PLANE_URL` | `https://uat.mundusx.ai` | UAT control-plane API origin |
+| `MUNDUSX_CONTROL_PLANE_URL` | `https://control.mundusx.ai` | Production control-plane API origin |
 | `MUNDUSX_OPERATOR_TOKEN` | unset | Optional bearer token for protected UAT/API deployments |
 | `OPENGPU_OPERATOR_TOKEN` | unset | Deprecated fallback token name |
 | `MUNDUSX_CHAT_AUTH_REQUIRED` | `true` | Requires an active individual session for browser `/api/*` routes; fail-closed when storage is unavailable |
@@ -236,6 +236,48 @@ and falls back to the Control Plane when no connector is online. Apply migration
 and run `mundusx connect --workspace .`. See
 `docs/mundusx-local-agent-bridge.md` for the security and protocol contract.
 
+## Login methods
+
+Set these server-side variables in Railway or your local environment:
+
+```dotenv
+MUNDUSX_AUTH_GOOGLE_ENABLED=true
+MUNDUSX_AUTH_HARD_USER_ENABLED=false
+MUNDUSX_AUTH_HARD_USERNAME=your-username
+MUNDUSX_AUTH_HARD_PASSWORD=<choose-a-strong-password>
+```
+
+Google is enabled by default and still requires the existing Google OAuth client
+configuration. Fixed username/password login is disabled by default. Enable it
+and supply both credentials to show its form. The password must be 12–1024
+characters; the username must be 1–128 characters. Usernames are case-sensitive
+and trimmed; passwords are used exactly as supplied.
+
+Both enabled methods appear in the same login dialog. With only one enabled,
+only that method appears. With neither configured, the dialog reports that
+sign-in is unavailable. Disabled methods also reject direct login requests.
+
+The fixed account is created in PostgreSQL on its first successful login as a
+normal user, with normal sessions and conversation ownership. It is separate
+from Google accounts and does not grant administrator access. Keeping its
+username preserves its identity when rotating the password; changing the
+username creates a separate identity. Disabling this method or changing its
+credentials invalidates its existing sessions. Google sessions remain valid
+when new Google logins are disabled.
+
+Credentials stay on the server. Fixed-account login allows 20 attempts per
+five-minute window, shared across service replicas. Startup applies migration
+`0039_hard_user_login.sql` when the method is enabled, using
+`MUNDUSX_DATABASE_URL`, then `MUNDUSX_DATABASE_POOL_URL`, then `DATABASE_URL`.
+The database user needs permission to create the rate-limit table.
+
+Railway injects environment variables automatically. For local `.env` use with
+Node 22, load the file explicitly (keep it out of Git):
+
+```sh
+node --env-file=.env scripts/migrate-hard-user.js
+node --env-file=.env src/main.js
+```
 ## External chat API keys
 
 Set `MUNDUSX_CHAT_API_KEYS` on both public services to require Bearer keys for OpenAI-compatible chat clients. See [configuration, rollout and revocation](../../docs/chat-api-keys.md).

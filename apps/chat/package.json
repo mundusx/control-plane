@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node src/main.js",
+    "prestart": "node scripts/migrate-hard-user.js && node scripts/migrate-media.js",
     "start": "node src/main.js",
     "check": "node scripts/check-source.js",
     "test": "node --test test/*.test.js"
