@@ -1,6 +1,63 @@
 //! OpenAI message deltas, kept separate from ordinary assistant text.
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+
+/// Decode one relay payload into its original OpenAI message deltas.
+///
+/// Current node agents preserve one JSON object per relay request. Older
+/// agents batched adjacent objects without a delimiter, and some adapters may
+/// forward SSE `data:` lines. Accept all three forms during rolling upgrades.
+pub fn parse_deltas(raw: &str) -> Result<Vec<Value>, String> {
+    let mut decoder = DeltaDecoder::default();
+    let values = decoder.push(raw)?;
+    if decoder.pending.trim().is_empty() { Ok(values) } else {
+        Err("invalid native stream delta: EOF while parsing a JSON value".into())
+    }
+}
+
+fn payload_content(raw: &str) -> String {
+    if raw.lines().any(|line| line.trim_start().starts_with("data:")) {
+        raw.lines().filter_map(|line| {
+            let data = line.trim_start().strip_prefix("data:")?;
+            let data = data.trim();
+            (!data.is_empty() && data != "[DONE]").then_some(data)
+        }).collect::<String>()
+    } else {
+        raw.to_string()
+    }
+}
+
+#[derive(Default)]
+pub struct DeltaDecoder {
+    pending: String,
+}
+
+impl DeltaDecoder {
+    pub fn push(&mut self, raw: &str) -> Result<Vec<Value>, String> {
+        self.pending.push_str(&payload_content(raw));
+        if self.pending.trim().is_empty() {
+            self.pending.clear();
+            return Ok(Vec::new());
+        }
+
+        let mut values = Vec::new();
+        let consumed = {
+            let mut stream = serde_json::Deserializer::from_str(&self.pending).into_iter::<Value>();
+            while let Some(value) = stream.next() {
+                match value {
+                    Ok(value) => values.push(value),
+                    Err(error) if error.is_eof() => break,
+                    Err(error) => return Err(format!("invalid native stream delta: {error}")),
+                }
+            }
+            stream.byte_offset()
+        };
+        self.pending.drain(..consumed);
+        if self.pending.trim().is_empty() { self.pending.clear(); }
+        Ok(values)
+    }
+}
+
 #[derive(Default)]
 pub struct NativeStream {
     content: String,
@@ -65,6 +122,30 @@ impl NativeStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parses_single_batched_and_sse_native_deltas() {
+        let first = json!({"role":"assistant"});
+        let second = json!({"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]});
+        assert_eq!(parse_deltas(&first.to_string()).unwrap(), vec![first.clone()]);
+        assert_eq!(parse_deltas(&format!("{}{}", first, second)).unwrap(), vec![first.clone(), second.clone()]);
+        assert_eq!(
+            parse_deltas(&format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n\n")).unwrap(),
+            vec![first, second]
+        );
+        assert!(parse_deltas("not-json").is_err());
+        assert!(parse_deltas("  \n ").unwrap().is_empty());
+    }
+    #[test]
+    fn buffers_json_fragments_until_the_value_is_complete() {
+        let mut decoder = DeltaDecoder::default();
+        assert!(decoder.push("{\"role\":").unwrap().is_empty());
+        assert_eq!(
+            decoder.push("\"assistant\"}{\"content\":\"Hi\"}").unwrap(),
+            vec![json!({"role":"assistant"}), json!({"content":"Hi"})]
+        );
+        assert!(decoder.pending.is_empty());
+        assert!(decoder.push("not-json").is_err());
+    }
     #[test]
     fn fragments_reconcile_without_duplicate_arguments() {
         let mut stream = NativeStream::default();

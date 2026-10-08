@@ -1295,6 +1295,10 @@ pub struct JobStreamAck {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerHealthReport {
+    #[serde(default)]
+    pub media_profiles: Vec<String>,
+    #[serde(default)]
+    pub media_budget_bytes: u64,
     pub healthy: bool,
     pub model_dir: String,
     pub model_name: Option<String>,
@@ -1748,6 +1752,8 @@ pub const OFFICIAL_MODELS: &[(&str, &str)] = &[
     ("Qwen/Qwen2.5-32B-Instruct-AWQ", "Qwen 2.5 32B AWQ"),
     ("Qwen/Qwen2.5-72B-Instruct-AWQ", "Qwen 2.5 72B AWQ"),
     ("Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen3 Coder 30B-A3B"),
+    ("RedHatAI/Muse-Glimmer-30B-FP8-block", "Muse Glimmer 30B FP8"),
+    ("meta-models/Muse-Glimmer-30B", "Muse Glimmer 30B BF16"),
 ];
 
 pub fn official_model_names() -> Vec<String> {
@@ -1871,6 +1877,7 @@ mod tests {
     #[test]
     fn worker_health_report_serializes_runtime_capabilities() {
         let report = WorkerHealthReport {
+            media_profiles: vec![], media_budget_bytes: 0,
             healthy: true,
             model_dir: "/tmp/models".to_string(),
             model_name: Some("demo".to_string()),

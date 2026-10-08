@@ -82,7 +82,11 @@ test("renders a usable chat page", () => {
     }),
   );
 
-  assert.match(html, /MundusX Chat/);
+  assert.match(html, /<title>MundusX<\/title>/);
+  assert.match(html, /class="brand-name">MundusX<\/div>/);
+  assert.doesNotMatch(html, /Powered by Mercedes-Benz Tech Community/);
+  assert.match(html, /Decentralized AI Network/);
+  assert.doesNotMatch(html, /Ehda \/ Mercedes-Benz Tech Community visual edition/);
   assert.match(html, /id="auth-gate"[^>]*hidden/);
   assert.match(html, /id="auth-google"/);
   assert.match(html, /Continue your chat/);
@@ -236,14 +240,16 @@ test("renders a usable chat page", () => {
   assert.match(html, /function progressUnit/);
   assert.match(html, /\.message-body ol/);
   assert.match(html, /\.message-body strong/);
-  assert.ok(html.includes('replace(/^\\n/, "")'));
+  assert.match(html, /function splitMarkdownCode\(value\)/);
+  assert.match(html, /marker.length >= outer.marker.length/);
   assert.ok(html.includes('raw.includes("\\n")'));
   assert.ok(html.includes('/\\b(public\\s+class'));
   assert.doesNotMatch(html, /replace\(\/\^\r?\n/);
   assert.doesNotMatch(html, /raw\.includes\("\r?\n"\)/);
   assert.match(html, /aria-label", role === "user" \? "Your message" : "MundusX response"/);
   assert.doesNotMatch(html, /avatar\.textContent = role === "user" \? "You" : "M"/);
-  assert.match(html, /\/assets\/mundusx-logo\.png/);
+  assert.match(html, /src="\/assets\/mundusx-logo\.png"/);
+  assert.match(html, /<\/aside>\s*<div class="history-context-menu"/);
   assert.match(html, /uat\.mundusx\.ai/);
   assert.match(html, /\.header-actions \{\s*display: none;/);
   assert.match(html, /class="runtime-status-sentinel" id="runtime-status"/);
@@ -253,7 +259,7 @@ test("renders a usable chat page", () => {
   assert.match(html, /id="runtime-status-text">Checking/);
   assert.match(html, /\.runtime-status-sentinel\[data-state="standby"\]/);
   assert.match(html, /function syncNetworkRuntimeStatus/);
-  assert.match(html, /Standby - no ready nodes/);
+  assert.match(html, /Chat unavailable/);
   assert.match(html, /\.history-title \{/);
   assert.match(html, /id="history-context-menu"/);
   assert.match(html, /data-action="rename"/);
@@ -507,7 +513,7 @@ test("normalizes chat app environment", () => {
 
 test("migrates the retired production control-plane origin", () => {
   const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://mundusx.ai/" });
-  assert.equal(config.controlPlaneUrl, "https://uat.mundusx.ai");
+  assert.equal(config.controlPlaneUrl, "https://control.mundusx.ai");
 });
 
 test("keeps MCP access inside the user-scoped Developer settings section", () => {
@@ -558,7 +564,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /Administrators control Global Skills/);
   assert.match(html, /Hermes selects available tools/);
   assert.match(html, /id="guest-widget"[\s\S]*Explore Chat and Projects/);
-  assert.match(html, /id="guest-login"[^>]*>Log in with Google<\/button>/);
+  assert.match(html, /id="guest-login"[^>]*>Log in<\/button>/);
   assert.match(html, /guestLoginEl\?\.addEventListener\("click", openAuthentication\)/);
   assert.match(html, /guestWidgetEl\.hidden = true/);
   assert.doesNotMatch(workspaceNav, />Agents<|>Nodes</);
@@ -626,6 +632,7 @@ test("renders local-first Projects without a separate Computer surface", () => {
   assert.match(html, /closeProjects\(\);[\s\S]*showToast\('Project "/);
   assert.doesNotMatch(html, /repositoryDialogEl\?\.close\(\)/);
   assert.match(html, /requiresLocalProjectAction\(message\)/);
+  assert.match(html, /what\|which\|where\|when\|who\|why/);
   assert.match(html, /\(\?:ask\|know\|understand\)/);
   assert.match(html, /\(\?:changes\?\|files\?\|steps\?\|requirements\?\)/);
   assert.match(html, /const projectRuntime = preferredProjectRuntime\(\)/);
@@ -3370,9 +3377,9 @@ test("fails honestly when a current-web request reaches Chat without a Hermes cr
     async () => { throw new Error("current-web fallback must not call a search provider or model worker"); },
   );
 
-  assert.equal(result.tool, "web_crawler");
+  assert.equal(result.tool, "web_research");
   assert.equal(result.status, "completed");
-  assert.match(result.output, /Hermes crawler on a connected computer/);
+  assert.match(result.output, /hosted web worker is not connected/);
 });
 
 test("does not route ordinary model requests to the Hermes crawler", async () => {
@@ -4296,7 +4303,7 @@ test("native Hermes providers preserve OpenAI tools and fail over before streami
 test("native Hermes tools fail fast when the MundusX model node is outdated", async () => {
   resetAgentProviderCircuits();
   const response = { writeHead() {}, write() {}, end() {} };
-  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" });
+  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://control.mundusx.ai" });
   await assert.rejects(
     relayNativeHermesToolStream(response, {
       model: "mundusx-agnostic",
@@ -4324,7 +4331,6 @@ test("native Hermes capability discovery is reused across project model turns", 
   });
   const config = configFromEnv({
     MUNDUSX_CONTROL_PLANE_URL: "https://control.mundusx.ai",
-    MUNDUSX_AGENT_MODEL_BASE_URLS: "https://control.mundusx.ai",
     MUNDUSX_OPERATOR_TOKEN: "operator-secret",
   });
   const body = {
@@ -4400,7 +4406,7 @@ test("agent model provider configuration keeps aligned models and credentials", 
   ]);
 });
 
-test("normal Chat streams direct even when a prompt could use discovery", async () => {
+test("normal Chat answers a focused weather request directly from wttr.in", async () => {
   const events = [];
   const encoder = new TextEncoder();
   const response = {
@@ -4416,30 +4422,29 @@ test("normal Chat streams direct even when a prompt could use discovery", async 
   const requests = [];
   const result = await streamChatTurn(
     response,
-    { message: "berlin weather today", toolMode: true },
+    { message: "What's the weaather today in Stuttgart?", toolMode: false },
     configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
     async (url, init = {}) => {
-      if (url.endsWith("/v1/nodes?page=1&page_size=25")) return jsonResponse({ items: [] });
-      if (url.endsWith("/v1/chat/completions")) {
-        requests.push(JSON.parse(init.body));
-        return new Response(new ReadableStream({
-          start(controller) {
-            controller.enqueue(encoder.encode(
-              'data: {"id":"chatcmpl-weather","choices":[{"delta":{"content":"Direct answer."},"finish_reason":null}]}\n\n' +
-              'data: {"id":"chatcmpl-weather","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
-              'data: [DONE]\n\n',
-            ));
-            controller.close();
-          },
-        }), { status: 200 });
+      requests.push({ url, init });
+      if (url === "https://wttr.in/Stuttgart?format=j1") {
+        return jsonResponse({
+          nearest_area: [{ areaName: [{ value: "Stuttgart" }], region: [{ value: "Baden-Wurttemberg" }], country: [{ value: "Germany" }] }],
+          current_condition: [{
+            weatherDesc: [{ value: "Sunny" }], temp_C: "21", temp_F: "70",
+            FeelsLikeC: "20", FeelsLikeF: "68", humidity: "45", windspeedKmph: "8",
+            localObsDateTime: "2026-09-14 12:00 PM",
+          }],
+        });
       }
       throw new Error(`unexpected URL ${url}`);
     },
   );
-  assert.equal(result.content, "Direct answer.");
+  assert.match(result.content, /Weather for Stuttgart, Baden-Wurttemberg, Germany: Sunny/);
+  assert.equal(result.tool, "weather");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].stream, true);
-  assert.equal(requests[0].mode, "chat");
+  assert.equal(requests[0].url, "https://wttr.in/Stuttgart?format=j1");
+  assert.equal(events[0].headers["X-MundusX-Stream-Mode"], "direct-tool");
+  assert.match(events.map((event) => String(event.value ?? "")).join(""), /data: \[DONE\]/);
   assert.equal(response.writableEnded, true);
 });
 
@@ -4906,7 +4911,7 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
   assert.equal(result.content, completed);
   assert.equal((writes.join("").match(/contract DEX/g) || []).length, 1);
   assert.match(requests[1].messages[0].content, /Continuation override/);
-  assert.match(requests[2].messages.at(-1).content, /previous continuation restarted/);
+  assert.match(requests[2].messages.at(-1).content, /previous continuation could not be joined safely/);
   assert.equal(requests[1].temperature, 0);
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
@@ -5294,6 +5299,8 @@ test("Hermes model discovery intentionally hides heterogeneous implementation de
     object: "model",
     created: 0,
     owned_by: "mundusx-router",
+    context_length: 131072,
+    max_model_len: 131072,
   }]);
 });
 
@@ -7555,4 +7562,20 @@ test("a question with no weather intent is still ignored", () => {
   assert.equal(extractWeatherLocation("who is Ada Lovelace"), null);
   assert.equal(extractWeatherLocation(""), null);
   assert.equal(extractWeatherLocation(null), null);
+});
+
+test("live chat reserves generation room for reasoning while respecting explicit limits", async () => {
+  for (const [maxTokens, expected] of [[undefined, 1024], [128, 128]]) {
+    let submitted;
+    const response = { writableEnded: false, writeHead() {}, flushHeaders() {}, write() { return true; }, end() { this.writableEnded = true; } };
+    await streamChatTurn(response, { message: "removed ur cache and try again", toolMode: false, maxTokens },
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async (url, init) => {
+        assert.ok(url.endsWith("/v1/chat/completions"));
+        submitted = JSON.parse(init.body);
+        return new Response('data: {"id":"chatcmpl-budget","choices":[{"delta":{"content":"I cannot clear the provider cache."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { "X-MundusX-Stream-Mode": "live-delta" } });
+      });
+    assert.equal(submitted.max_tokens, expected);
+  }
 });

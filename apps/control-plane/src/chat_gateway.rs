@@ -439,9 +439,32 @@ pub struct LiveStreamRegistry {
 pub enum PushDeltaResult {
     Accepted,
     Duplicate,
+    FinalCompletion,
 }
 
 impl LiveStreamRegistry {
+    /// Called only after validating the active job, node and assignment.
+    /// A restarted server or disconnected reader has no live destination.
+    /// Accept transport progress without retaining orphaned chunks; the worker's
+    /// full completion remains authoritative for the resumable job endpoint.
+    pub fn push_for_active_job(
+        &mut self,
+        job_id: &str,
+        sequence: u64,
+        delta: String,
+    ) -> Result<PushDeltaResult, String> {
+        if delta.is_empty() {
+            return Err("stream delta must not be empty".to_string());
+        }
+        if delta.len() > MAX_STREAM_DELTA_BYTES {
+            return Err("stream delta exceeds the 64 KiB limit".to_string());
+        }
+        if !self.jobs.contains_key(job_id) {
+            return Ok(PushDeltaResult::FinalCompletion);
+        }
+        self.push(job_id, sequence, delta)
+    }
+
     pub fn register(&mut self, job_id: &str) {
         self.jobs.entry(job_id.to_string()).or_default();
     }
@@ -1229,6 +1252,22 @@ mod tests {
         );
         assert!(stream.contains("\"index\":0"));
         assert!(!stream.contains("__MUNDUSX_OPENAI_TOOL_RESULT_V1__"));
+    }
+
+    #[test]
+    fn active_stream_without_reader_falls_back_without_orphan_buffers() {
+        let mut streams = LiveStreamRegistry::default();
+        // A restored job may already have sent earlier sequence numbers.
+        assert_eq!(streams.push_for_active_job("restored", 15, "part".into()), Ok(PushDeltaResult::FinalCompletion));
+        assert!(streams.jobs.is_empty());
+        streams.register("live");
+        assert_eq!(streams.push_for_active_job("live", 1, "part".into()), Ok(PushDeltaResult::Accepted));
+        assert!(streams.push_for_active_job("live", 3, "gap".into()).is_err());
+        streams.remove("live");
+        assert_eq!(streams.push_for_active_job("live", 2, "next".into()), Ok(PushDeltaResult::FinalCompletion));
+        assert!(streams.jobs.is_empty());
+        assert!(streams.push_for_active_job("restored", 16, String::new()).is_err());
+        assert!(streams.push_for_active_job("restored", 16, "x".repeat(super::MAX_STREAM_DELTA_BYTES + 1)).is_err());
     }
 
     #[test]
