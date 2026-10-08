@@ -8627,12 +8627,13 @@ pub fn evaluate_policy(
     }
 
     if on_battery {
-        let battery_detail = battery_percent
-            .map(|value| format!("{value}%"))
-            .unwrap_or_else(|| "unknown battery level".to_string());
-        reasons.push(format!(
-            "node is running on battery power ({battery_detail})"
-        ));
+        match battery_percent {
+            Some(percent) if percent > 28 && percent <= 100 => {}
+            Some(percent) => reasons.push(format!(
+                "battery contribution requires charge above 28% (reported {percent}%)"
+            )),
+            None => reasons.push("battery charge is unknown; requires charge above 28%".into()),
+        }
     }
 
     if !worker_health.healthy {
@@ -15900,6 +15901,32 @@ mod tests {
         let node = state.nodes.get("node-1").expect("node exists");
         assert!(node.policy_allowed);
         assert_eq!(node.policy_reason, None);
+    }
+
+    #[test]
+    fn battery_admission_requires_charge_above_28_percent() {
+        for (charge, allowed) in [(Some(100), true), (Some(29), true), (Some(28), false),
+            (Some(27), false), (Some(0), false), (None, false), (Some(101), false)] {
+            let mut state = ready_state();
+            let mut heartbeat = ready_heartbeat("node-1", "2");
+            heartbeat.power_source = "Battery Power".into();
+            heartbeat.on_battery = true;
+            heartbeat.battery_percent = charge;
+            heartbeat.worker_health.power_source = "Battery Power".into();
+            heartbeat.worker_health.on_battery = true;
+            heartbeat.worker_health.battery_percent = charge;
+            let node = state.heartbeat(heartbeat, "2".into());
+            assert_eq!(node.policy_allowed, allowed, "charge={charge:?}");
+            if !allowed { assert!(node.policy_reason.unwrap().contains("above 28%")); }
+        }
+        // Losing charge blocks new work; plugging in admits the same healthy node again.
+        let mut state = ready_state();
+        let mut heartbeat = ready_heartbeat("node-1", "2");
+        heartbeat.on_battery = true;
+        heartbeat.battery_percent = Some(28);
+        assert!(!state.heartbeat(heartbeat.clone(), "2".into()).policy_allowed);
+        heartbeat.on_battery = false;
+        assert!(state.heartbeat(heartbeat, "3".into()).policy_allowed);
     }
 
     #[test]
