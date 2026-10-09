@@ -9,6 +9,7 @@ export function capabilityAvailability(nodes, presence = [], loads = [], now = D
     if (!node.policy_allowed || !['ready','busy'].includes(node.state) || !Number.isFinite(age) || age < -120 || age>60) continue;
     const load=active.get(node.node_id) ?? {};
     if (node.capabilities?.ready_for_jobs === true && node.worker_health?.runtime_mode !== 'media') {
+      if(node.trust?.qualification_required&&(!node.trust.qualification?.tested_context_tokens||!node.trust.qualification.probes?.some(p=>p.kind==='chat'&&p.status==='passed')))continue;
       result.chat.nodes++;
       result.chat.free_slots+=Math.max(0,Number(node.capabilities.parallel_slots ?? 1)-Number(load.llm_running ?? 0));
     }

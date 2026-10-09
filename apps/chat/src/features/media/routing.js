@@ -1,16 +1,18 @@
+import { mediaFingerprint } from './qualification.js';
 import { httpError } from '../../shared/http-error.js';
 
 export function eligibleMediaNode(node, profile, now = Date.now()) {
   const health = node?.worker_health;
   const age = now / 1000 - Number(node?.updated_at);
-  return node?.policy_allowed === true && ['ready','busy'].includes(node.state)
+  const qualified = !node?.trust?.qualification_required || !!node.media_qualifications?.some(q=>q.profile_id===profile&&q.state==='passed'&&q.fingerprint===mediaFingerprint(node,profile));
+  return qualified && node?.policy_allowed === true && ['ready','busy'].includes(node.state)
     && Number.isFinite(age) && age >= -120 && age <= 60
     && health?.healthy === true && health.media_budget_bytes >= (profile.startsWith('qwen-') ? 24 : 64) * 1024 ** 3
     && health.media_profiles?.includes(profile);
 }
 
 // Short-lived live snapshots avoid one control-plane request per candidate.
-export function mediaFleet(config, fetchImpl = fetch, now = Date.now) {
+export function mediaFleet(config, fetchImpl = fetch, now = Date.now, qualificationLookup = null) {
   let cached, expires = 0, pending;
   return async () => {
     if (cached && now() < expires) return cached;
@@ -31,6 +33,10 @@ export function mediaFleet(config, fetchImpl = fetch, now = Date.now) {
         nodes.push(...items);
         if (items.length < 100 || Array.isArray(payload)) break;
         if (page === 100) throw httpError(503, 'Contributor fleet exceeds routing snapshot limit');
+      }
+      if(qualificationLookup) {
+        const results=await qualificationLookup();
+        for(const node of nodes)node.media_qualifications=results.filter(q=>q.node_id===node.node_id);
       }
       cached = nodes; expires = now() + 3000; return nodes;
     })();
