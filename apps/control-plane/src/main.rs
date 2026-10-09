@@ -1358,7 +1358,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
         let (grade_bg, grade_fg, grade_label) = trust_grade_badge(
             node.trust.score,
             node.trust.completed_jobs,
-            node.trust.failed_jobs,
+            node.trust.failed_jobs.saturating_sub(node.trust.excluded_execution_failures),
         );
         let (policy_bg, policy_fg, policy_label) = policy_badge(node.policy_allowed);
         let backend = node.backend.to_string();
@@ -1424,7 +1424,8 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
                 <div class="meta">{}</div>
                 <span class="pill" style="background:{};color:{};margin-top:6px;">{}</span>
                 <div class="meta">completed {} &middot; failed {} &middot; consecutive failures {}</div>
-                <div class="meta">accepted {} &middot; rejected {} &middot; last failure {}</div>
+                <div class="meta">completion records {} &middot; failure records {} &middot; last failure {}</div>
+                <div class="meta">Reliability uses recent execution outcomes when available, otherwise lifetime completion counts. Completion does not validate answer quality.</div>
               </div>
               <div><span class="pill" style="background:{};color:{};">{}</span>{}</div>
               <div data-live-key="node-state-{live_node_id}">
@@ -1459,7 +1460,7 @@ fn render_node_records(state: &ControlPlaneState, nodes: Vec<NodeRecord>) -> Str
             if node.trust.completed_jobs + node.trust.failed_jobs == 0 {
                 "Unrated &middot; no completed task history".to_string()
             } else {
-                format!("grade {} &middot; {}/100 &middot; {}", trust_grade(node.trust.score), node.trust.score, escape_html(grade_label))
+                format!("execution reliability {} &middot; {}% &middot; {}", trust_grade(node.trust.score), node.trust.score, escape_html(grade_label))
             },
             node.trust.completed_jobs,
             node.trust.failed_jobs,
@@ -1519,7 +1520,7 @@ fn render_registry_records(nodes: Vec<NodeRecord>) -> String {
         let (grade_bg, grade_fg, grade_label) = trust_grade_badge(
             node.trust.score,
             node.trust.completed_jobs,
-            node.trust.failed_jobs,
+            node.trust.failed_jobs.saturating_sub(node.trust.excluded_execution_failures),
         );
         let (policy_bg, policy_fg, policy_label) = policy_badge(node.policy_allowed);
         let policy_reason = node
@@ -1538,7 +1539,7 @@ fn render_registry_records(nodes: Vec<NodeRecord>) -> String {
               <div><a class="inline-link" href="/nodes/{path_id}"><strong>{node_id}</strong></a><div class="meta">{hostname}</div></div>
               <div><code>{fingerprint}</code><div class="meta">signed device identity</div></div>
               <div><span class="pill" style="background:{trust_bg};color:{trust_fg};">{trust_label}</span><div class="meta">{trust_path}</div></div>
-              <div><span class="pill" style="background:{grade_bg};color:{grade_fg};">grade {grade} &middot; {score}/100</span><div class="meta">{grade_label} &middot; accepted {accepted} &middot; rejected {rejected}</div></div>
+              <div><span class="pill" style="background:{grade_bg};color:{grade_fg};">execution reliability {grade} &middot; {score}%</span><div class="meta">{grade_label} &middot; completion records {accepted} &middot; failure records {rejected}</div></div>
               <div><span class="pill" style="background:{policy_bg};color:{policy_fg};">{policy_label}</span><div class="meta">{policy_reason}</div><form method="post" action="/v1/nodes/policy-override" data-admin-action data-node-policy style="margin-top:8px"><input type="hidden" name="node_id" value="{node_id}"><input type="hidden" name="target" value="{policy_target}"><button class="button" type="submit">{policy_action}</button><div class="meta" role="status" data-policy-status></div></form></div>
               <div>{updated_at}<div class="meta">reported state {reported_state}</div></div>
             </div>"#,
@@ -1653,15 +1654,15 @@ fn trust_grade_badge(
     completed_jobs: u32,
     failed_jobs: u32,
 ) -> (&'static str, &'static str, &'static str) {
-    if completed_jobs == 0 && failed_jobs == 0 {
-        return ("#22304c", "#c9d7f0", "new");
+    if u64::from(completed_jobs) + u64::from(failed_jobs) < 10 {
+        return ("#22304c", "#c9d7f0", "insufficient data");
     }
 
     match trust_grade(score) {
-        "A" | "B" => ("#12351f", "#8ef0aa", "high trust"),
-        "C" => ("#22304c", "#c9d7f0", "neutral"),
+        "A" | "B" => ("#12351f", "#8ef0aa", "reliable"),
+        "C" => ("#22304c", "#c9d7f0", "mixed outcomes"),
         "D" => ("#3a2610", "#ffbf7a", "warning"),
-        _ => ("#3b1418", "#ff9aa2", "poor trust"),
+        _ => ("#3b1418", "#ff9aa2", "low reliability"),
     }
 }
 
@@ -2081,7 +2082,7 @@ fn render_node_profile_panel(state: &ControlPlaneState, node_id: &str) -> String
           </div>
           {new_node_empty_state}
           <section class="node-profile-grid" aria-label="Node profile metrics">
-            <div class="node-profile-card"><span>Trust grade</span><strong>{reputation}</strong><div class="meta">Execution reputation, not model skill</div></div>
+            <div class="node-profile-card"><span>Execution reliability</span><strong>{reputation}</strong><div class="meta">Execution reliability, not answer quality</div></div>
             <div class="node-profile-card"><span>Total earned</span><strong>{earned:.2}</strong><div class="meta">credits</div></div>
             <div class="node-profile-card"><span>Contribution</span><strong>{contribution}%</strong><div class="meta">operator effective share</div></div>
             <div class="node-profile-card" data-live-key="profile-work"><span>Current work</span><strong>{current_work}</strong><div class="meta">active assignment</div></div>
@@ -3471,6 +3472,13 @@ fn control_plane_operator_page(
     page: OperatorPage,
     query: Option<&str>,
 ) -> String {
+    let default_node_query = if matches!(page, OperatorPage::Nodes) && query_param(query, "state").is_none() {
+        Some(match query.filter(|value| !value.is_empty()) {
+            Some(value) => format!("{value}&state=online"),
+            None => "state=online".to_string(),
+        })
+    } else { None };
+    let query = default_node_query.as_deref().or(query);
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
     let registered = state.nodes.len();
@@ -11348,7 +11356,7 @@ mod tests {
         );
 
         assert!(html.contains("Node Profile"));
-        assert!(html.contains("Trust grade"));
+        assert!(html.contains("Execution reliability"));
         assert!(html.contains("Total earned"));
         assert!(html.contains("completed chunks/jobs"));
         assert!(html.contains("failed chunks/jobs"));
@@ -11370,10 +11378,10 @@ mod tests {
         assert_eq!(trust_grade(65), "C");
         assert_eq!(trust_grade(45), "D");
         assert_eq!(trust_grade(10), "F");
-        assert_eq!(trust_grade_badge(50, 0, 0).2, "new");
-        assert_eq!(trust_grade_badge(92, 4, 0).2, "high trust");
-        assert_eq!(trust_grade_badge(45, 1, 1).2, "warning");
-        assert_eq!(trust_grade_badge(20, 1, 5).2, "poor trust");
+        assert_eq!(trust_grade_badge(50, 0, 0).2, "insufficient data");
+        assert_eq!(trust_grade_badge(92, 10, 0).2, "reliable");
+        assert_eq!(trust_grade_badge(45, 4, 6).2, "warning");
+        assert_eq!(trust_grade_badge(20, 2, 8).2, "low reliability");
     }
 
     #[test]
@@ -11401,6 +11409,30 @@ mod tests {
     }
 
     #[test]
+    fn nodes_page_defaults_to_online_and_preserves_explicit_state_filters() {
+        let mut state = ControlPlaneState::default();
+        register_ready_node(&mut state, "node-online-default", "ONLINE", "1");
+        register_ready_node(&mut state, "node-stopped-default", "STOPPED", "1");
+        state.nodes.get_mut("node-stopped-default").unwrap().state = serde_json::from_value(serde_json::json!("stopped")).unwrap();
+        let render = |query| control_plane_operator_page(&state, StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback), OperatorPage::Nodes, query);
+        for query in [None, Some("page=1"), Some("backend=m")] {
+            let html=render(query);
+            assert!(html.contains("href=\"/nodes/node-online-default\""));
+            assert!(!html.contains("href=\"/nodes/node-stopped-default\""));
+            assert!(html.contains("value=\"online\" selected"));
+        }
+        for query in [Some("state="), Some("state=all")] {
+            let html=render(query);
+            assert!(html.contains("href=\"/nodes/node-online-default\""));
+            assert!(html.contains("href=\"/nodes/node-stopped-default\""));
+        }
+        let html=render(Some("state=stopped"));
+        assert!(!html.contains("href=\"/nodes/node-online-default\""));
+        assert!(html.contains("href=\"/nodes/node-stopped-default\""));
+    }
+
+    #[test]
     fn nodes_page_surfaces_trust_reputation_states() {
         let mut state = ControlPlaneState::default();
         register_ready_node(&mut state, "node-new", "NEW", "1");
@@ -11409,7 +11441,7 @@ mod tests {
         {
             let node = state.nodes.get_mut("node-good").expect("good node");
             node.trust.score = 95;
-            node.trust.completed_jobs = 8;
+            node.trust.completed_jobs = 10;
             node.trust.accepted_results = 8;
             node.trust.total_latency_ms = 800;
             node.trust.last_success_at = Some("20".to_string());
@@ -11429,7 +11461,7 @@ mod tests {
             let node = state.nodes.get_mut("node-poor").expect("poor node");
             node.trust.score = 20;
             node.trust.completed_jobs = 1;
-            node.trust.failed_jobs = 5;
+            node.trust.failed_jobs = 9;
             node.trust.consecutive_failures = 3;
             node.trust.accepted_results = 1;
             node.trust.rejected_results = 5;
@@ -11444,8 +11476,8 @@ mod tests {
             Some("page=1&page_size=25"),
         );
 
-        assert!(html.contains("grade A &middot; 95/100 &middot; high trust"));
-        assert!(html.contains("grade F &middot; 20/100 &middot; poor trust"));
+        assert!(html.contains("execution reliability A &middot; 95% &middot; reliable"));
+        assert!(html.contains("execution reliability F &middot; 20% &middot; low reliability"));
         assert!(html.contains("Unrated &middot; no completed task history"));
         assert!(html.contains("inference contributor"));
         assert!(html.contains("capacity tier: standard (not machine count)"));
@@ -11456,9 +11488,9 @@ mod tests {
         assert!(html.contains("advertised roles: chat, coding"));
         assert!(html.contains("declared tools: repository"));
         assert!(html.contains("authority:</strong> inference only; no filesystem authority"));
-        assert!(html.contains("completed 8 &middot; failed 0 &middot; consecutive failures 0"));
+        assert!(html.contains("completed 10 &middot; failed 0 &middot; consecutive failures 0"));
         assert!(
-            html.contains("accepted 1 &middot; rejected 5 &middot; last failure runtime failed")
+            html.contains("completion records 1 &middot; failure records 5 &middot; last failure runtime failed")
         );
     }
 
