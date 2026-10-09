@@ -3402,6 +3402,13 @@ fn control_plane_operator_page(
     page: OperatorPage,
     query: Option<&str>,
 ) -> String {
+    let default_node_query = if matches!(page, OperatorPage::Nodes) && query_param(query, "state").is_none() {
+        Some(match query.filter(|value| !value.is_empty()) {
+            Some(value) => format!("{value}&state=online"),
+            None => "state=online".to_string(),
+        })
+    } else { None };
+    let query = default_node_query.as_deref().or(query);
     let snapshot = state.snapshot(storage_source.as_str());
     let nodes = snapshot["online_count"].as_u64().unwrap_or(0);
     let registered = state.nodes.len();
@@ -10845,6 +10852,30 @@ mod tests {
         assert_eq!(trust_grade_badge(92, 10, 0).2, "reliable");
         assert_eq!(trust_grade_badge(45, 4, 6).2, "warning");
         assert_eq!(trust_grade_badge(20, 2, 8).2, "low reliability");
+    }
+
+    #[test]
+    fn nodes_page_defaults_to_online_and_preserves_explicit_state_filters() {
+        let mut state = ControlPlaneState::default();
+        register_ready_node(&mut state, "node-online-default", "ONLINE", "1");
+        register_ready_node(&mut state, "node-stopped-default", "STOPPED", "1");
+        state.nodes.get_mut("node-stopped-default").unwrap().state = serde_json::from_value(serde_json::json!("stopped")).unwrap();
+        let render = |query| control_plane_operator_page(&state, StorageSource::LocalJsonFallback,
+            &SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback), OperatorPage::Nodes, query);
+        for query in [None, Some("page=1"), Some("backend=m")] {
+            let html=render(query);
+            assert!(html.contains("href=\"/nodes/node-online-default\""));
+            assert!(!html.contains("href=\"/nodes/node-stopped-default\""));
+            assert!(html.contains("value=\"online\" selected"));
+        }
+        for query in [Some("state="), Some("state=all")] {
+            let html=render(query);
+            assert!(html.contains("href=\"/nodes/node-online-default\""));
+            assert!(html.contains("href=\"/nodes/node-stopped-default\""));
+        }
+        let html=render(Some("state=stopped"));
+        assert!(!html.contains("href=\"/nodes/node-online-default\""));
+        assert!(html.contains("href=\"/nodes/node-stopped-default\""));
     }
 
     #[test]
