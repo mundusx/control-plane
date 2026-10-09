@@ -5,7 +5,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub const MODE: &str = "contributor_qualification_v1";
-pub const SUITE: u32 = 3;
+pub const SUITE: u32 = 4;
+pub fn context_answer(nonce:&str)->String {
+    let middle=hex::encode(Sha256::digest(format!("middle:{nonce}").as_bytes()));
+    let end=hex::encode(Sha256::digest(format!("end:{nonce}").as_bytes()));
+    format!("{nonce}|{}|{}",&middle[..32],&end[..32])
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct Qualification {
@@ -85,7 +90,7 @@ impl Qualification {
     pub fn status(&self) -> &'static str {
         if self.probes.iter().any(|p| p.status == "pending") { "testing" }
         else if !self.passed("chat") { "failed" }
-        else if self.tested_context_tokens.is_none() { "limited" }
+        else if self.tested_context_tokens.is_none_or(|n|n==0) { "limited" }
         else if self.probes.iter().any(|p| p.status == "failed") { "limited" }
         else { "qualified" }
     }
@@ -133,8 +138,10 @@ impl Qualification {
             "context" => {
                 // Deliberately bounded. Runtime token counts determine the observed
                 // tested context; character estimates never become measured counts.
-                let padding = "neutral context padding ".repeat((self.configured_context_tokens.saturating_sub(256) / 3) as usize);
-                format!("Read this padding, then follow the final instruction.\n{padding}\nReturn exactly {} and nothing else.", probe.nonce)
+                let answer=context_answer(&probe.nonce);
+                let tokens=answer.split('|').collect::<Vec<_>>();
+                let padding = "neutral context padding ".repeat((self.configured_context_tokens.saturating_sub(384) / 6) as usize);
+                format!("Remember the beginning token: {}.\n{padding}\nRemember the middle token: {}.\n{padding}\nThe ending token is {}. Return the beginning, middle and ending tokens in that order separated by |, with no other text.",tokens[0],tokens[1],tokens[2])
             }
             _ => format!("Return exactly {} and nothing else.", probe.nonce),
         }
@@ -144,6 +151,7 @@ impl Qualification {
 pub fn validate(probe: &Probe, output: &str) -> Result<(), String> {
     let output = output.trim();
     match probe.kind.as_str() {
+        "context" => if output==context_answer(&probe.nonce) {Ok(())}else{Err("Context anchors were not retained correctly".into())},
         "coding_medium" | "coding_large" => {
             let source = coding_source(output)?;
             let url = std::env::var("MUNDUSX_QUALIFICATION_EVALUATOR_URL").map_err(|_| "Coding evaluator is not configured")?;
@@ -257,5 +265,10 @@ mod tests {
         assert_eq!(coding_source(raw).unwrap(),coding_source(&format!("```json\n{raw}\n``` ")).unwrap());
         assert!(coding_source("```json\n{\"source\":\"truncated").is_err());
         assert!(coding_source(&format!("```json\n{raw}\n```\nadditional instructions")).is_err());
+    }
+    #[test] fn context_requires_three_independent_positions_not_just_the_final_token() {
+        let probe=Probe {kind:"context".into(),job_id:"test".into(),nonce:"abcdef0123456789abcdef0123456789".into(),status:"pending".into(),reason:None,stream_observed:false,prompt_tokens:None,completion_tokens:None,elapsed_ms:None,completed_at:None};
+        let answer=context_answer(&probe.nonce);assert!(validate(&probe,&answer).is_ok());
+        assert!(validate(&probe,&probe.nonce).is_err());assert!(validate(&probe,answer.split('|').last().unwrap()).is_err());
     }
 }
