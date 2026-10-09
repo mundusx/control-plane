@@ -1,3 +1,4 @@
+import { assertNoRepetition } from './repetition-guard.js';
 import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
 import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
@@ -8282,6 +8283,7 @@ export async function relayControlPlaneOpenAiStream(
   const relayEvent = (eventText) => {
     if (sawDone) return;
     inspectEvent(eventText);
+    assertNoRepetition(content);
     if (hooks.publicOpenAi === true) {
       const normalized = normalizePublicOpenAiStreamEvent(eventText);
       if (fileStream && normalized === "data: [DONE]" && !finishReason) throw new Error("File stream missing terminal event");
@@ -8314,6 +8316,7 @@ export async function relayControlPlaneOpenAiStream(
       else {
         response.write(text);
         events.forEach(inspectEvent);
+        assertNoRepetition(content);
         hooks.onProgress?.({ content, completionId, finishReason });
       }
       // SSE completion is authoritative; do not wait for the upstream socket
@@ -8342,7 +8345,7 @@ export async function relayControlPlaneOpenAiStream(
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
       cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
-      const payload = { error: { message, type: "mundusx_stream_error" } };
+      const payload = { error: { message, type: error.code === "mundusx_repetition_detected" ? error.code : "mundusx_stream_error" } };
       response.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
     }
     return { content, completionId, finishReason: "error", error: error.message ?? "stream failed" };
@@ -8475,6 +8478,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           }
           if (delta) {
             attemptContent += delta;
+            assertNoRepetition(attemptContent);
             if (attempt === 0) content += delta;
             else streamContinuationProgress();
           }
@@ -8495,7 +8499,8 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             }
             return;
           }
-        } catch {
+        } catch (error) {
+          if (error.code === "mundusx_repetition_detected") throw error;
           // Relay unknown upstream events as-is.
         }
         writeResponse(`${eventText}\n\n`);
@@ -8525,6 +8530,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
 
       if (streamError) {
+        if (streamError.code === "mundusx_repetition_detected") throw streamError;
         if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
 
         // A later continuation may already have produced verified text before
