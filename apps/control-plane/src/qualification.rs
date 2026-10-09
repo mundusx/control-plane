@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub const MODE: &str = "contributor_qualification_v1";
-pub const SUITE: u32 = 1;
+pub const SUITE: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct Qualification {
@@ -80,7 +80,8 @@ impl Qualification {
     }
     pub fn status(&self) -> &'static str {
         if self.probes.iter().any(|p| p.status == "pending") { "testing" }
-        else if !self.passed("chat") || self.tested_context_tokens.is_none() { "failed" }
+        else if !self.passed("chat") { "failed" }
+        else if self.tested_context_tokens.is_none() { "limited" }
         else if self.probes.iter().any(|p| p.status == "failed") { "limited" }
         else { "qualified" }
     }
@@ -115,7 +116,7 @@ impl Qualification {
             "context" => {
                 // Deliberately bounded. Runtime token counts determine the observed
                 // tested context; character estimates never become measured counts.
-                let padding = "neutral context padding ".repeat((self.configured_context_tokens.saturating_sub(512) / 6) as usize);
+                let padding = "neutral context padding ".repeat((self.configured_context_tokens.saturating_sub(256) / 3) as usize);
                 format!("Read this padding, then follow the final instruction.\n{padding}\nReturn exactly {} and nothing else.", probe.nonce)
             }
             _ => format!("Return exactly {} and nothing else.", probe.nonce),

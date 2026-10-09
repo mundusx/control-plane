@@ -1364,6 +1364,9 @@ on conflict (job_id) do update set
   assigned_at_epoch = excluded.assigned_at_epoch,
   completed_at_epoch = excluded.completed_at_epoch,
   updated_at_epoch = excluded.updated_at_epoch
+where excluded.mode is distinct from 'contributor_qualification_v1'
+  or (case excluded.status when 'queued' then 0 when 'assigned' then 1 else 2 end)
+     >= (case jobs.status when 'queued' then 0 when 'assigned' then 1 else 2 end)
 "#;
 
 const CREDITS_UPSERT_SQL: &str = r#"
