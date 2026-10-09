@@ -1602,6 +1602,11 @@ pub struct NodePolicyOverrideInput {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NodeTrustRecord {
+    /// Recent execution outcomes; None means an explicitly non-node failure.
+    #[serde(default)]
+    pub recent_execution_outcomes: Vec<Option<bool>>,
+    #[serde(default)]
+    pub excluded_execution_failures: u32,
     pub score: u8,
     pub completed_jobs: u32,
     pub failed_jobs: u32,
@@ -1617,6 +1622,8 @@ pub struct NodeTrustRecord {
 impl Default for NodeTrustRecord {
     fn default() -> Self {
         Self {
+            recent_execution_outcomes: Vec::new(),
+            excluded_execution_failures: 0,
             score: 50,
             completed_jobs: 0,
             failed_jobs: 0,
@@ -1628,6 +1635,48 @@ impl Default for NodeTrustRecord {
             last_failure_at: None,
             last_failure_reason: None,
         }
+    }
+}
+
+impl NodeTrustRecord {
+    pub fn reliability_score(&self) -> u8 {
+        let recent: Vec<bool> = self.recent_execution_outcomes.iter().filter_map(|value| *value).collect();
+        // Preserve a meaningful legacy baseline until ten new eligible outcomes
+        // exist. Older counters cannot be retrospectively attributed reliably.
+        let (successes, attempts) = if recent.len() >= 10 {
+            (recent.iter().filter(|value| **value).count() as u64, recent.len() as u64)
+        } else {
+            let excluded = u64::from(self.excluded_execution_failures);
+            (u64::from(self.completed_jobs), u64::from(self.completed_jobs) + u64::from(self.failed_jobs).saturating_sub(excluded))
+        };
+        if attempts == 0 { return 50; }
+        ((successes * 100 + attempts / 2) / attempts).min(100) as u8
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::NodeTrustRecord;
+    #[test]
+    fn legacy_successes_are_not_capped_or_double_penalized() {
+        let mut record = NodeTrustRecord {completed_jobs:56,failed_jobs:19,accepted_results:56,rejected_results:19,..Default::default()};
+        assert_eq!(record.reliability_score(),75);
+        record.completed_jobs=100;
+        assert_eq!(record.reliability_score(),84);
+    }
+    #[test]
+    fn recent_successes_recover_from_old_failures_and_exclude_non_node_errors() {
+        let record=NodeTrustRecord {completed_jobs:10,failed_jobs:100,recent_execution_outcomes:[vec![Some(true);10],vec![None;5]].concat(),..Default::default()};
+        assert_eq!(record.reliability_score(),100);
+        let excluded=NodeTrustRecord {completed_jobs:1,failed_jobs:1,excluded_execution_failures:1,recent_execution_outcomes:vec![Some(true),None],..Default::default()};
+        assert_eq!(excluded.reliability_score(),100);
+    }
+    #[test]
+    fn legacy_records_without_recent_history_remain_readable() {
+        let value=serde_json::to_value(NodeTrustRecord::default()).unwrap();
+        let mut legacy=value.as_object().unwrap().clone();legacy.remove("recent_execution_outcomes");
+        let record:NodeTrustRecord=serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert!(record.recent_execution_outcomes.is_empty());assert_eq!(record.reliability_score(),50);
     }
 }
 
