@@ -8,10 +8,10 @@ export function capabilityAvailability(nodes, presence = [], loads = [], now = D
     const age=now/1000-Number(node.updated_at);
     if (!node.policy_allowed || !['ready','busy'].includes(node.state) || !Number.isFinite(age) || age < -120 || age>60) continue;
     const load=active.get(node.node_id) ?? {};
-    if (node.capabilities?.ready_for_jobs === true && node.worker_health?.runtime_mode !== 'media') {
-      if(node.trust?.qualification_required&&(!node.trust.qualification?.tested_context_tokens||!node.trust.qualification.probes?.some(p=>p.kind==='chat'&&p.status==='passed')))continue;
+    const qualifiedChat=!node.trust?.qualification_required || (node.trust.qualification?.tested_context_tokens>0 && node.trust.qualification.probes?.some(p=>p.kind==='chat'&&p.status==='passed'));
+    if (qualifiedChat && node.capabilities?.ready_for_jobs === true && node.worker_health?.runtime_mode !== 'media') {
       result.chat.nodes++;
-      result.chat.free_slots+=Math.max(0,Number(node.capabilities.parallel_slots ?? 1)-Number(load.llm_running ?? 0));
+      result.chat.free_slots+=Math.max(0,Number(node.trust?.qualification_required ? 1 : node.capabilities.parallel_slots ?? 1)-Number(load.llm_running ?? 0));
     }
     const poll=polling.get(node.node_id);
     if (!poll || poll.public_key_hex !== node.public_key_hex) continue;
@@ -43,6 +43,7 @@ export async function liveCapabilityAvailability(fleet, store, now = Date.now())
   const loads=store?(await store.pool.query(`select node_id,sum(media_running)::int media_running,sum(llm_running)::int llm_running from (
     select node_id,count(*)::int media_running,0 llm_running from public.media_generation_jobs where state='running' and lease_until>$1 group by node_id
     union all select assigned_node_id node_id,0 media_running,count(*)::int llm_running from public.jobs where status in ('assigned','running') and assigned_node_id is not null group by assigned_node_id
+    ${process.env.MUNDUSX_MEDIA_QUALIFICATION_MODE==='gradual' ? "union all select node_id,count(*)::int media_running,0 llm_running from public.media_qualification_probes where state='running' and lease_until>$1 group by node_id" : ""}
     ) x group by node_id`,[new Date(now)])).rows:[];
   return capabilityAvailability(nodes,presence,loads,now);
 }
