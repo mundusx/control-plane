@@ -127,7 +127,7 @@ impl ControlPlaneState {
         job: &JobRecord,
         active_graph_node_id: Option<&str>,
     ) -> ContextDemand {
-        let prompt_chars = job.prompt.chars().count()
+        let prompt_chars = native_text_chars(&job.prompt).unwrap_or_else(|| job.prompt.chars().count())
             + job
                 .system_prompt
                 .as_deref()
@@ -1716,12 +1716,15 @@ impl ControlPlaneState {
         // control plane is only an inference relay, so do not add task, graph,
         // or model-quality requirements that can strand the turn in the queue.
         if is_native_openai_tool_turn(&job.prompt) {
-            return vec![CapabilityRequirement {
-                capability: "native_tool_calls_v1".to_string(),
-                weight: 100,
-                minimum_score: 60,
-                required: true,
-            }];
+            let body = serde_json::from_str::<serde_json::Value>(job.prompt.trim_start_matches("__MUNDUSX_OPENAI_TOOL_TURN_V1__")).ok();
+            let images = body.as_ref().is_some_and(native_request_has_images);
+            let tools = body.as_ref().is_none_or(|b| b["tools"].as_array().is_some_and(|t| !t.is_empty())
+                || b["messages"].as_array().is_some_and(|m| m.iter().any(|v| v["role"] == "tool" || v.get("tool_call_id").is_some()
+                    || v["tool_calls"].as_array().is_some_and(|t| !t.is_empty()))));
+            let mut requirements = Vec::new();
+            if images {requirements.push(CapabilityRequirement {capability:"vision".into(),weight:100,minimum_score:60,required:true});}
+            if tools || !images {requirements.push(CapabilityRequirement {capability:"native_tool_calls_v1".into(),weight:100,minimum_score:60,required:true});}
+            return requirements;
         }
         let step_requirements = Self::graph_workload(job, active_graph_node_id)
             .map(|workload| workload.capability_requirements.clone())
@@ -1858,7 +1861,10 @@ impl ControlPlaneState {
             }
             for required in Self::effective_capability_requirements(job, active_graph_node_id).iter().filter(|c| c.required) {
                 if !q.allows(&required.capability) { return false; }
-                if required.capability == "coding" && job.classification.complexity != RequestComplexity::Low { return false; }
+                if required.capability == "coding" {
+                    let tier = match job.classification.complexity { RequestComplexity::Low=>"small_coding", RequestComplexity::Medium=>"medium_coding", RequestComplexity::High=>"large_coding" };
+                    if !q.allows(tier) {return false;}
+                }
             }
         }
         if model.name.trim().is_empty()
@@ -1933,6 +1939,9 @@ impl ControlPlaneState {
             .iter()
             .filter(|value| value.required)
         {
+            if requirement.capability == "vision" {
+                if !model.supports_vision {return false;} continue;
+            }
             if requirement.capability == "native_tool_calls_v1" {
                 let node_supports_native_tools =
                     node.worker_health.as_ref().is_some_and(|health| {
@@ -2534,7 +2543,7 @@ impl ControlPlaneState {
                         model.context_tokens = q.tested_context_tokens;
                         model.supports_tools = q.allows("native_tool_calls_v1");
                     } else { model.task_capabilities.clear(); model.capability_scores.clear(); model.roles.clear(); model.context_tokens = None; model.supports_tools = false; }
-                    model.supports_vision = false; model.supports_embeddings = false;
+                    model.supports_vision = node.trust.qualification.as_ref().is_some_and(|q| q.model == model.name && q.allows("vision")); model.supports_embeddings = false;
                 }
                 let tasks = model.task_capabilities.iter().chain(model.capability_scores.iter().map(|score| &score.capability))
                     .collect::<BTreeSet<_>>().into_iter().map(|task| {
@@ -6133,7 +6142,7 @@ fn clean_direct_job_output(job: &JobRecord, output: Option<String>) -> Option<St
 
 fn strip_worker_transport_envelope(output: &str) -> String {
     let trimmed = output.trim();
-    let looks_like_worker_envelope = ["mlx-lm ", "llama.cpp ", "vllm ", "contributed-cluster "]
+    let looks_like_worker_envelope = ["mlx-lm ", "llama.cpp ", "vllm ", "mlx ", "contributed-cluster "]
         .iter()
         .any(|prefix| trimmed.to_ascii_lowercase().starts_with(prefix));
     if looks_like_worker_envelope {
@@ -6644,6 +6653,28 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
             context_size
         ),
     }
+}
+
+fn native_request_has_images(body: &serde_json::Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| messages.iter().any(|m| m["content"].as_array()
+        .is_some_and(|parts| parts.iter().any(|p| matches!(p["type"].as_str(),Some("image_url" | "input_image"))))))
+}
+fn native_text_chars(prompt: &str) -> Option<usize> {
+    let raw=prompt.strip_prefix("__MUNDUSX_OPENAI_TOOL_TURN_V1__")?;
+    let mut body:serde_json::Value=serde_json::from_str(raw).ok()?;
+    if !native_request_has_images(&body) {return None;}
+    let mut image_tokens=0usize;
+    for message in body["messages"].as_array_mut()? {
+        if let Some(parts)=message["content"].as_array_mut() {
+            for part in parts {
+                if matches!(part["type"].as_str(),Some("image_url" | "input_image")) {
+                    image_tokens=image_tokens.saturating_add(crate::vision_probe::token_budget(part));
+                    *part=serde_json::json!({"type":"text","text":"[image]"});
+                }
+            }
+        }
+    }
+    Some(body.to_string().chars().count().saturating_add(image_tokens.saturating_mul(4)))
 }
 
 fn is_native_openai_tool_turn(prompt: &str) -> bool {
@@ -9027,7 +9058,7 @@ impl ControlPlaneState {
         let request: JobRequest = serde_json::from_value(serde_json::json!({
             "request_id":probe.job_id, "prompt":q.prompt(&probe), "preferred_backend":node.backend,
             "runtime_mode":runtime_mode, "execution_mode":"single", "stream":probe.kind == "streaming",
-            "model":q.model, "system_prompt":null, "max_tokens":128,
+            "model":q.model, "system_prompt":null, "max_tokens":if probe.kind == "coding_large" {2048} else if probe.kind == "coding_medium" {1024} else if probe.kind == "vision" {256} else {128},
             "max_tokens_source":"qualification", "temperature":0.0, "top_p":1.0, "seed":42
         })).expect("internal qualification request");
         self.submit_job_with_mode(request, Some(crate::qualification::MODE.into()), now.into());
@@ -9405,6 +9436,35 @@ mod tests {
         state.heartbeat(ready_heartbeat("qualified", "100"), "100".into());
         assert!(state.nodes["qualified"].trust.qualification.is_some());
         assert!(!state.nodes["qualified"].trust.qualification_required);
+    }
+
+    #[test]
+    fn advanced_coding_and_vision_require_independent_passes() {
+        let mut state=qualification_fixture();
+        let mut heartbeat=ready_heartbeat("qualified","104");
+        heartbeat.worker_health.capabilities.usable_memory_mb=Some(52000);
+        heartbeat.worker_health.capabilities.models=vec![ModelCapability {
+            name:"test-coder-vision".into(),active:true,context_tokens:Some(16384),supports_vision:true,
+            task_capabilities:vec!["chat".into(),"coding".into(),"vision".into()],..Default::default()
+        }];
+        state.heartbeat(heartbeat,"104".into());
+        let q=state.nodes.get_mut("qualified").unwrap().trust.qualification.as_mut().unwrap();
+        assert!(q.probes.iter().any(|p|p.kind=="coding_medium"));
+        assert!(q.probes.iter().any(|p|p.kind=="coding_large"));
+        assert!(q.probes.iter().any(|p|p.kind=="vision"));
+        q.tested_context_tokens=Some(16384);
+        for p in &mut q.probes {if ["chat","context","coding_basic"].contains(&p.kind.as_str()){p.status="passed".into();}}
+        assert!(!q.allows("medium_coding"));assert!(!q.allows("large_coding"));assert!(!q.allows("vision"));
+        let request:JobRequest=serde_json::from_value(serde_json::json!({"request_id":"vision-user","prompt":crate::vision_probe::prompt("test-coder-vision","abcdef0123456789abcdef0123456789"),"preferred_backend":"m","execution_mode":"single","model":"test-coder-vision","system_prompt":null,"max_tokens":128,"temperature":0,"top_p":1,"seed":42})).unwrap();
+        let job=state.submit_job(request,"105".into());
+        let requirements=ControlPlaneState::effective_capability_requirements(&job,None);
+        assert!(requirements.iter().any(|c|c.capability=="vision"));
+        assert!(!requirements.iter().any(|c|c.capability=="native_tool_calls_v1"));
+        assert!(!ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        let q=state.nodes.get_mut("qualified").unwrap().trust.qualification.as_mut().unwrap();
+        for p in &mut q.probes {if ["vision","coding_medium","coding_large"].contains(&p.kind.as_str()){p.status="passed".into();}}
+        assert!(q.allows("large_coding"));assert!(q.allows("medium_coding"));assert!(q.allows("vision"));
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
         .is_some_and(|tools| !tools.is_empty())
         || request.messages.iter().any(|message| {
             message.role.eq_ignore_ascii_case("tool")
+                || message.content.as_array().is_some_and(|parts| parts.iter().any(|p| matches!(p.get("type").and_then(Value::as_str),Some("image_url" | "input_image"))))
                 || message.tool_call_id.is_some()
                 || message
                     .tool_calls
@@ -28,6 +29,22 @@ pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
                     .and_then(Value::as_array)
                     .is_some_and(|calls| !calls.is_empty())
         })
+}
+
+pub fn validate_image_inputs(request:&ChatCompletionRequest)->Result<(),String> {
+    for message in &request.messages {
+        if let Some(parts)=message.content.as_array() {
+            for part in parts {
+                if matches!(part.get("type").and_then(Value::as_str),Some("image_url" | "input_image")) {
+                    let url=part.pointer("/image_url/url").and_then(Value::as_str).or_else(||part["image_url"].as_str()).ok_or("Image data is missing")?;
+                    if url.len()>6*1024*1024 || !["data:image/png;base64,","data:image/jpeg;base64,","data:image/webp;base64,"].iter().any(|prefix|url.starts_with(prefix)&&url.len()>prefix.len()) {
+                        return Err("Vision requires bounded inline PNG, JPEG or WebP image data".into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 const ADAPTIVE_EDIT_POLICY_NAME: &str = "mundusx_adaptive_edit_policy";
