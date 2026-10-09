@@ -7,18 +7,27 @@ class PageText(HTMLParser):
     def __init__(self, url):
         super().__init__()
         self.url, self.hidden, self.parts, self.links = url, 0, [], []
+        self.stack = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style", "noscript", "svg"):
-            self.hidden += 1
+        attributes = dict(attrs)
+        hidden = self.hidden > 0 or tag in ("script", "style", "noscript", "svg", "nav", "header", "footer") or attributes.get("role") in ("navigation", "banner", "contentinfo") or 'hidden' in attributes
+        classes = set(attributes.get("class", "").split())
+        hidden |= bool(classes & {"mw-jump-link", "vector-toc", "vector-header-container", "mw-editsection", "navbox", "sidebar"})
+        if tag not in ("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"):
+            self.stack.append((tag, hidden))
+        self.hidden = int(hidden)
         if tag == "a" and not self.hidden:
             link = urljoin(self.url, dict(attrs).get("href", ""))
             if link.startswith(("http://", "https://")) and link not in self.links:
                 self.links.append(link)
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style", "noscript", "svg"):
-            self.hidden = max(0, self.hidden - 1)
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+        self.hidden = int(bool(self.stack and self.stack[-1][1]))
 
     def handle_data(self, data):
         if not self.hidden and data.strip():

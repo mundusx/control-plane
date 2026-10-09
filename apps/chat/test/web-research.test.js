@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webResearchRequest, fetchWebResearch } from "../src/web-research.js";
+test('joined who-is typo keeps the requested identity and biography filters', () => {
+  assert.deepEqual(webResearchRequest('who isa dave batalla'), {message: 'who is dave batalla', urls: [], researchMode: 'biography'});
+});
 import { streamChatTurn, submitChatTurn, configFromEnv } from "../src/main.js";
 
 test("person lookup normalizes stray trailing underscores, spacing, and contractions before routing", () => {

@@ -9,7 +9,7 @@ def person_name(request):
     if request.get("researchMode") not in ("biography", "public_profiles"):
         return ""
     for text in reversed((str(request.get("context", "")) + "\n" + request["message"]).splitlines()):
-        match = re.search(r"(?:who is|who's|tell me about|profile (?:for|of)|osint|research)\s+([^?.!\n]+)", text, re.I)
+        match = re.search(r"(?:who isa?|who's|tell me about|profile (?:for|of)|osint|research)\s+([^?.!\n]+)", text, re.I)
         if match:
             name = re.split(r"\s+(?:on|from|at|working|who|in)\s+", match.group(1), flags=re.I)[0].strip()
             if 2 <= len(name.split()) <= 4 and not re.search(r"\b(?:the|a|an|linkedin|github|website|profile)\b", name, re.I):
