@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 // Interpret a bounded data-only JS subset. Model code is never eval'd, compiled,
 // imported, or given host objects. Loops, recursion and allocations are bounded.
 const FUNCTION = Symbol('interpreted function');
+const BUILTIN = Symbol('safe intrinsic');
 const blocked = new Set(['constructor','prototype','__proto__','process','require','eval','Function','globalThis']);
 const key = value => { const k=String(value); if(blocked.has(k)||k.length>128) throw Error('Forbidden name'); return k; };
 class Env {
@@ -26,7 +27,12 @@ export function runProgram(source,input) {
     throw Error('Unsupported binding');
   }
   function call(fn,args) {
-    tick(); if(!fn?.[FUNCTION]||++depth>24)throw Error('Invalid call or recursion limit');
+    tick();
+    if(fn?.[BUILTIN]==='Number') {
+      if(args[0]!==null&&!['string','number','boolean','undefined'].includes(typeof args[0]))throw Error('Primitive conversion required');
+      return bounded(Number(args[0]));
+    }
+    if(!fn?.[FUNCTION]||++depth>24)throw Error('Invalid call or recursion limit');
     try { const env=new Env(fn.env);fn.node.params.forEach((p,i)=>bind(p,args[i],env));
       if(fn.node.body.type!=='BlockStatement')return expr(fn.node.body,env);
       const result=stmt(fn.node.body,env);return result instanceof Signal&&result.kind==='return'?result.value:undefined;
@@ -57,6 +63,11 @@ export function runProgram(source,input) {
       if(name==='pop')return object.pop();
       if(name==='shift')return object.shift();
       if(name==='includes')return object.includes(args[0]);
+      if(name==='indexOf')return object.indexOf(args[0]);
+      if(name==='some')return object.some((v,i)=>call(args[0],[v,i]));
+      if(name==='every')return object.every((v,i)=>call(args[0],[v,i]));
+      if(name==='find')return object.find((v,i)=>call(args[0],[v,i]));
+      if(name==='forEach'){object.forEach((v,i)=>call(args[0],[v,i]));return undefined;}
       if(name==='slice'){allocate(object.length);return object.slice(args[0],args[1]);}
       if(name==='sort')return object.sort(args.length?(a,b)=>call(args[0],[a,b]):undefined);
       if(name==='map'){allocate(object.length);return object.map((v,i)=>call(args[0],[v,i]));}
@@ -119,9 +130,9 @@ export function runProgram(source,input) {
       default:throw Error('Unsupported statement');
     }
   }
-  const env=new Env();stmt(ast,env);const result=call(env.get('solve'),[structuredClone(input)]);
+  const env=new Env();env.set('Number',{[BUILTIN]:'Number'},true);stmt(ast,env);const result=call(env.get('solve'),[structuredClone(input)]);
   let visits=0,bytes=0;const ancestors=new Set();
-  function inspect(v){if(++visits>10000)throw Error('Output complexity');if(v&&typeof v==='object'){if(ancestors.has(v)||v[FUNCTION])throw Error('Invalid output');ancestors.add(v);for(const x of Object.values(v))inspect(x);ancestors.delete(v);}else if(typeof v==='string'){bytes+=v.length;if(bytes>65536)throw Error('Output bytes');}}
+  function inspect(v){if(++visits>10000)throw Error('Output complexity');if(v&&typeof v==='object'){if(ancestors.has(v)||v[FUNCTION]||v[BUILTIN])throw Error('Invalid output');ancestors.add(v);for(const x of Object.values(v))inspect(x);ancestors.delete(v);}else if(typeof v==='string'){bytes+=v.length;if(bytes>65536)throw Error('Output bytes');}}
   inspect(result);
   const plain=JSON.stringify(result);if(plain===undefined||plain.length>65536)throw Error('Output limit');return JSON.parse(plain);
 }
