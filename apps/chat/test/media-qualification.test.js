@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {readFile,mkdtemp,unlink,rmdir} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {PGlite} from '@electric-sql/pglite';
 import {MediaQualification,mediaFingerprint} from '../src/features/media/qualification.js';
@@ -46,4 +49,14 @@ test('isolated image qualification validates artifact, survives reload, gates pr
   const ref=await queue.input(device.node_id,{job_id:next.job_id,lease_token:next.lease_token});assert.equal(ref.sha256,sha256);
   clock+=180001;assert.equal(await q.claim(device,[next.profile_id]),null);
   assert.equal((await q.lookup(next.job_id)).state,'failed');
+  const root=await mkdtemp(join(tmpdir(),'media-qualification-'));store.directory=root;
+  const fixture=join(root,'fixture.mp4');t.after(async()=>{await unlink(fixture).catch(()=>{});await rmdir(root);});
+  execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','color=c=blue:s=832x480:r=16','-frames:v','49','-c:v','libx264','-threads','2','-pix_fmt','yuv420p',fixture],{timeout:30000,windowsHide:true});
+  const video=await readFile(fixture),videoHash=createHash('sha256').update(video).digest('hex');
+  const videoJob=await q.claim(device,['wan22-14b-480p-49f-v1']);
+  const videoLease={job_id:videoJob.job_id,lease_token:videoJob.lease_token};
+  const videoTicket=await q.reserve(device.node_id,{...videoLease,metadata:{sha256:videoHash,byte_size:video.length}});
+  await q.upload(videoTicket.artifact_id,videoTicket.upload_ticket.upload_token,video);
+  assert.equal((await q.complete(device.node_id,{...videoLease,generation_ms:456})).credits,0);
+  assert.deepEqual(await q.eligible(device,['wan22-14b-480p-49f-v1']),['wan22-14b-480p-49f-v1']);
 });
