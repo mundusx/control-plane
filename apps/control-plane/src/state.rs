@@ -9127,6 +9127,10 @@ impl ControlPlaneState {
 
     pub fn retest_qualification(&mut self, node_id: &str, now: &str) -> Result<NodeRecord, String> {
         if !self.qualification_enabled { return Err("Qualification rollout is disabled".into()); }
+        if self.nodes.get(node_id).and_then(|n| n.trust.qualification.as_ref()).is_some_and(|q|
+            q.probes.iter().any(|p| self.jobs.get(&p.job_id).is_some_and(|j| j.status==JobStatus::Assigned))) {
+            return Err("Wait for the active qualification probe to finish before retesting".into());
+        }
         let node = self.nodes.get_mut(node_id).ok_or("Unknown contributor")?;
         if let Some(q) = node.trust.qualification.take() {
             for probe in q.probes {
@@ -9363,6 +9367,17 @@ mod tests {
         let mut ordinary = job.clone(); ordinary.mode = None;
         assert!(!ControlPlaneState::model_can_run_job(&state.nodes["qualified"], &model, &ordinary, None));
         assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(&state.nodes["qualified"], job), 1);
+    }
+
+    #[test]
+    fn retest_cannot_interrupt_an_active_probe_or_release_its_evidence() {
+        let mut state=qualification_fixture();
+        let q=state.nodes["qualified"].trust.qualification.as_ref().unwrap();
+        let fingerprint=q.fingerprint.clone();let id=q.probes[0].job_id.clone();
+        let job=state.jobs.get_mut(&id).unwrap();job.status=JobStatus::Assigned;job.assigned_node_id=Some("qualified".into());
+        assert!(state.retest_qualification("qualified","104").is_err());
+        assert_eq!(state.nodes["qualified"].trust.qualification.as_ref().unwrap().fingerprint,fingerprint);
+        assert_eq!(state.jobs[&id].status,JobStatus::Assigned);
     }
 
     #[test]

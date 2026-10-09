@@ -9898,6 +9898,21 @@ fn handle_connection_with_streams(
         ("POST", "/v1/jobs/complete") => match serde_json::from_str::<JobCompletion>(&request.body)
         {
             Ok(completion) => {
+                // A cancelled internal probe may finish after retest/model change.
+                // Acknowledge its terminal record so the signed worker can release
+                // its slot; never accept the stale result as qualification evidence.
+                let cancelled_probe = {
+                    let guard=state.lock().expect("state lock");
+                    guard.jobs.get(&completion.job_id).filter(|job|
+                        job.mode.as_deref()==Some(qualification::MODE) && job.status==JobStatus::Failed
+                        && job.assigned_node_id.as_deref()==Some(completion.node_id.as_str())
+                        && header_value(&request.headers,"x-mundusx-node-id")==Some(completion.node_id.as_str())
+                        && matches!(job.error.as_deref(),Some("qualification configuration changed" | "Operator requested qualification retest")))
+                        .cloned()
+                };
+                if let Some(job)=cancelled_probe {
+                    return stream.write_all(json_response("200 OK",serde_json::to_value(job).expect("json")).as_bytes()).unwrap_or(());
+                }
                 let token_usage=match runtime_usage::parse(&request.body) {
                     Ok(records)=>records,
                     Err(error)=>return stream.write_all(json_response("400 Bad Request",serde_json::json!({"error":error})).as_bytes()).unwrap_or(()),
@@ -11174,6 +11189,28 @@ mod tests {
             guard.nodes["node-heartbeat"].reported_state,
             AgentState::Ready
         );
+    }
+
+    #[test]
+    fn cancelled_probe_completion_is_acknowledged_without_accepting_stale_evidence() {
+        let key=SigningKey::from_bytes(&[9_u8;32]);
+        let mut initial=ControlPlaneState::default();register_ready_node(&mut initial,"cancelled-node","test","1");
+        initial.nodes.get_mut("cancelled-node").unwrap().public_key_hex=hex::encode(key.verifying_key().to_bytes());
+        let request:JobRequest=serde_json::from_value(serde_json::json!({"request_id":"cancelled-probe","prompt":"test","preferred_backend":"m","execution_mode":"single","model":null,"system_prompt":null,"max_tokens":128,"temperature":0,"top_p":1,"seed":42})).unwrap();
+        initial.submit_job_with_mode(request,Some(crate::qualification::MODE.into()),"1".into());
+        let job=initial.jobs.get_mut("cancelled-probe").unwrap();job.status=JobStatus::Failed;job.assigned_node_id=Some("cancelled-node".into());job.error=Some("qualification configuration changed".into());
+        let state=Arc::new(Mutex::new(initial));let handler_state=Arc::clone(&state);
+        let sync=Arc::new(Mutex::new(SupabaseSyncStatus::disabled(StorageSource::LocalJsonOnly)));
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+        let handler=thread::spawn(move||{let(stream,_)=listener.accept().unwrap();handle_connection(stream,handler_state,sync,None,StorageSource::LocalJsonOnly);});
+        let body=serde_json::json!({"job_id":"cancelled-probe","node_id":"cancelled-node","worker_id":"late-worker","backend":"m","status":"completed","output":"stale answer",
+            "token_usage":[{"call_id":uuid::Uuid::new_v4().to_string(),"completion_tokens":10,"prompt_tokens":20,"source":"runtime"}]}).to_string();
+        let timestamp=now_unix_seconds();let signature=hex::encode(key.sign(format!("POST\n/v1/jobs/complete\n{timestamp}\n{body}").as_bytes()).to_bytes());
+        let wire=format!("POST /v1/jobs/complete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-MundusX-Node-Id: cancelled-node\r\nX-MundusX-Timestamp: {timestamp}\r\nX-MundusX-Signature: {signature}\r\nContent-Length: {}\r\n\r\n{body}",body.len());
+        let mut client=TcpStream::connect(address).unwrap();client.write_all(wire.as_bytes()).unwrap();client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response=String::new();client.read_to_string(&mut response).unwrap();handler.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let guard=state.lock().unwrap();assert_eq!(guard.jobs["cancelled-probe"].status,JobStatus::Failed);assert!(guard.jobs["cancelled-probe"].output.is_none());assert_eq!(guard.nodes["cancelled-node"].trust.completed_jobs,0);
     }
 
     #[test]
