@@ -97,13 +97,8 @@ def crawl(data, timeout=180):
             partial = next((event for event in reversed(events) if event["event"] == "retrieved"), {})
             if final and not partial:
                 return 200, final
-            sources = partial.get("sources", [])
             text = "Web research could not finish the analysis. Please retry."
-            if partial.get("excerpt"):
-                text += "\n\nRetrieved content (not a completed analysis):\n\n" + partial["excerpt"]
-            if sources:
-                text += "\n\nSources:\n" + "\n".join("- <" + source + ">" for source in sources)
-            return 200, {"content": text, "sources": sources, "error": "incomplete"}
+            return 200, {"content": text, "sources": [], "error": "incomplete"}
     except (OSError, ValueError):
         return 503, {"error": "worker_unavailable"}
     finally:

@@ -92,6 +92,11 @@ class ReaderTests(unittest.TestCase):
 
     def test_visible_text_and_links(self):
         parser = PageText("https://example.com/")
+        parser.feed('<nav><div>Jump to main menu</div><a href="/login">Login</a></nav><main><h1>Dave Batalla</h1><p>Public professional biography.</p></main><footer>Languages</footer>')
+        self.assertEqual(parser.parts, ["Dave Batalla", "Public professional biography."])
+        self.assertEqual(parser.links, [])
+        self.assertEqual(person_name({"message": "who isa dave batalla", "researchMode": "biography"}), "dave batalla")
+        parser = PageText("https://example.com/")
         parser.feed('<h1>Website</h1><script>secret code</script><style>hidden</style><a href="/pricing">Plans</a>')
         self.assertEqual(parser.parts, ["Website", "Plans"])
         self.assertEqual(parser.links, ["https://example.com/pricing"])
@@ -137,8 +142,9 @@ class ReaderTests(unittest.TestCase):
                                                  headers={"Authorization": "Bearer test"})
                 result = json.load(urllib.request.urlopen(request))
                 self.assertEqual(result["error"], "incomplete")
-                self.assertIn("Actual page content", result["content"])
-                self.assertEqual(result["sources"], ["https://example.com"])
+                self.assertNotIn("Actual page content", result["content"])
+                self.assertNotIn("Retrieved content", result["content"])
+                self.assertEqual(result["sources"], [])
         finally:
             server.shutdown()
             server.server_close()
