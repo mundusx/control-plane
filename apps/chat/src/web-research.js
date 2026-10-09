@@ -4,6 +4,7 @@ export function webResearchRequest(message, history = []) {
   // Normalize natural person questions before routing as well as cache lookup.
   // Do not strip underscores from handles, code, or URLs.
   const personQuestion = text.normalize("NFKC").replace(/\s+/gu, " ")
+    .replace(/^who\s+isa\s+/iu, "who is ")
     .replace(/^who['’]s\s+/iu, "who is ");
   if (/^who is [\p{L}]+(?:['’-][\p{L}]+)*(?: [\p{L}]+(?:['’-][\p{L}]+)*){1,3}_*[?.!]*$/iu.test(personQuestion)) {
     text = personQuestion.replace(/_+(?=[?.!]*$)/u, "");

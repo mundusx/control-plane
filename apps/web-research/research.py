@@ -116,7 +116,7 @@ def run(request):
         "\n<untrusted_web_evidence>\n" + evidence + "\n</untrusted_web_evidence>")
     answer = str(result.get("final_response") or "").strip()
     if not answer or not result.get("completed", False):
-        return {"content": "The pages were retrieved, but the analysis could not finish. Please retry.\n\n" + evidence[:1800], "sources": sources, "error": "incomplete"}
+        return {"content": "I found web pages, but couldn't complete a verified answer. Please retry.", "sources": [], "error": "incomplete"}
     # Guarantee that the retrieved sources remain available even if the model
     # omits citations. Never fabricate references from its answer.
     sources = answer_sources(answer, sources)
