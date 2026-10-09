@@ -9,5 +9,6 @@ test('stops three adjacent repeated explanatory sections', () => {
 test('allows repeated code, short labels, and separate mentions', () => {
   assert.doesNotThrow(() => assertNoRepetition('```js\n' + section.repeat(5) + '\n```'));
   assert.doesNotThrow(() => assertNoRepetition('Note: '.repeat(20)));
+  assert.doesNotThrow(() => assertNoRepetition('x'.repeat(9000)));
   assert.doesNotThrow(() => assertNoRepetition(section + 'Another explanation.' + section));
 });
