@@ -1,3 +1,4 @@
+import { MediaQualification } from './qualification.js';
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
 import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
@@ -6,7 +7,7 @@ import { rankedMediaWorker } from './routing.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export class MediaQueue {
-  constructor(store, admitWorker = async device => device.policy_allowed === true, fleet = null) { this.store=store; this.accounting=new MediaAccounting(store); this.admitWorker=admitWorker; this.fleet=fleet; }
+  constructor(store, admitWorker = async device => device.policy_allowed === true, fleet = null) { this.store=store; this.accounting=new MediaAccounting(store); this.admitWorker=admitWorker; this.fleet=fleet; this.qualification=new MediaQualification(store); }
   async authenticate(request, path, body) {
     const h=request.headers, node=String(h['x-mundusx-node-id']??''), timestamp=String(h['x-mundusx-timestamp']??''), signature=String(h['x-mundusx-signature']??'');
     if (!/^\d{10}$/.test(timestamp) || Math.abs(Number(timestamp)*1000-this.store.now())>120000 || !/^[0-9a-f]{128}$/.test(signature) || !uuid.test(body?._nonce??'')) throw httpError(401,'Invalid worker signature');
@@ -53,8 +54,14 @@ export class MediaQueue {
   }
   async claim(device,profiles) {
     if(!await this.admitWorker(device, profiles)) throw httpError(403,'Contributor policy does not allow work');
-    const supported=Array.isArray(profiles)?profiles.filter(x=>x===IMAGE_PROFILE || x===LEGACY_IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
+    let supported=Array.isArray(profiles)?profiles.filter(x=>x===IMAGE_PROFILE || x===LEGACY_IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
     if(!supported.length) throw httpError(422,'No supported media presets');
+    if(this.qualification.enabled) {
+      const probe=await this.qualification.claim(device,supported);
+      if(probe)return probe;
+      supported=await this.qualification.eligible(device,supported);
+      if(!supported.length)return null;
+    }
     const fleet = this.fleet ? await this.fleet() : null;
     return this.store.transaction(async db=>{
       if (fleet) {
@@ -68,6 +75,7 @@ export class MediaQueue {
       // Serialize claims per node across processes; SKIP LOCKED distributes jobs across nodes.
       await db.query('select node_id from public.devices where node_id=$1 for update',[device.node_id]);
       const now=new Date(this.store.now());
+      if(this.qualification.enabled&&(await db.query("select 1 from public.media_qualification_probes where node_id=$1 and state='running' and lease_until>$2",[device.node_id,now])).rows.length)return null;
       const expired=await db.query("update public.media_generation_jobs set state=case when attempts>=3 then 'failed' else 'queued' end,lease_hash=null,lease_until=null,node_id=null,error='Worker lease expired' where state='running' and lease_until<=$1 returning job_id,state",[now]);
       for(const x of expired.rows) {
         if (fleet) await db.query("update public.media_execution_attempts set state='expired',finished_at=$2 where job_id=$1 and state='running'",[x.job_id,now]);
@@ -105,6 +113,7 @@ export class MediaQueue {
     return row;
   }
   async input(node, input) {
+    if(this.qualification.enabled&&await this.qualification.lookup(input.job_id))return this.qualification.input(node,input);
     const row = await this.store.transaction(db => this.lease(db, node, input));
     if (!row.request.input_artifact_id) throw httpError(404, 'No reference image for this job');
     const record = await this.store.owned(row.request.input_artifact_id, row.owner_user_id);
@@ -114,12 +123,13 @@ export class MediaQueue {
     if (bytes.length > 33554432 || createHash('sha256').update(bytes).digest('hex') !== record.sha256) throw httpError(422, 'Reference image integrity check failed');
     return { data: bytes.toString('base64'), sha256: record.sha256 };
   }
-  async heartbeat(node,input) { return this.store.transaction(async db=>{
+  async heartbeat(node,input) { if(this.qualification.enabled&&await this.qualification.lookup(input.job_id))return this.qualification.heartbeat(node,input); return this.store.transaction(async db=>{
     await this.lease(db,node,input);
     await db.query('update public.media_generation_jobs set lease_until=$2 where job_id=$1',[input.job_id,new Date(this.store.now()+180000)]);
     return {ok:true};
   }); }
   async reserve(node,input) {
+    if(this.qualification.enabled&&await this.qualification.lookup(input.job_id))return this.qualification.reserve(node,input);
     const row=await this.store.transaction(db=>this.lease(db,node,input));
     const q=mediaQuote(row.request.profile_id);
     const reservation=await this.store.reserve(row.owner_user_id,{...input.metadata,content_type:q.operation!=='text_to_image'?'video/mp4':'image/png',width:q.width,height:q.height,frames:q.frames,fps:q.fps});
@@ -137,6 +147,7 @@ export class MediaQueue {
     return {artifact_id:reservation.artifact_id,upload_ticket:reservation.upload_ticket};
   }
   async complete(node,input) {
+    if(this.qualification.enabled&&await this.qualification.lookup(input.job_id))return this.qualification.complete(node,input);
     if(!Number.isSafeInteger(input.generation_ms)||input.generation_ms<0) throw httpError(400,'Invalid generation telemetry');
     await this.store.transaction(async db=>{
       const row=await this.lease(db,node,input,true);
@@ -151,7 +162,8 @@ export class MediaQueue {
     await this.store.cleanup().catch(() => console.error('Reference image cleanup failed; the scheduled sweep will retry'));
     return settled;
   }
-  async fail(node,input) { return this.store.transaction(async db=>{
+  async fail(node,input) {
+    if(this.qualification.enabled&&await this.qualification.lookup(input.job_id))return this.qualification.fail(node,input); return this.store.transaction(async db=>{
     await this.lease(db,node,input);
     if (this.fleet) await db.query("update public.media_execution_attempts set state='failed',finished_at=$2 where job_id=$1 and state='running'",[input.job_id,new Date(this.store.now())]);
     await db.query("update public.media_generation_jobs set state='failed',error='Media generation failed',lease_until=null,completed_at=$2 where job_id=$1",[input.job_id,new Date(this.store.now())]);

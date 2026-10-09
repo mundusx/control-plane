@@ -1,3 +1,4 @@
+import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
 import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
@@ -6977,7 +6978,8 @@ export function createServerApp(config = configFromEnv()) {
   const authStore = config.authStore ?? new PostgresAuthStore(config.auth ?? authConfigFromEnv());
   const mediaStore = config.mediaStore ?? (config.mediaDirectory
     ? new MediaArtifactStore({ pool: authStore.pool, directory: config.mediaDirectory }) : null);
-  const fleet = config.mediaFleet ?? (config.mediaAdmission ? null : mediaFleet(config));
+  const fleet = config.mediaFleet ?? (config.mediaAdmission ? null : mediaFleet(config,fetch,Date.now, process.env.MUNDUSX_MEDIA_QUALIFICATION_MODE==='gradual'&&mediaStore
+    ? async ()=>(await mediaStore.pool.query("select node_id,profile_id,fingerprint,state from public.media_qualification_probes where state='passed'")).rows : null));
   const planMedia = config.mediaPlanner ?? mediaPlanner(process.env.MUNDUSX_MEDIA_PLANNER_URL);
   const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia);
   const mediaIntentCache = new Map();
@@ -7025,9 +7027,11 @@ export function createServerApp(config = configFromEnv()) {
     readJsonBody,
     sendJson,
   });
+  const handleCodingQualification = codingQualificationController({operatorToken:config.operatorToken,readJsonBody,sendJson});
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (await handleCodingQualification({request,response,url})) return;
       if (await handleOpenAiMediaRequest({ request, response, url })) return;
       if (await handleMediaClientRequest({ request, response, url })) return;
       if (await handleMediaRequest({ request, response, url })) return;
@@ -15363,7 +15367,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     void discoverLatestAgentReleases(config).then((discovered) => Object.assign(config, discovered));
   }, AGENT_RELEASE_REFRESH_MS);
   releaseRefresh.unref();
-  createServerApp(config).listen(config.port, "0.0.0.0", () => {
+  createServerApp(config).listen(config.port, process.env.HOST || "::", () => {
     console.log(`MundusX chat listening on http://127.0.0.1:${config.port}`);
     console.log(`controlPlaneUrl: ${config.controlPlaneUrl}`);
   });
