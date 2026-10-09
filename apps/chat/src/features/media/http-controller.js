@@ -13,6 +13,7 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
   return async function handleMedia({ request, response, url }) {
     const worker = url.pathname.match(/^\/api\/media\/worker\/(claim|heartbeat|reserve|complete|fail|input)$/);
     const jobs = url.pathname.match(/^\/api\/media\/jobs(?:\/([0-9a-f-]{36}))?$/);
+    const qualification = url.pathname.match(/^\/api\/media\/qualification\/(status|retest)$/);
     const profiles = url.pathname === "/api/media/profiles";
     const price = url.pathname === "/api/media/quote";
     const compute = url.pathname.match(/^\/api\/media\/computations\/([^/]+)$/);
@@ -20,12 +21,31 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
     const api = url.pathname.match(/^\/api\/media\/artifacts(?:\/([0-9a-f-]{36})(?:\/(content|link))?)?$/);
     const download = url.pathname.match(/^\/media\/([0-9a-f-]{36})\/(image\.png|video\.mp4)$/);
     const ownedDownload = url.pathname.match(/^\/media\/owned\/([0-9a-f-]{36})\/(image\.png|video\.mp4)$/);
-    if (!api && !download && !ownedDownload && !price && !compute && !internal && !worker && !jobs && !profiles) return false;
+    if (!api && !download && !ownedDownload && !price && !compute && !internal && !worker && !jobs && !profiles && !qualification) return false;
     response.setHeader("Cache-Control", "private, no-store, max-age=0");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
     if (!store) throw httpError(503, "Image storage is not configured");
+    if(qualification) {
+      const digest=value=>createHash('sha256').update(String(value)).digest();
+      const supplied=String(request.headers.authorization??'').replace(/^Bearer /,'');
+      if(!operatorToken||!timingSafeEqual(digest(supplied),digest(operatorToken)))throw httpError(401,'Qualification dispatcher authorization required');
+      if(qualification[1]==='status'&&request.method==='GET') {
+        const rows=await store.pool.query('select node_id,profile_id,fingerprint,state,generation_ms,reason,completed_at from public.media_qualification_probes order by created_at desc limit 200');
+        sendJson(response,200,{enabled:queue.qualification.enabled,items:rows.rows});return true;
+      }
+      if(qualification[1]==='retest'&&request.method==='POST') {
+        const body=await readJsonBody(request);
+        if(typeof body.node_id!=='string'||!body.node_id||body.node_id.length>128)throw httpError(400,'node_id is required');
+        const result=await store.transaction(async db=>{
+          await db.query('select node_id from public.devices where node_id=$1 for update',[body.node_id]);
+          if((await db.query("select 1 from public.media_qualification_probes where node_id=$1 and state='running'",[body.node_id])).rows.length)throw httpError(409,'Wait for the active probe to finish');
+          return db.query("update public.media_qualification_probes set state='pending',lease_hash=null,lease_until=null,artifact_id=null,upload_hash=null,uploaded=false,metadata=null,reason=null,completed_at=null where node_id=$1 returning profile_id",[body.node_id]);
+        });sendJson(response,200,{queued:result.rows.length});return true;
+      }
+      throw httpError(405,'Invalid qualification method');
+    }
     if (worker) {
       if (request.method !== "POST") throw httpError(405, "Method not allowed");
       const body = await readJsonBody(request);
@@ -70,8 +90,9 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
     }
     if (api?.[2] === "content" && request.method === "PUT") {
       const token = String(request.headers.authorization ?? "").replace(/^Bearer /, "");
-      const row = await store.lookup(api[1]);
-      store.authorizeUpload(row, token);
+      const probe = queue.qualification.enabled ? await queue.qualification.artifact(api[1]) : null;
+      const row = probe ? {...probe.metadata} : await store.lookup(api[1]);
+      if(probe)queue.qualification.authorizeUpload(probe,token);else store.authorizeUpload(row, token);
       const length = Number(request.headers["content-length"]);
       if (!Number.isSafeInteger(length) || length !== row.byte_size || length < 1 || length > (row.content_type === "video/mp4" ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES) || request.headers["transfer-encoding"]) {
         throw httpError(413, "Content-Length must match the reserved image size");
@@ -88,7 +109,7 @@ export function createMediaHttpController({ store, authStore, operatorToken, rea
           chunks.push(chunk);
         }
         if (received !== length) throw httpError(400, "Image upload was incomplete");
-        const result = await store.upload(api[1], token, Buffer.concat(chunks, received));
+        const result = probe ? await queue.qualification.upload(api[1],token,Buffer.concat(chunks,received)) : await store.upload(api[1], token, Buffer.concat(chunks, received));
         sendJson(response, 200, result);
       } finally { clearTimeout(deadline); store.activeUploads--; }
       return true;
