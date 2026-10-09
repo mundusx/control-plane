@@ -17,9 +17,12 @@ export function runProgram(source,input) {
   if(typeof source!=='string'||source.length>16384) throw Error('Source limit');
   const ast=parse(source,{ecmaVersion:2022,sourceType:'script'});
   let remaining=120000,depth=0,allocation=65536;
-  const tick=()=>{if(--remaining<0)throw Error('Execution budget');};
+  const tick=(cost=1)=>{if((remaining-=cost)<0)throw Error('Execution budget');};
   const allocate=n=>{if((allocation-=n)<0)throw Error('Allocation budget');};
   const bounded=v=>{if((Array.isArray(v)||typeof v==='string')&&v.length>4096)throw Error('Allocation limit');if(typeof v==='number'&&!Number.isFinite(v))throw Error('Nonfinite number');return v;};
+  const primitive=v=>v===null||['string','number','boolean','undefined'].includes(typeof v);
+  const numeric=v=>{if(!primitive(v))throw Error('Primitive arithmetic required');if(typeof v==='string')tick(v.length);return bounded(Number(v));};
+  const add=(a,b)=>{if(!primitive(a)||!primitive(b))throw Error('Primitive arithmetic required');if(typeof a==='string'||typeof b==='string'){const left=String(a),right=String(b);if(left.length+right.length>4096)throw Error('String limit');tick(left.length+right.length);return left+right;}return bounded(a+b);};
   function bind(pattern,value,env) {
     tick(); if(pattern.type==='Identifier') return env.set(pattern.name,value,true);
     if(pattern.type==='ArrayPattern'&&Array.isArray(value)) { pattern.elements.forEach((p,i)=>{if(p)bind(p,value[i],env);});return; }
@@ -30,7 +33,7 @@ export function runProgram(source,input) {
     tick();
     if(fn?.[BUILTIN]==='Number') {
       if(args[0]!==null&&!['string','number','boolean','undefined'].includes(typeof args[0]))throw Error('Primitive conversion required');
-      return bounded(Number(args[0]));
+      return numeric(args[0]);
     }
     if(!fn?.[FUNCTION]||++depth>24)throw Error('Invalid call or recursion limit');
     try { const env=new Env(fn.env);fn.node.params.forEach((p,i)=>bind(p,args[i],env));
@@ -59,6 +62,7 @@ export function runProgram(source,input) {
     }
     const object=expr(node.object,env),name=key(node.computed?expr(node.property,env):node.property.name);
     if(Array.isArray(object)) {
+      tick(object.length);
       if(name==='push'){allocate(args.length);if(object.length+args.length>4096)throw Error('Allocation limit');return object.push(...args);}
       if(name==='pop')return object.pop();
       if(name==='shift')return object.shift();
@@ -69,16 +73,16 @@ export function runProgram(source,input) {
       if(name==='find')return object.find((v,i)=>call(args[0],[v,i]));
       if(name==='forEach'){object.forEach((v,i)=>call(args[0],[v,i]));return undefined;}
       if(name==='slice'){allocate(object.length);return object.slice(args[0],args[1]);}
-      if(name==='sort')return object.sort(args.length?(a,b)=>call(args[0],[a,b]):undefined);
+      if(name==='sort'){tick(object.length*Math.ceil(Math.log2(Math.max(2,object.length))));if(!args.length&&!object.every(primitive))throw Error('Primitive sort required');return object.sort(args.length?(a,b)=>{const n=call(args[0],[a,b]);if(typeof n!=='number')throw Error('Numeric comparator required');return bounded(n);}:undefined);}
       if(name==='map'){allocate(object.length);return object.map((v,i)=>call(args[0],[v,i]));}
       if(name==='filter'){allocate(object.length);return object.filter((v,i)=>call(args[0],[v,i]));}
       if(name==='reduce'){if(args.length<2)throw Error('Explicit reduce seed required');return object.reduce((a,v,i)=>call(args[0],[a,v,i]),args[1]);}
-      if(name==='join')return bounded(object.join(args[0]));
+      if(name==='join'){if(!object.every(primitive)||!primitive(args[0]))throw Error('Primitive join required');const separator=args[0]===undefined?',':String(args[0]);const length=object.reduce((n,v)=>n+(v==null?0:String(v).length),Math.max(0,object.length-1)*separator.length);if(length>4096)throw Error('String limit');tick(length);return object.join(separator);}
     }
     if(typeof object==='string') {
       if(name==='toLowerCase')return object.toLowerCase();
       if(name==='trim')return object.trim();
-      if(name==='split')return bounded(object.split(args[0]));
+      if(name==='split'){if(args[0]!==undefined&&typeof args[0]!=='string')throw Error('String separator required');tick(object.length);allocate(object.length+1);return bounded(object.split(args[0]));}
       if(name==='slice')return object.slice(args[0],args[1]);
     }
     throw Error('Unsupported method');
@@ -98,17 +102,17 @@ export function runProgram(source,input) {
     switch(n.type) {
       case 'Literal':if(n.regex||n.bigint)throw Error('Unsupported literal');return bounded(n.value);
       case 'Identifier':return e.get(n.name);
-      case 'ArrayExpression':allocate(n.elements.length);return bounded(n.elements.map(x=>expr(x,e)));
+      case 'ArrayExpression':{const out=[];for(const x of n.elements){if(x?.type==='SpreadElement'){const values=expr(x.argument,e);if(!Array.isArray(values))throw Error('Spread requires bounded array');allocate(values.length);if(out.length+values.length>4096)throw Error('Allocation limit');out.push(...values);}else{allocate(1);out.push(expr(x,e));}}return bounded(out);}
       case 'ObjectExpression':{allocate(n.properties.length);const o=Object.create(null);for(const p of n.properties){if(p.type!=='Property'||p.kind!=='init'||p.method)throw Error('Invalid object');o[key(p.computed?expr(p.key,e):(p.key.name??p.key.value))]=expr(p.value,e);}return o;}
       case 'ArrowFunctionExpression':case 'FunctionExpression':if(n.async||n.generator)throw Error('Async unsupported');return {[FUNCTION]:true,node:n,env:e};
       case 'MemberExpression':return member(n,e);
       case 'CallExpression':{const args=n.arguments.map(a=>expr(a,e));return bounded(n.callee.type==='MemberExpression'?method(n.callee,args,e):call(expr(n.callee,e),args));}
       case 'ConditionalExpression':return expr(expr(n.test,e)?n.consequent:n.alternate,e);
       case 'LogicalExpression':{const a=expr(n.left,e);if(n.operator==='&&')return a&&expr(n.right,e);if(n.operator==='||')return a||expr(n.right,e);if(n.operator==='??')return a??expr(n.right,e);throw Error('Operator');}
-      case 'UnaryExpression':{const a=expr(n.argument,e);if(n.operator==='!')return !a;if(n.operator==='-')return bounded(-a);if(n.operator==='+')return bounded(+a);throw Error('Operator');}
-      case 'BinaryExpression':{const a=expr(n.left,e),b=expr(n.right,e);switch(n.operator){case '+':return bounded(a+b);case '-':return bounded(a-b);case '*':return bounded(a*b);case '/':return bounded(a/b);case '%':return bounded(a%b);case '<':return a<b;case '>':return a>b;case '<=':return a<=b;case '>=':return a>=b;case '===':return a===b;case '!==':return a!==b;case '==':return a==b;case '!=':return a!=b;default:throw Error('Operator');}}
-      case 'AssignmentExpression':{const value=expr(n.right,e);if(n.operator==='=')return assign(n.left,value,e);const old=expr(n.left,e);if(n.operator==='+=')return assign(n.left,old+value,e);if(n.operator==='-=')return assign(n.left,old-value,e);throw Error('Assignment');}
-      case 'UpdateExpression':{const old=expr(n.argument,e),next=old+(n.operator==='++'?1:-1);assign(n.argument,next,e);return n.prefix?next:old;}
+      case 'UnaryExpression':{const a=expr(n.argument,e);if(n.operator==='!')return !a;if(n.operator==='-')return -numeric(a);if(n.operator==='+')return numeric(a);throw Error('Operator');}
+      case 'BinaryExpression':{const a=expr(n.left,e),b=expr(n.right,e);if(n.operator==='===')return a===b;if(n.operator==='!==')return a!==b;if(!primitive(a)||!primitive(b))throw Error('Primitive operator required');switch(n.operator){case '+':return add(a,b);case '-':return bounded(numeric(a)-numeric(b));case '*':return bounded(numeric(a)*numeric(b));case '/':return bounded(numeric(a)/numeric(b));case '%':return bounded(numeric(a)%numeric(b));case '<':return a<b;case '>':return a>b;case '<=':return a<=b;case '>=':return a>=b;case '==':return a==b;case '!=':return a!=b;default:throw Error('Operator');}}
+      case 'AssignmentExpression':{const value=expr(n.right,e);if(n.operator==='=')return assign(n.left,value,e);const old=expr(n.left,e);if(n.operator==='+=')return assign(n.left,add(old,value),e);if(n.operator==='-=')return assign(n.left,numeric(old)-numeric(value),e);throw Error('Assignment');}
+      case 'UpdateExpression':{const old=numeric(expr(n.argument,e)),next=old+(n.operator==='++'?1:-1);assign(n.argument,next,e);return n.prefix?next:old;}
       default:throw Error('Unsupported syntax');
     }
   }
