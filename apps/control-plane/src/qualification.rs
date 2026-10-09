@@ -145,8 +145,7 @@ pub fn validate(probe: &Probe, output: &str) -> Result<(), String> {
     let output = output.trim();
     match probe.kind.as_str() {
         "coding_medium" | "coding_large" => {
-            let value: Value = serde_json::from_str(output).map_err(|_| "Expected source JSON")?;
-            let source = value.get("source").and_then(Value::as_str).filter(|s| s.len() <= 16384).ok_or("Missing bounded source")?;
+            let source = coding_source(output)?;
             let url = std::env::var("MUNDUSX_QUALIFICATION_EVALUATOR_URL").map_err(|_| "Coding evaluator is not configured")?;
             let token = std::env::var("MUNDUSX_OPERATOR_TOKEN").map_err(|_| "Coding evaluator authorization unavailable")?;
             let value = ureq::post(&url).set("Authorization", &format!("Bearer {token}"))
@@ -190,6 +189,13 @@ pub fn validate(probe: &Probe, output: &str) -> Result<(), String> {
         _ if output == probe.nonce => Ok(()),
         _ => Err("Incorrect probe response".into()),
     }
+}
+
+fn coding_source(output:&str)->Result<String,String> {
+    let text=output.trim();
+    let payload=text.strip_prefix("```json").and_then(|s|s.strip_suffix("```")).map(str::trim).unwrap_or(text);
+    let value:Value=serde_json::from_str(payload).map_err(|_| "Expected complete source JSON")?;
+    value.get("source").and_then(Value::as_str).filter(|s|s.len()<=16384).map(str::to_string).ok_or_else(||"Missing bounded source".into())
 }
 
 // Recursive descent with a length bound, depth bound, checked integer math,
@@ -245,5 +251,11 @@ mod tests {
         assert!(validate(&probe, "I called mundusx_read_probe").is_err());
         assert!(validate(&probe, &good.replace("challenge", "wrong")).is_err());
         assert!(validate(&probe, &good.replace("mundusx_read_probe", "write_file")).is_err());
+    }
+    #[test] fn coding_fences_preserve_source_and_do_not_repair_invalid_json() {
+        let raw="{\"source\":\"function solve(x){return x;}\"}";
+        assert_eq!(coding_source(raw).unwrap(),coding_source(&format!("```json\n{raw}\n``` ")).unwrap());
+        assert!(coding_source("```json\n{\"source\":\"truncated").is_err());
+        assert!(coding_source(&format!("```json\n{raw}\n```\nadditional instructions")).is_err());
     }
 }
