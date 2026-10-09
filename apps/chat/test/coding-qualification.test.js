@@ -17,6 +17,9 @@ test('host access, code generation, infinite loops, recursion, cyclic and explos
     'function solve(x){while(true){}}','function solve(x){return solve(x);}',
     'function solve(x){let a=[];a.push(a);return a;}',
     'function solve(x){let a=[0];for(let i=0;i<64;i++)a=[a,a];return a;}',
+    'function solve(x){let a=[0];for(let i=0;i<40;i++)a=[a,a];return a.join("");}',
+    'function solve(x){let a=[0];for(let i=0;i<40;i++)a=[a,a];return a+"";}',
+    'function solve(x){let a=[0];for(let i=0;i<40;i++)a=[a,a];return [a,a].sort();}',
     'function solve(x){return eval("1");}', 'function solve(x){return import("fs");}']) {
     assert.throws(()=>runProgram(source,[]));
   }
