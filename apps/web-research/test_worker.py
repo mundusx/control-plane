@@ -14,6 +14,26 @@ from evidence import query_variants, collect_evidence, answer_sources, person_na
 
 
 class ReaderTests(unittest.TestCase):
+    def test_native_tool_gate_retries_only_synthesis_using_retrieved_evidence(self):
+        from research import run
+        first, second = MagicMock(), MagicMock()
+        first.run_conversation.return_value = {"completed": False, "error": "Managed MLX native tools are not verified; restart the persistent runtime"}
+        second.run_conversation.return_value = {"completed": True, "final_response": "Python is a programming language."}
+        factory = MagicMock(side_effect=[first, second])
+        web_tools = types.ModuleType("tools.web_tools")
+        web_tools.web_search_tool, web_tools.web_extract_tool = MagicMock(), MagicMock()
+        run_agent = types.ModuleType("run_agent")
+        run_agent.AIAgent = factory
+        with patch.dict(sys.modules, {"tools": types.ModuleType("tools"), "tools.web_tools": web_tools, "run_agent": run_agent}), \
+                patch.dict(os.environ, {"RESEARCH_MODEL_URL": "https://model.test/v1", "RESEARCH_MODEL_TOKEN": "test-token"}), \
+                patch("public_read.read_public_page", return_value={"url": "https://www.python.org/about/", "content": "Python is a programming language."}):
+            result = run({"message": "What is Python?", "urls": ["https://www.python.org/about/"]})
+        self.assertIsNone(result["error"])
+        self.assertEqual(factory.call_args_list[0].kwargs["enabled_toolsets"], ["web"])
+        self.assertEqual(factory.call_args_list[1].kwargs["enabled_toolsets"], [])
+        self.assertIn("untrusted_web_evidence", second.run_conversation.call_args.kwargs["system_message"])
+        self.assertIn("https://www.python.org/about/", result["sources"])
+
     def test_person_lookup_includes_exact_name_linkedin_and_rejects_other_people(self):
         request = {"message": "who is dave batalla?", "researchMode": "biography"}
         self.assertEqual(person_name(request), "dave batalla")
