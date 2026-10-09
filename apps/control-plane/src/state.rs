@@ -1434,7 +1434,7 @@ impl ControlPlaneState {
         let Some(node) = self.nodes.get(node_id) else {
             return (0, 0, 0, 0);
         };
-        let total = node
+        let reported_total = node
             .worker_health
             .as_ref()
             .map(|health| {
@@ -1442,6 +1442,7 @@ impl ControlPlaneState {
                     .min(health.capabilities.max_parallel_jobs.max(1) as usize)
             })
             .unwrap_or(1);
+        let total=if node.trust.qualification_required || node.trust.qualification.as_ref().is_some_and(|q|q.status()=="testing") {1}else{reported_total};
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
             self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
@@ -9107,6 +9108,9 @@ impl ControlPlaneState {
                 q.tested_context_tokens = Some(total.min(u64::from(q.configured_context_tokens)) as u32);
             } else { result = Err("Measured runtime prompt token count is required; update contributor agent".into()); }
         }
+        let retry_context = probe.kind == "context" && result.is_err()
+            && q.configured_context_tokens > 2048
+            && (completion.status == JobStatus::Failed || probe.prompt_tokens.is_some());
         probe.status = if result.is_ok() { "passed" } else { "failed" }.into();
         probe.reason = result.err();
         probe.elapsed_ms = elapsed;
@@ -9120,6 +9124,17 @@ impl ControlPlaneState {
         job.backend = Some(completion.backend);
         job.completed_at = Some(now.clone());
         let record = job.clone();
+        if retry_context {
+            let trust=&mut self.nodes.get_mut(&completion.node_id)?.trust;
+            let q=trust.qualification.as_mut()?;
+            q.configured_context_tokens=(q.configured_context_tokens/2).max(2048);
+            if let Some(probe)=q.probes.iter_mut().find(|p|p.kind=="context") {
+                probe.job_id=format!("qualification-{}",uuid::Uuid::new_v4());
+                probe.nonce=uuid::Uuid::new_v4().simple().to_string();probe.status="pending".into();
+                probe.reason=None;probe.prompt_tokens=None;probe.completion_tokens=None;probe.elapsed_ms=None;probe.completed_at=None;
+            }
+            trust.revision=trust.revision.saturating_add(1);
+        }
         self.refresh_qualification(&completion.node_id, &now);
         self.reevaluate_queued_jobs();
         Some(record)
@@ -9367,6 +9382,21 @@ mod tests {
         let mut ordinary = job.clone(); ordinary.mode = None;
         assert!(!ControlPlaneState::model_can_run_job(&state.nodes["qualified"], &model, &ordinary, None));
         assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(&state.nodes["qualified"], job), 1);
+        assert_eq!(state.node_slot_occupancy_breakdown("qualified").2,1);
+    }
+
+    #[test]
+    fn context_retries_at_lower_capacity_without_granting_failed_evidence() {
+        let mut state=qualification_fixture();
+        let nonce=probe_nonce(&state,"chat");finish_probe(&mut state,"chat",nonce,false);
+        let old=state.nodes["qualified"].trust.qualification.as_ref().unwrap().probes.iter().find(|p|p.kind=="context").unwrap().job_id.clone();
+        finish_probe(&mut state,"context","missing earlier anchors".into(),true);
+        let q=state.nodes["qualified"].trust.qualification.as_ref().unwrap();
+        assert_eq!(q.configured_context_tokens,2048);assert!(q.tested_context_tokens.is_none());
+        let fresh=q.probes.iter().find(|p|p.kind=="context").unwrap();assert_ne!(fresh.job_id,old);assert_eq!(fresh.status,"pending");
+        let nonce=probe_nonce(&state,"context");finish_probe(&mut state,"context",nonce,true);
+        assert_eq!(state.nodes["qualified"].trust.qualification.as_ref().unwrap().tested_context_tokens,Some(2048));
+        assert_eq!(state.nodes["qualified"].trust.completed_jobs,0);
     }
 
     #[test]
@@ -9407,7 +9437,8 @@ mod tests {
     }
 
     fn probe_nonce(state: &ControlPlaneState, kind: &str) -> String {
-        state.nodes["qualified"].trust.qualification.as_ref().unwrap().probes.iter().find(|p| p.kind == kind).unwrap().nonce.clone()
+        let nonce=state.nodes["qualified"].trust.qualification.as_ref().unwrap().probes.iter().find(|p| p.kind == kind).unwrap().nonce.clone();
+        if kind=="context" {crate::qualification::context_answer(&nonce)} else {nonce}
     }
 
     #[test]
