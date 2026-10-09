@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub const MODE: &str = "contributor_qualification_v1";
-pub const SUITE: u32 = 2;
+pub const SUITE: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct Qualification {
@@ -45,7 +45,7 @@ pub fn fingerprint(node: &NodeRecord, model: &ModelCapability) -> String {
         health.capabilities.physical_memory_mb, health.capabilities.usable_memory_mb,
         health.capabilities.total_vram_mb, health.parallel_slots,
         health.capabilities.max_num_seqs, health.capabilities.kv_cache_size_tokens,
-        node.capability_fabric_version, model.supports_tools, health.streaming_supported]);
+        node.capability_fabric_version, model.supports_tools, model.supports_vision, health.streaming_supported]);
     hex::encode(Sha256::digest(raw.to_string().as_bytes()))
 }
 
@@ -53,11 +53,15 @@ impl Qualification {
     pub fn detected(node: &NodeRecord, model: &ModelCapability, now: &str) -> Self {
         let health = node.worker_health.as_ref().unwrap();
         // A starting configuration, not a hardware-derived quality score.
-        let budget = if health.capabilities.usable_memory_mb.unwrap_or(0) < 8192 {
-            2048
-        } else { 4096 };
+        let budget = match health.capabilities.usable_memory_mb.unwrap_or(0) {
+            0..=8191 => 2048, 8192..=16383 => 4096, 16384..=32767 => 8192, _ => 16384,
+        };
         let context = model.context_tokens.unwrap_or(2048).min(budget);
         let mut kinds = vec!["chat", "context", "coding_basic"];
+        let coding = model.name.to_ascii_lowercase().contains("coder") || model.task_capabilities.iter().any(|c| c.contains("coding"));
+        if coding && context >= 4096 { kinds.push("coding_medium"); }
+        if coding && context >= 8192 { kinds.push("coding_large"); }
+        if model.supports_vision { kinds.push("vision"); }
         if health.streaming_supported { kinds.push("streaming"); }
         if model.supports_tools { kinds.extend(["native_tools", "tool_result"]); }
         let probes = kinds.into_iter().map(|kind| Probe {
@@ -92,6 +96,10 @@ impl Qualification {
         match capability {
             "chat" => self.passed("chat"),
             "coding" | "coding_basic" | "small_coding" => self.passed("coding_basic"),
+            "medium_coding" => self.passed("coding_basic") && self.passed("coding_medium"),
+            "large_coding" => self.passed("coding_basic") && self.passed("coding_medium") && self.passed("coding_large"),
+            "vision" => self.passed("vision"),
+            "long_context" => self.tested_context_tokens.is_some_and(|n| n >= 8192),
             "tool_use" | "native_tool_calls_v1" => self.passed("native_tools") && self.passed("tool_result"),
             _ => false, // Untested workloads do not inherit a successful chat test.
         }
@@ -100,6 +108,15 @@ impl Qualification {
     pub fn prompt(&self, probe: &Probe) -> String {
         match probe.kind.as_str() {
             "coding_basic" => "Implement the expression for a Python function f(a,b,c) that multiplies a by b and adds c. Return only JSON with one key expression containing the return expression. No explanation or function wrapper.".into(),
+            "vision" => crate::vision_probe::prompt(&self.model, &probe.nonce),
+            "coding_medium" | "coding_large" => {
+                let task = if probe.kind == "coding_medium" {
+                    "Implement function solve(values) returning the unique integers in values sorted ascending. Inputs include empty arrays, duplicates and negative integers."
+                } else {
+                    "Implement function solve(input) where input={intervals,nodes,edges}. Return {intervals: merged sorted closed overlapping intervals, order: lexicographically smallest topological ordering of all numeric nodes, or null if edges contain a cycle}. Closed intervals overlap when next start <= previous end. Edges are [from,to]. Include isolated nodes."
+                };
+                format!("{task} Return only JSON with one key source containing executable JavaScript source, including function solve. The test runner supports function declarations, arrays, plain objects, let/const, for/for-of/while, if, return, arithmetic, comparisons, array push/pop/shift/sort/slice/map/filter/reduce/includes, Object.keys/values/entries, Math.min/max/abs/floor, and arrow callbacks. Do not use imports, classes, Set/Map, spread syntax, regex, async, or I/O. Keep it under 120 lines.")
+            }
             "native_tools" | "tool_result" => {
                 let name = "mundusx_read_probe";
                 let mut messages = vec![json!({"role":"user","content":format!("Call {name} once with nonce {}. This is a side-effect-free test.", probe.nonce)})];
@@ -127,6 +144,23 @@ impl Qualification {
 pub fn validate(probe: &Probe, output: &str) -> Result<(), String> {
     let output = output.trim();
     match probe.kind.as_str() {
+        "coding_medium" | "coding_large" => {
+            let value: Value = serde_json::from_str(output).map_err(|_| "Expected source JSON")?;
+            let source = value.get("source").and_then(Value::as_str).filter(|s| s.len() <= 16384).ok_or("Missing bounded source")?;
+            let url = std::env::var("MUNDUSX_QUALIFICATION_EVALUATOR_URL").map_err(|_| "Coding evaluator is not configured")?;
+            let token = std::env::var("MUNDUSX_OPERATOR_TOKEN").map_err(|_| "Coding evaluator authorization unavailable")?;
+            let value = ureq::post(&url).set("Authorization", &format!("Bearer {token}"))
+                .timeout(std::time::Duration::from_secs(10)).send_json(json!({"source":source,"level":probe.kind}))
+                .map_err(|_| "Coding evaluator unavailable")?.into_json::<Value>().map_err(|_| "Invalid coding evaluation")?;
+            if value.get("passed").and_then(Value::as_bool) == Some(true) { Ok(()) }
+            else { Err(value.get("reason").and_then(Value::as_str).unwrap_or("Coding test cases failed").to_string()) }
+        }
+        "vision" => {
+            let payload=output.strip_prefix("__MUNDUSX_OPENAI_TOOL_RESULT_V1__").ok_or("Expected structured image response")?;
+            let body:Value=serde_json::from_str(payload).map_err(|_| "Invalid vision response")?;
+            let answer:Value=serde_json::from_str(body.pointer("/message/content").and_then(Value::as_str).ok_or("Vision answer missing")?).map_err(|_| "Vision answer must be JSON")?;
+            if answer == crate::vision_probe::expected(&probe.nonce) {Ok(())}else{Err("Image quadrant challenge failed".into())}
+        }
         "coding_basic" => {
             let value: Value = serde_json::from_str(output).map_err(|_| "Expected an expression JSON object")?;
             let expr = value.get("expression").and_then(Value::as_str).ok_or("Missing expression")?;

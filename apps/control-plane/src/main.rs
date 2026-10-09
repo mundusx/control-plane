@@ -1,6 +1,7 @@
 mod chat_api_keys;
 mod native_stream;
 mod qualification;
+mod vision_probe;
 mod global_skills;
 mod model_catalog;
 mod chat_gateway;
@@ -9387,6 +9388,9 @@ fn handle_connection_with_streams(
                     let completion_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
                     let created = now_unix_seconds_u64();
                     let wants_stream = request_body.stream.unwrap_or(false);
+                    if let Err(error)=chat_gateway::validate_image_inputs(&request_body) {
+                        return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
+                    }
                     let native_tool_turn = chat_gateway::is_native_tool_turn(&request_body);
                     let adaptive_native_edit = native_tool_turn
                         && chat_gateway::apply_adaptive_native_edit_policy(&mut request_body);
