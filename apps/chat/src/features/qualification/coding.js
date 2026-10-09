@@ -98,7 +98,7 @@ export function runProgram(source,input) {
     switch(n.type) {
       case 'Literal':if(n.regex||n.bigint)throw Error('Unsupported literal');return bounded(n.value);
       case 'Identifier':return e.get(n.name);
-      case 'ArrayExpression':allocate(n.elements.length);return bounded(n.elements.map(x=>expr(x,e)));
+      case 'ArrayExpression':{const out=[];for(const x of n.elements){if(x?.type==='SpreadElement'){const values=expr(x.argument,e);if(!Array.isArray(values))throw Error('Spread requires bounded array');allocate(values.length);if(out.length+values.length>4096)throw Error('Allocation limit');out.push(...values);}else{allocate(1);out.push(expr(x,e));}}return bounded(out);}
       case 'ObjectExpression':{allocate(n.properties.length);const o=Object.create(null);for(const p of n.properties){if(p.type!=='Property'||p.kind!=='init'||p.method)throw Error('Invalid object');o[key(p.computed?expr(p.key,e):(p.key.name??p.key.value))]=expr(p.value,e);}return o;}
       case 'ArrowFunctionExpression':case 'FunctionExpression':if(n.async||n.generator)throw Error('Async unsupported');return {[FUNCTION]:true,node:n,env:e};
       case 'MemberExpression':return member(n,e);
