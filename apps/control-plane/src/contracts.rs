@@ -1601,7 +1601,11 @@ pub struct NodePolicyOverrideInput {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NodeTrustRecord {
+    pub revision: u64,
+    pub qualification_required: bool,
+    pub qualification: Option<crate::qualification::Qualification>,
     /// Recent execution outcomes; None means an explicitly non-node failure.
     #[serde(default)]
     pub recent_execution_outcomes: Vec<Option<bool>>,
@@ -1622,6 +1626,9 @@ pub struct NodeTrustRecord {
 impl Default for NodeTrustRecord {
     fn default() -> Self {
         Self {
+            revision: 0,
+            qualification_required: false,
+            qualification: None,
             recent_execution_outcomes: Vec::new(),
             excluded_execution_failures: 0,
             score: 50,

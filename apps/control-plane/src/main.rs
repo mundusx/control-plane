@@ -1,5 +1,6 @@
 mod chat_api_keys;
 mod native_stream;
+mod qualification;
 mod global_skills;
 mod model_catalog;
 mod chat_gateway;
@@ -1269,8 +1270,20 @@ fn render_node_classification(node: &NodeRecord) -> String {
         }).collect::<Vec<_>>().join("");
         model_html + &media_html
     };
+    let qualification_html = match node.trust.qualification.as_ref() {
+        Some(q) => {
+            let passed = q.probes.iter().filter(|p| p.status == "passed").map(|p| p.kind.as_str()).collect::<Vec<_>>().join(", ");
+            let results = q.probes.iter().map(|p| format!("{}: {}{}", p.kind, p.status,
+                p.reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default())).collect::<Vec<_>>().join("; ");
+            format!(r#"<div class="meta"><strong>Qualification:</strong> {} &middot; {}<br>Passed probes: {}<br>Measured context exercised: {} &middot; network slot limit: 1<details><summary>Probe results</summary>{}</details></div>"#,
+                q.status(), if node.trust.qualification_required { "enforced" } else { "existing contributor audit" },
+                escape_html(&passed), q.tested_context_tokens.map(|n| format!("{n} tokens")).unwrap_or_else(|| "not measured".into()), escape_html(&results))
+        }
+        None => format!(r#"<div class="meta"><strong>Qualification:</strong> {} &middot; capability claims remain untested</div>"#,
+            if node.trust.qualification_required { "awaiting healthy runtime" } else { "existing contributor awaiting audit" }),
+    };
     format!(
-        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
+        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}{qualification_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
         node_type = escape_html(node_type), memory = escape_html(&memory),
         capacity = escape_html(capacity), runtime = escape_html(runtime),
         roles = escape_html(&roles), tools = escape_html(&tools),
@@ -6150,6 +6163,7 @@ fn requires_operator_auth(method: &str, path: &str) -> bool {
             | ("GET", "/v1/admission-policy")
             | ("POST", "/v1/admission-policy")
             | ("POST", "/v1/nodes/policy-override")
+            | ("POST", "/v1/nodes/qualification/retest")
             | ("POST", "/actions/admission-policy")
             | ("GET", "/v1/jobs")
             | ("GET", "/v1/job-events")
@@ -8851,7 +8865,6 @@ fn handle_connection_with_streams(
                             )
                             .unwrap_or(());
                     }
-                    let registration_clone = registration.clone();
                     let mut guard = state.lock().expect("state lock");
                     let record = guard.register(registration);
                     let event = guard.record_job_event(
@@ -8865,7 +8878,7 @@ fn handle_connection_with_streams(
                         eprintln!("failed to save control-plane state: {error}");
                     }
                     if let Some(db) = supabase.as_ref() {
-                        if let Err(error) = db.record_registration(&registration_clone) {
+                        if let Err(error) = db.record_node_snapshot(&record) {
                             eprintln!("database registration sync skipped: {error}");
                             note_supabase_failure(&sync_status, error);
                         }
@@ -8880,6 +8893,27 @@ fn handle_connection_with_streams(
                     "400 Bad Request",
                     serde_json::json!({ "error": error.to_string() }),
                 ),
+            }
+        }
+        ("POST", "/v1/nodes/qualification/retest") => {
+            let payload: Result<serde_json::Value, _> = serde_json::from_str(&request.body);
+            match payload.ok().and_then(|p| p.get("node_id").and_then(serde_json::Value::as_str).map(str::to_string)) {
+                Some(node_id) => {
+                    let mut guard = state.lock().expect("state lock");
+                    match guard.retest_qualification(&node_id, &now_unix_seconds()) {
+                        Ok(node) => {
+                            if let Some(db) = supabase.as_ref() {
+                                if db.record_node_snapshot(&node).is_err() {
+                                    return stream.write_all(json_response("503 Service Unavailable", serde_json::json!({"error":"Could not persist qualification retest"})).as_bytes()).unwrap_or(());
+                                }
+                            }
+                            let _ = save_state(&guard);
+                            json_response("200 OK", serde_json::to_value(node).expect("json"))
+                        }
+                        Err(error) => json_response("400 Bad Request", serde_json::json!({"error":error})),
+                    }
+                }
+                None => json_response("400 Bad Request", serde_json::json!({"error":"node_id is required"})),
             }
         }
         ("POST", "/v1/nodes/policy-override") => {
@@ -9072,7 +9106,21 @@ fn handle_connection_with_streams(
         ("POST", "/v1/heartbeat") => match serde_json::from_str::<Heartbeat>(&request.body) {
             Ok(heartbeat) => {
                 let now = now_unix_seconds();
-                let record = state.lock().expect("state lock").heartbeat(heartbeat, now);
+                let (record, probes) = {
+                    let mut guard = state.lock().expect("state lock");
+                    let record = guard.heartbeat(heartbeat, now);
+                    let probes = record.trust.qualification.as_ref().map(|q| q.probes.iter()
+                        .filter_map(|p| guard.jobs.get(&p.job_id).filter(|j| j.status == JobStatus::Queued).cloned())
+                        .collect::<Vec<_>>()).unwrap_or_default();
+                    let _ = save_state(&guard);
+                    (record, probes)
+                };
+                if let Some(db) = supabase.as_ref() {
+                    if let Err(error) = db.record_node_snapshot(&record) { note_supabase_failure(&sync_status, error); }
+                    for job in probes {
+                        if let Err(error) = db.record_job(&job) { note_supabase_failure(&sync_status, error); }
+                    }
+                }
                 json_response("200 OK", serde_json::to_value(record).expect("json"))
             }
             Err(error) => json_response(
@@ -9082,6 +9130,9 @@ fn handle_connection_with_streams(
         },
         ("POST", "/v1/jobs") => match serde_json::from_str::<JobRequest>(&request.body) {
             Ok(request) => {
+                if request.request_id.starts_with("qualification-") {
+                    return stream.write_all(json_response("400 Bad Request", serde_json::json!({"error":"Reserved internal request ID"})).as_bytes()).unwrap_or(());
+                }
                 let mut guard = state.lock().expect("state lock");
                 let record = guard.submit_job(request, now_unix_seconds());
                 let event = guard.record_job_event(
@@ -9793,10 +9844,14 @@ fn handle_connection_with_streams(
                 if let Err(error) = validation {
                     json_response("409 Conflict", serde_json::json!({ "error": error }))
                 } else {
+                    let probe_delta_nonempty = !delta.delta.is_empty();
                     let result = live_streams
                         .lock()
                         .expect("live stream registry lock")
                         .push_for_active_job(&delta.job_id, delta.sequence, delta.delta);
+                    if probe_delta_nonempty && result.as_ref().is_ok_and(|outcome| *outcome != chat_gateway::PushDeltaResult::Duplicate) {
+                        state.lock().expect("state lock").record_qualification_delta(&delta.node_id, &delta.job_id);
+                    }
                     match result {
                         Ok(outcome) => json_response(
                             "200 OK",
@@ -9861,7 +9916,14 @@ fn handle_connection_with_streams(
                     };
                     if stored.is_err() {return stream.write_all(json_response("503 Service Unavailable",serde_json::json!({"error":"Could not persist runtime usage; retry completion"})).as_bytes()).unwrap_or(());}
                 }
+                if guard.jobs.get(&completion.job_id).is_some_and(|j| j.mode.as_deref() == Some(qualification::MODE)) {
+                    if header_value(&request.headers, "x-mundusx-node-id") != Some(completion.node_id.as_str()) {
+                        return stream.write_all(json_response("403 Forbidden", serde_json::json!({"error":"Qualification worker identity mismatch"})).as_bytes()).unwrap_or(());
+                    }
+                    guard.record_qualification_usage(&completion.node_id, &completion.job_id, &token_usage);
+                }
                 let record = guard.complete_job(completion, now_unix_seconds());
+                let completed_node = guard.nodes.get(&completion_clone.node_id).cloned();
                 let mut completion_event = None;
                 let mut credit_award = None;
                 let mut credit_event = None;
@@ -9923,6 +9985,11 @@ fn handle_connection_with_streams(
                         if let Some(event) = credit_event.as_ref() {
                             if let Err(error) = db.record_job_event(event) {
                                 eprintln!("database credit event skipped: {error}");
+                                note_supabase_failure(&sync_status, error);
+                            }
+                        }
+                        if let Some(node) = completed_node.as_ref() {
+                            if let Err(error) = db.record_node_snapshot(node) {
                                 note_supabase_failure(&sync_status, error);
                             }
                         }
@@ -10032,42 +10099,18 @@ fn main() {
         return;
     }
 
+    // Restore requires the current schema. Never race migrations against
+    // hydration and then replace a durable fleet with an empty fallback.
     match migration_database_url_from_env() {
-        Ok(Some(database_url)) => {
-            thread::spawn(move || match apply_migrations(&database_url.url) {
-                Ok(applied) => {
-                    if database_url.legacy {
-                        eprintln!(
-                            "migrations: using legacy {}; prefer {} for managed database mode",
-                            LEGACY_DATABASE_URL_ENV, DATABASE_DIRECT_URL_ENV
-                        );
-                    }
-                    if applied.is_empty() {
-                        println!("migrations: no pending migrations");
-                    } else {
-                        for migration in &applied {
-                            println!(
-                                "applied {}_{} ({})",
-                                migration.version,
-                                migration.name,
-                                migration.path.display()
-                            );
-                        }
-                        println!("migrations: {} applied in background", applied.len());
-                    }
-                }
-                Err(error) => {
-                    eprintln!(
-                        "background migration failed; continuing with existing schema: {error}"
-                    );
-                }
-            });
-            println!("migrations: background startup check queued");
-        }
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!("background migration skipped; migration config invalid: {error}");
-        }
+        Ok(Some(database_url)) => match apply_migrations(&database_url.url) {
+            Ok(applied) => println!("migrations: {} applied before restore", applied.len()),
+            Err(error) => {
+                eprintln!("startup migration failed: {error}");
+                std::process::exit(1);
+            }
+        },
+        Ok(None) => {},
+        Err(error) => { eprintln!("migration configuration invalid: {error}"); std::process::exit(1); }
     }
 
     let supabase = DatabaseMirror::from_env();
@@ -10085,14 +10128,8 @@ fn main() {
                 )
             }
             Err(error) => {
-                eprintln!("database restore skipped: {error}");
-                let mut status = SupabaseSyncStatus::enabled(StorageSource::LocalJsonFallback);
-                status.note_failure(format!("restore failed: {error}"));
-                (
-                    load_state().ok().flatten().unwrap_or_default(),
-                    StorageSource::LocalJsonFallback,
-                    status,
-                )
+                eprintln!("Durable database restore failed; refusing to start with an empty fleet: {error}");
+                std::process::exit(1);
             }
         },
         None => {
@@ -10104,6 +10141,7 @@ fn main() {
             )
         }
     };
+    restored_state.qualification_enabled = std::env::var("MUNDUSX_QUALIFICATION_MODE").ok().as_deref() == Some("gradual");
     restored_state.ensure_job_totals_from_hot_history();
     let state = Arc::new(Mutex::new(restored_state));
     let live_streams = Arc::new(Mutex::new(chat_gateway::LiveStreamRegistry::default()));

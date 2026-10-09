@@ -105,7 +105,8 @@ impl PostgresStore {
 
         let mut state = ControlPlaneState::default();
         state.initialize_job_totals(completed_job_total, failed_job_total);
-        for device in devices {
+        for mut device in devices {
+            device.trust.score = device.trust.reliability_score();
             state.nodes.insert(device.node_id.clone(), device);
         }
         for job in jobs {
@@ -233,6 +234,7 @@ impl PostgresStore {
                     &capability_manifest_json,
                     &Some(now),
                     &Some(now),
+                    &Option::<String>::None,
                 ],
             )
             .map(|_| ())
@@ -346,6 +348,8 @@ returning user_id::text"#,
     }
 
     pub fn record_node_snapshot(&self, node: &NodeRecord) -> Result<(), String> {
+        let execution_history_json = serde_json::to_string(&node.trust)
+            .map_err(|error| format!("node history serialization failed: {error}"))?;
         let policy_override = node.operator_policy_override.as_ref();
         let worker_health_json = node
             .worker_health
@@ -389,6 +393,7 @@ returning user_id::text"#,
                     &capability_manifest_json,
                     &updated_at_epoch,
                     &updated_at_epoch,
+                    &Some(execution_history_json),
                 ],
             )
             .map(|_| ())
@@ -1159,18 +1164,7 @@ select jsonb_build_object(
       'updated_at', coalesce(operator_policy_override_updated_at, '')
     )
   end,
-  'trust', jsonb_build_object(
-    'score', 50,
-    'completed_jobs', 0,
-    'failed_jobs', 0,
-    'consecutive_failures', 0,
-    'total_latency_ms', 0,
-    'accepted_results', 0,
-    'rejected_results', 0,
-    'last_success_at', null,
-    'last_failure_at', null,
-    'last_failure_reason', null
-  ),
+  'trust', coalesce(execution_history_json, '{}'::jsonb),
   'worker_health', worker_health_json,
   'updated_at', coalesce(updated_at_epoch::text, last_seen_at_epoch::text, '0')
 )::text
@@ -1250,6 +1244,7 @@ select
   count(*) filter (where status = 'completed')::bigint,
   count(*) filter (where status = 'failed')::bigint
 from public.jobs
+where mode is distinct from 'contributor_qualification_v1'
 "#;
 
 // The database is the durable history. The process only needs a bounded hot
@@ -1285,14 +1280,14 @@ insert into public.devices (
   policy_allowed, policy_reason, computed_policy_allowed, computed_policy_reason,
   operator_policy_override_target, operator_policy_override_reason, operator_policy_override_actor,
   operator_policy_override_updated_at, worker_health_json, capability_fabric_version,
-  capability_manifest_json, last_seen_at_epoch, updated_at_epoch
+  capability_manifest_json, last_seen_at_epoch, updated_at_epoch, execution_history_json
 ) values (
   $1, $2, $3, $4, $5,
   $6, $7, $8, $9, $10,
   $11, $12, $13, $14, $15,
   $16, $17, $18, $19,
   $20, $21, $22,
-  $23, $24::text::jsonb, $25, $26::text::jsonb, $27, $28
+  $23, $24::text::jsonb, $25, $26::text::jsonb, $27, $28, $29::text::jsonb
 )
 on conflict (node_id) do update set
   public_key_fingerprint = excluded.public_key_fingerprint,
@@ -1321,7 +1316,15 @@ on conflict (node_id) do update set
   capability_fabric_version = excluded.capability_fabric_version,
   capability_manifest_json = excluded.capability_manifest_json,
   last_seen_at_epoch = excluded.last_seen_at_epoch,
-  updated_at_epoch = excluded.updated_at_epoch
+  updated_at_epoch = excluded.updated_at_epoch,
+  execution_history_json = case
+    when devices.public_key_fingerprint = excluded.public_key_fingerprint
+      and devices.public_key_hex = excluded.public_key_hex
+    then case when coalesce((excluded.execution_history_json->>'revision')::bigint, 0)
+        >= coalesce((devices.execution_history_json->>'revision')::bigint, 0)
+      then coalesce(excluded.execution_history_json, devices.execution_history_json)
+      else devices.execution_history_json end
+    else excluded.execution_history_json end
 "#;
 
 const JOBS_UPSERT_SQL: &str = r#"
