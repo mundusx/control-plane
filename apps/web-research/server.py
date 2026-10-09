@@ -45,7 +45,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"redis": False})
         ready = all(os.environ.get(key) for key in ("WEB_RESEARCH_TOKEN", "RESEARCH_MODEL_URL", "RESEARCH_MODEL_TOKEN"))
         self.send((200 if ready else 503) if self.path == "/health" else 404,
-                  {"status": ("ok" if ready else "not_configured") if self.path == "/health" else "not_found"})
+                  {"status": ("ok" if ready else "not_configured") if self.path == "/health" else "not_found",
+                   **({"hermes_version": os.environ.get("HERMES_VERSION", "unknown"), "hermes_commit": os.environ.get("HERMES_COMMIT", "unknown")} if self.path == "/health" else {})})
 
     def do_POST(self):
         token = os.environ.get("WEB_RESEARCH_TOKEN", "")
