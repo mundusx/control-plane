@@ -7,6 +7,7 @@ const large=`function solve(input){const intervals=input.intervals.map(x=>x.slic
 test('medium and large suites execute correct algorithms and reject plausible broken code',()=>{
   assert.equal(evaluateCoding({level:'coding_medium',source:medium}).passed,true);
   assert.equal(evaluateCoding({level:'coding_medium',source:'function solve(values){const unique={};for(let i=0;i<values.length;i++)unique[values[i]]=true;return Object.keys(unique).map(Number).sort((a,b)=>a-b);}'}).passed,true);
+  assert.equal(evaluateCoding({level:'coding_medium',source:medium.replace('const out=[]','const out=[...[]]')}).passed,true);
   assert.equal(evaluateCoding({level:'coding_large',source:large}).passed,true);
   assert.equal(evaluateCoding({level:'coding_medium',source:'function solve(v){return v.sort((a,b)=>a-b);}'}).passed,false);
   assert.equal(evaluateCoding({level:'coding_large',source:large.replace('p[0]<=last[1]','p[0]<last[1]')}).passed,false);
