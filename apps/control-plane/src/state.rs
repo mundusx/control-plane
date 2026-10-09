@@ -9060,13 +9060,14 @@ impl ControlPlaneState {
             return Some(job.clone());
         }
         if !matches!(completion.status, JobStatus::Completed | JobStatus::Failed) { return Some(job.clone()); }
+        let normalized_output = clean_direct_job_output(job, completion.output.clone());
         let elapsed = parse_unix_seconds(&now).zip(job.assigned_at.as_deref().and_then(parse_unix_seconds))
             .map(|(end,start)| end.saturating_sub(start).saturating_mul(1000));
         let trust = &mut self.nodes.get_mut(&completion.node_id)?.trust;
         let q = trust.qualification.as_mut()?;
         let probe = q.probes.iter_mut().find(|p| p.job_id == completion.job_id && p.status == "pending")?;
         let mut result = if completion.status == JobStatus::Completed {
-            crate::qualification::validate(probe, completion.output.as_deref().unwrap_or(""))
+            crate::qualification::validate(probe, normalized_output.as_deref().unwrap_or(""))
         } else { Err("Worker failed qualification probe".into()) };
         if probe.kind == "streaming" && !probe.stream_observed { result = Err("No authenticated streaming delta observed".into()); }
         if probe.kind == "context" && result.is_ok() {
@@ -9082,7 +9083,7 @@ impl ControlPlaneState {
         trust.revision = trust.revision.saturating_add(1);
         let job = self.jobs.get_mut(&completion.job_id)?;
         job.status = completion.status;
-        job.output = completion.output;
+        job.output = normalized_output;
         job.error = probe.reason.clone();
         job.worker_id = Some(completion.worker_id);
         job.backend = Some(completion.backend);
@@ -9331,6 +9332,19 @@ mod tests {
         let mut ordinary = job.clone(); ordinary.mode = None;
         assert!(!ControlPlaneState::model_can_run_job(&state.nodes["qualified"], &model, &ordinary, None));
         assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(&state.nodes["qualified"], job), 1);
+    }
+
+    #[test]
+    fn qualification_accepts_worker_envelope_but_checks_the_actual_answer() {
+        let mut state = qualification_fixture();
+        let nonce = probe_nonce(&state, "chat");
+        finish_probe(&mut state, "chat", format!("mlx-lm mode=persistent-warm-mlx; model=demo; max_tokens=128; response={nonce} [end of text]"), false);
+        assert!(state.nodes["qualified"].trust.qualification.as_ref().unwrap().passed("chat"));
+        let nonce = probe_nonce(&state, "context");
+        finish_probe(&mut state, "context", format!("llama.cpp mode=cuda; model=demo; response={nonce}"), true);
+        assert!(state.nodes["qualified"].trust.qualification.as_ref().unwrap().passed("context"));
+        finish_probe(&mut state, "coding_basic", "mlx-lm mode=mlx; model=demo; response={\"expression\":\"a*b+c\"}".into(), false);
+        assert!(state.nodes["qualified"].trust.qualification.as_ref().unwrap().passed("coding_basic"));
     }
 
     fn finish_probe(state: &mut ControlPlaneState, kind: &str, output: String, measured: bool) {

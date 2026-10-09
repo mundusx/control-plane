@@ -8900,9 +8900,14 @@ fn handle_connection_with_streams(
             match payload.ok().and_then(|p| p.get("node_id").and_then(serde_json::Value::as_str).map(str::to_string)) {
                 Some(node_id) => {
                     let mut guard = state.lock().expect("state lock");
-                    match guard.retest_qualification(&node_id, &now_unix_seconds()) {
+                    let now = now_unix_seconds();
+                    match guard.retest_qualification(&node_id, &now) {
                         Ok(node) => {
                             if let Some(db) = supabase.as_ref() {
+                                for job in guard.jobs.values().filter(|j| j.mode.as_deref() == Some(qualification::MODE)
+                                    && (j.submitted_at == now || j.completed_at.as_deref() == Some(now.as_str()))) {
+                                    if let Err(error) = db.record_job(job) { note_supabase_failure(&sync_status, error); }
+                                }
                                 if db.record_node_snapshot(&node).is_err() {
                                     return stream.write_all(json_response("503 Service Unavailable", serde_json::json!({"error":"Could not persist qualification retest"})).as_bytes()).unwrap_or(());
                                 }
@@ -9108,10 +9113,11 @@ fn handle_connection_with_streams(
                 let now = now_unix_seconds();
                 let (record, probes) = {
                     let mut guard = state.lock().expect("state lock");
-                    let record = guard.heartbeat(heartbeat, now);
-                    let probes = record.trust.qualification.as_ref().map(|q| q.probes.iter()
-                        .filter_map(|p| guard.jobs.get(&p.job_id).filter(|j| j.status == JobStatus::Queued).cloned())
-                        .collect::<Vec<_>>()).unwrap_or_default();
+                    let record = guard.heartbeat(heartbeat, now.clone());
+                    let probes = guard.jobs.values().filter(|job| job.mode.as_deref() == Some(qualification::MODE)
+                        && (record.trust.qualification.as_ref().is_some_and(|q| q.is_probe(job) && job.status == JobStatus::Queued)
+                            || job.completed_at.as_deref() == Some(now.as_str())))
+                        .cloned().collect::<Vec<_>>();
                     let _ = save_state(&guard);
                     (record, probes)
                 };
