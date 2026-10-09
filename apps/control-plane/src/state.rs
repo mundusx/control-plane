@@ -3534,11 +3534,12 @@ impl ControlPlaneState {
             .nodes
             .get(&heartbeat.node_id)
             .and_then(|node| node.operator_policy_override.clone());
-        let existing_trust = self
+        let mut existing_trust = self
             .nodes
             .get(&heartbeat.node_id)
             .map(|node| node.trust.clone())
             .unwrap_or_default();
+        existing_trust.score = existing_trust.reliability_score();
         let reported_contribution_percent = heartbeat.contribution_percent;
         let mut record = NodeRecord {
             node_id: heartbeat.node_id.clone(),
@@ -3910,6 +3911,7 @@ fn update_node_trust(
 ) {
     match completion.status {
         JobStatus::Completed => {
+            trust.recent_execution_outcomes.push(Some(true));
             trust.completed_jobs = trust.completed_jobs.saturating_add(1);
             trust.accepted_results = trust.accepted_results.saturating_add(1);
             trust.consecutive_failures = 0;
@@ -3917,6 +3919,13 @@ fn update_node_trust(
             trust.last_failure_reason = None;
         }
         JobStatus::Failed => {
+            let error = completion.error.as_deref().unwrap_or("").to_ascii_lowercase();
+            let non_node_failure = ["user cancelled", "user canceled", "gateway unavailable", "invalid tool response", "malformed tool response"]
+                .iter().any(|reason| error.contains(reason));
+            if non_node_failure {
+                trust.excluded_execution_failures = trust.excluded_execution_failures.saturating_add(1);
+            }
+            trust.recent_execution_outcomes.push(if non_node_failure { None } else { Some(false) });
             trust.failed_jobs = trust.failed_jobs.saturating_add(1);
             trust.rejected_results = trust.rejected_results.saturating_add(1);
             trust.consecutive_failures = trust.consecutive_failures.saturating_add(1);
@@ -3929,17 +3938,41 @@ fn update_node_trust(
     if let Some(latency_ms) = completion.latency_ms {
         trust.total_latency_ms = trust.total_latency_ms.saturating_add(latency_ms);
     }
+    if trust.recent_execution_outcomes.len() > 100 {
+        let excess = trust.recent_execution_outcomes.len() - 100;
+        trust.recent_execution_outcomes.drain(..excess);
+    }
     trust.score = calculate_node_trust_score(trust);
 }
 
 fn calculate_node_trust_score(trust: &NodeTrustRecord) -> u8 {
-    let mut score: i32 = 50;
-    score += (trust.completed_jobs.min(20) as i32) * 2;
-    score -= (trust.failed_jobs.min(20) as i32) * 5;
-    score -= (trust.consecutive_failures.min(10) as i32) * 4;
-    score += (trust.accepted_results.min(20) as i32) * 2;
-    score -= (trust.rejected_results.min(20) as i32) * 4;
-    score.clamp(0, 100) as u8
+    trust.reliability_score()
+}
+
+#[cfg(test)]
+mod execution_reliability_tests {
+    use super::*;
+    #[test]
+    fn rolling_outcomes_are_bounded_and_known_external_failures_are_excluded() {
+        let mut trust = NodeTrustRecord::default();
+        let mut completion = JobCompletion {
+            job_id: "reliability-test".into(), node_id: "node".into(), worker_id: "worker".into(),
+            backend: Backend::M, status: JobStatus::Completed, output: None, error: None, latency_ms: None,
+        };
+        for index in 0..120 { update_node_trust(&mut trust, &completion, index.to_string()); }
+        assert_eq!(trust.recent_execution_outcomes.len(), 100);
+        assert_eq!(trust.score, 100);
+        completion.status = JobStatus::Failed;
+        completion.error = Some("Malformed tool response".into());
+        update_node_trust(&mut trust, &completion, "121".into());
+        assert_eq!(trust.failed_jobs, 1);
+        assert_eq!(trust.recent_execution_outcomes.last(), Some(&None));
+        assert_eq!(trust.score, 100);
+        completion.error = Some("worker crashed".into());
+        update_node_trust(&mut trust, &completion, "122".into());
+        assert_eq!(trust.recent_execution_outcomes.last(), Some(&Some(false)));
+        assert_eq!(trust.score, 99);
+    }
 }
 
 fn looks_sectionable_prompt(prompt: &str) -> bool {
@@ -8731,8 +8764,11 @@ pub fn load_state() -> std::io::Result<Option<ControlPlaneState>> {
     }
 
     let raw = fs::read_to_string(path)?;
-    let state: ControlPlaneState = serde_json::from_str(&raw)
+    let mut state: ControlPlaneState = serde_json::from_str(&raw)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    for node in state.nodes.values_mut() {
+        node.trust.score = node.trust.reliability_score();
+    }
     Ok(Some(state))
 }
 
