@@ -6,6 +6,17 @@ const config=configFromEnv({MUNDUSX_CONTROL_PLANE_URL:'https://gateway.test'});
 function output(){const r=new EventEmitter();r.writableEnded=false;r.chunks=[];r.writeHead=()=>{};r.flushHeaders=()=>{};r.write=v=>r.chunks.push(v);r.end=v=>{if(v)r.chunks.push(v);r.writableEnded=true;};return r;}
 const frame=delta=>'data: '+JSON.stringify({id:'chatcmpl-test',choices:[{delta,finish_reason:null}]})+'\n\n';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+test('repetition stops upstream and reports failure instead of success',async()=>{
+ const r=output();let cancelled=false;
+ const section='\nNote:\nThis code assumes the system supports the mkdir syscall.\nExample Output:\nAfter running the code, a folder named my_folder will be created in the current directory with permissions 0755.\n';
+ await streamOpenAiChatCompletion(r,{messages:[]},config,async()=>new Response(new ReadableStream({
+  start(c){c.enqueue(new TextEncoder().encode(frame({content:section.repeat(3)})));},
+  cancel(){cancelled=true;}
+ })));
+ assert.equal(cancelled,true);assert.equal(r.writableEnded,true);
+ assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
+ assert.equal(r.chunks.join('').split('data: [DONE]').length-1,1);
+});
 test('code streams before completion and preserves messages and tool chunks',async()=>{
  let source,sent;const r=output();const messages=[{role:'system',content:'Client rules'},{role:'user',content:'Create a complete Java program'}];const tools=[{type:'function',function:{name:'read_file',parameters:{type:'object',properties:{}}}}];
  const task=streamOpenAiChatCompletion(r,{stream:true,messages,tools},config,async(_url,init)=>{sent=JSON.parse(init.body);return new Response(new ReadableStream({start(c){source=c;}}));});
