@@ -1650,9 +1650,9 @@ impl Default for NodeTrustRecord {
 }
 
 impl NodeTrustRecord {
-    /// Existing audit evidence governs advertisements and routing too.
+    /// Historical test results do not enable admission enforcement.
     pub fn qualification_enforced(&self) -> bool {
-        self.qualification_required || self.qualification.is_some()
+        self.qualification_required
     }
 
     pub fn reliability_score(&self) -> u8 {

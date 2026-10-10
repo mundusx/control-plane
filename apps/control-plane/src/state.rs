@@ -1443,7 +1443,7 @@ impl ControlPlaneState {
                     .min(health.capabilities.max_parallel_jobs.max(1) as usize)
             })
             .unwrap_or(1);
-        let total=if node.trust.qualification_enforced() || node.trust.qualification.as_ref().is_some_and(|q|q.status()=="testing") {1}else{reported_total};
+        let total=if node.trust.qualification_enforced() {1}else{reported_total};
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
             self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
@@ -1458,7 +1458,7 @@ impl ControlPlaneState {
     }
 
     fn node_parallel_capacity_for_job(node: &NodeRecord, job: &JobRecord) -> usize {
-        if node.trust.qualification_enforced() || node.trust.qualification.as_ref().is_some_and(|q| q.status() == "testing") {
+        if node.trust.qualification_enforced() {
             return 1;
         }
         let Some(worker_health) = node.worker_health.as_ref() else {
@@ -9012,7 +9012,23 @@ fn normalize_node_path(value: &str) -> String {
 impl ControlPlaneState {
     /// Apply the admission policy to restored contributors without replacing evidence.
     pub fn reconcile_admission_policy(&mut self) {
-        if !self.qualification_enabled { return; }
+        if !self.qualification_enabled {
+            for node in self.nodes.values_mut() {
+                if node.trust.qualification_required {
+                    node.trust.qualification_required = false;
+                    node.trust.revision = node.trust.revision.saturating_add(1);
+                }
+            }
+            for job in self.jobs.values_mut() {
+                if job.mode.as_deref() == Some(crate::qualification::MODE)
+                    && matches!(job.status, JobStatus::Queued | JobStatus::Assigned) {
+                    job.status = JobStatus::Failed;
+                    job.error = Some("Automatic contributor testing disabled".into());
+                    job.completed_at = Some(current_unix_seconds().to_string());
+                }
+            }
+            return;
+        }
         for node in self.nodes.values_mut() {
             if node.worker_health.as_ref().is_some_and(|h| h.runtime_mode == "media") { continue; }
             if !node.trust.qualification_required {
@@ -9404,6 +9420,34 @@ mod tests {
     }
 
     #[test]
+    fn disabled_tests_preserve_history_cancel_only_probes_and_allow_reported_runtime() {
+        let mut state = qualification_fixture();
+        let q = state.nodes["qualified"].trust.qualification.clone();
+        state.nodes.get_mut("qualified").unwrap().trust.completed_jobs = 56;
+        let probe_id = q.as_ref().unwrap().probes[0].job_id.clone();
+        state.jobs.get_mut(&probe_id).unwrap().status = JobStatus::Assigned;
+        state.jobs.get_mut(&probe_id).unwrap().assigned_node_id = Some("qualified".into());
+        state.qualification_enabled = false;
+        state.reconcile_admission_policy();
+        assert_eq!(state.jobs[&probe_id].status, JobStatus::Failed);
+        assert_eq!(state.jobs[&probe_id].error.as_deref(), Some("Automatic contributor testing disabled"));
+        assert!(!state.nodes["qualified"].trust.qualification_enforced());
+        assert_eq!(state.nodes["qualified"].trust.qualification, q);
+        assert_eq!(state.nodes["qualified"].trust.completed_jobs, 56);
+        let before = state.jobs.len();
+        state.refresh_qualification("qualified", "104");
+        assert_eq!(state.jobs.len(), before);
+        let request: JobRequest = serde_json::from_value(serde_json::json!({"request_id":"no-tests","prompt":"Hello","preferred_backend":"m","runtime_mode":"local","execution_mode":"single","stream":true,"max_tokens":64})).unwrap();
+        let job = state.submit_job(request, "104".into());
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"], &job));
+        state.reconcile_admission_policy();
+        assert_eq!(state.jobs["no-tests"].status, JobStatus::Queued);
+        let reported = ControlPlaneState::model_inventory(&state.nodes["qualified"])[0].clone();
+        assert_eq!(crate::qualification::advertised_model(&state.nodes["qualified"], &reported), reported);
+        assert!(crate::render_node_classification(&state.nodes["qualified"]).contains("automatic model tests disabled"));
+    }
+
+    #[test]
     fn predefined_catalog_distinguishes_mac_and_large_memory_gpu_capacity() {
         let state = qualification_fixture();
         let mut node = state.nodes["qualified"].clone();
@@ -9600,21 +9644,21 @@ mod tests {
     }
 
     #[test]
-    fn existing_contributor_audit_evidence_is_enforced_without_resetting_history() {
+    fn existing_contributor_evidence_does_not_implicitly_enable_enforcement() {
         let mut state = ControlPlaneState::default();
         state.register(m_series_registration("qualified"));
         state.qualification_enabled = true;
         state.heartbeat(ready_heartbeat("qualified", "100"), "100".into());
         assert!(state.nodes["qualified"].trust.qualification.is_some());
         assert!(!state.nodes["qualified"].trust.qualification_required);
-        assert!(state.nodes["qualified"].trust.qualification_enforced());
+        assert!(!state.nodes["qualified"].trust.qualification_enforced());
     }
 
     #[test]
     fn legacy_advertisements_dashboard_and_routing_share_retained_evidence() {
         let mut state = qualification_fixture();
         let node = state.nodes.get_mut("qualified").unwrap();
-        node.trust.qualification_required = false;
+        node.trust.qualification_required = true;
         node.trust.completed_jobs = 56; node.trust.failed_jobs = 19;
         let mut reported = ControlPlaneState::model_inventory(node)[0].clone();
         reported.context_tokens = Some(131072); reported.supports_tools = true;
@@ -9653,7 +9697,7 @@ mod tests {
         assert_eq!(state.nodes["qualified"].trust.failed_jobs, 19);
         assert_eq!(state.nodes["qualified"].trust.qualification.as_ref().unwrap(), &q);
         let mut waiting = state.nodes["qualified"].clone();
-        waiting.node_id = "waiting".into(); waiting.trust.qualification = None;
+        waiting.node_id = "waiting".into(); waiting.trust.qualification = None; waiting.trust.qualification_required = false;
         state.nodes.insert("waiting".into(), waiting.clone());
         waiting.node_id = "media".into(); waiting.worker_health.as_mut().unwrap().runtime_mode = "media".into();
         state.nodes.insert("media".into(), waiting);
