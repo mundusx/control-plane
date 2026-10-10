@@ -127,6 +127,21 @@ mod harness_routing_tests {
     use super::*;
 
     #[test]
+    fn native_sampling_overrides_survive_transport_serialization() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "messages":[{"role":"user","content":"Read the file"}],
+            "tools":[{"type":"function","function":{"name":"read_file"}}],
+            "top_k":0,"repetition_penalty":1.0
+        })).unwrap();
+        assert!(validate_request(&request).is_ok());
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["top_k"], 0);
+        assert_eq!(serialized["repetition_penalty"], 1.0);
+        let mut ordinary = request.clone(); ordinary.tools = None;
+        assert!(validate_request(&ordinary).unwrap_err().contains("native"));
+    }
+
+    #[test]
     fn harness_final_turn_preserves_tool_history_without_definitions() {
         for tools in [Value::Null, json!([])] {
             let request: ChatCompletionRequest = serde_json::from_value(json!({
@@ -1043,6 +1058,12 @@ pub fn graph_admission_weight(job: &JobRecord) -> usize {
 }
 
 pub fn validate_request(request: &ChatCompletionRequest) -> Result<(), String> {
+    if request.repetition_penalty.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        return Err("repetition_penalty must be a finite non-negative number".into());
+    }
+    if (request.top_k.is_some() || request.repetition_penalty.is_some()) && !is_native_tool_turn(request) {
+        return Err("Explicit top_k and repetition_penalty overrides currently require a native tool or image turn; ordinary chat uses the selected model's managed generation profile".into());
+    }
     if request.messages.is_empty() {
         return Err("messages must contain at least one entry".to_string());
     }
