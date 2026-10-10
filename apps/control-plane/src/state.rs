@@ -71,6 +71,8 @@ pub(crate) struct ContextDemand {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ControlPlaneState {
     #[serde(default)]
+    pub capability_policy_enabled: bool,
+    #[serde(default)]
     pub qualification_enabled: bool,
     #[serde(default)]
     pub model_catalog: crate::model_catalog::Catalog,
@@ -604,6 +606,7 @@ impl ControlPlaneState {
                 record.contribution_percent = percent;
             }
         }
+        record.trust.capability_policy_enabled = self.capability_policy_enabled;
         self.nodes.insert(registration.node_id, record.clone());
         self.reevaluate_queued_jobs();
         record
@@ -677,17 +680,14 @@ impl ControlPlaneState {
                 Self::node_is_schedulable_state(node)
                     && node.policy_allowed
                     && Self::capacity_class_for(node) >= CapacityClass::Performance
+                    && Self::policy_allows(node, "synthesizer")
                     && node.worker_health.as_ref().is_some_and(|health| {
                         health.healthy
                             && health.runtime_ready
                             && Self::capability_has_role(health, NodeRole::Synthesizer)
                     })
             })
-            .filter_map(|node| {
-                node.worker_health
-                    .as_ref()
-                    .and_then(|health| health.capabilities.max_context_tokens)
-            })
+            .filter_map(Self::advertised_context)
             .max();
         if !external_plan_accepted {
             plan = dynamically_shape_research_plan_with_context(
@@ -906,6 +906,27 @@ impl ControlPlaneState {
         Ok(updated)
     }
 
+    pub fn enable_capability_policy(&mut self) {
+        self.capability_policy_enabled = true;
+        for node in self.nodes.values_mut() {
+            if !node.trust.capability_policy_enabled {
+                node.trust.capability_policy_enabled = true;
+                node.trust.revision = node.trust.revision.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn set_node_capability_policy(&mut self, node_id: &str, settings: Option<crate::capability_policy::Settings>, actor: String, now: String) -> Result<NodeRecord, String> {
+        if let Some(settings) = &settings {settings.validate()?;}
+        let node = self.nodes.get_mut(node_id).ok_or("unknown node")?;
+        node.trust.capability_policy = settings.map(|settings| crate::capability_policy::Override {settings, actor, updated_at: now});
+        node.trust.capability_policy_enabled = self.capability_policy_enabled;
+        node.trust.revision = node.trust.revision.saturating_add(1);
+        let node = node.clone();
+        self.reevaluate_queued_jobs();
+        Ok(node)
+    }
+
     pub fn set_node_policy_override(
         &mut self,
         node_id: &str,
@@ -1099,8 +1120,8 @@ impl ControlPlaneState {
             let Some(health) = node.worker_health.as_ref() else {
                 continue;
             };
-            let reported_slots = if node.trust.qualification_enforced() { 1 } else { u32::from(health.parallel_slots.max(1))
-                .min(health.capabilities.max_parallel_jobs.max(1)) };
+            let reported_slots = crate::capability_policy::parallel_limit(node, if node.trust.qualification_enforced() { 1 } else { usize::from(health.parallel_slots.max(1))
+                .min(health.capabilities.max_parallel_jobs.max(1) as usize) }) as u32;
             let active = self.active_assignment_count_for_node(&node.node_id) as u32;
             let free_slots = reported_slots.saturating_sub(active);
             eligible_nodes += 1;
@@ -1111,10 +1132,12 @@ impl ControlPlaneState {
                 .entry(Self::capacity_class_for(node).as_str().to_string())
                 .or_default() += 1;
             for role in &health.capabilities.roles {
+                if node.trust.capability_policy_enabled && !Self::model_inventory(node).iter().any(|m| crate::capability_policy::allows(&crate::qualification::advertised_model(node,m),crate::capability_policy::role_capability(role))) {continue;}
                 if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(role.as_str())) { continue; }
                 *role_counts.entry(role.as_str().to_string()).or_default() += 1;
             }
             for tool in &health.capabilities.supported_tools {
+                if node.trust.capability_policy_enabled && !Self::model_inventory(node).iter().any(|m| crate::capability_policy::allows(&crate::qualification::advertised_model(node,m),tool)) {continue;}
                 if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(tool)) { continue; }
                 let normalized = tool.trim().to_ascii_lowercase();
                 if !normalized.is_empty() && normalized.len() <= 64 {
@@ -1156,7 +1179,7 @@ impl ControlPlaneState {
                 }
             }
             max_context_tokens =
-                max_context_tokens.max(if node.trust.qualification_enforced() {node.trust.qualification.as_ref().and_then(|q|q.context_limit()).unwrap_or_default()} else {health.capabilities.max_context_tokens.unwrap_or_default()});
+                max_context_tokens.max(if node.trust.capability_policy_enabled || node.trust.qualification_enforced() {Self::model_inventory(node).iter().filter_map(|m| crate::qualification::advertised_model(node,m).context_tokens).max().unwrap_or_default()} else {health.capabilities.max_context_tokens.unwrap_or_default()});
             eligible_parallel_slots = eligible_parallel_slots.saturating_add(free_slots);
         }
 
@@ -1187,15 +1210,8 @@ impl ControlPlaneState {
                     && Self::node_backend_can_run_request(node.backend, request.preferred_backend)
                     && Self::node_worker_can_run_request(node, request))
                 .then_some(node)
-                .and_then(|node| node.worker_health.as_ref())
-                .filter(|health| Self::capability_has_role(health, NodeRole::ChunkAnalysis))
-                .map(|health| {
-                    health
-                        .capabilities
-                        .max_context_tokens
-                        .unwrap_or(desired_context)
-                        .min(desired_context)
-                })
+                .filter(|node| Self::policy_allows(node,"research") && node.worker_health.as_ref().is_some_and(|h|Self::capability_has_role(h,NodeRole::ChunkAnalysis)))
+                .map(|node| Self::advertised_context(node).unwrap_or(desired_context).min(desired_context))
                 .filter(|context| *context >= 1_536)
             })
             .collect::<Vec<_>>();
@@ -1443,7 +1459,7 @@ impl ControlPlaneState {
                     .min(health.capabilities.max_parallel_jobs.max(1) as usize)
             })
             .unwrap_or(1);
-        let total=if node.trust.qualification_enforced() {1}else{reported_total};
+        let total=crate::capability_policy::parallel_limit(node, if node.trust.qualification_enforced() {1}else{reported_total});
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
             self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
@@ -1577,7 +1593,7 @@ impl ControlPlaneState {
 
         let advertised_capacity = usize::from(worker_health.parallel_slots.max(1))
             .min(worker_health.capabilities.max_parallel_jobs.max(1) as usize);
-        capacity.min(advertised_capacity).max(1)
+        crate::capability_policy::parallel_limit(node, capacity.min(advertised_capacity).max(1))
     }
 
     fn node_backend_can_run_request(node_backend: Backend, preferred_backend: Backend) -> bool {
@@ -1604,12 +1620,13 @@ impl ControlPlaneState {
             return false;
         }
 
+        if node.trust.capability_policy_enabled && !Self::model_inventory(node).iter().any(|m| !crate::qualification::advertised_model(node,m).task_capabilities.is_empty()) {return false;}
         let runtime_modes = Self::reported_runtime_modes(worker_health);
         if !runtime_modes.contains(&request.runtime_mode) {
             return false;
         }
 
-        if request.stream && !worker_health.streaming_supported {
+        if request.stream && (!worker_health.streaming_supported || !crate::capability_policy::streaming_allowed(node)) {
             return false;
         }
         if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q|
@@ -1636,7 +1653,7 @@ impl ControlPlaneState {
         true
     }
 
-    fn model_inventory(node: &NodeRecord) -> Vec<ModelCapability> {
+    pub(crate) fn model_inventory(node: &NodeRecord) -> Vec<ModelCapability> {
         let Some(health) = node.worker_health.as_ref() else {
             return Vec::new();
         };
@@ -1667,6 +1684,16 @@ impl ControlPlaneState {
             })
             .into_iter()
             .collect()
+    }
+
+    fn policy_allows(node: &NodeRecord, capability: &str) -> bool {
+        !node.trust.capability_policy_enabled || Self::model_inventory(node).iter().any(|m|
+            crate::capability_policy::allows(&crate::qualification::advertised_model(node,m), capability))
+    }
+    fn advertised_context(node: &NodeRecord) -> Option<u32> {
+        if node.trust.capability_policy_enabled || node.trust.qualification_enforced() {
+            Self::model_inventory(node).iter().filter_map(|m| crate::qualification::advertised_model(node,m).context_tokens).max()
+        } else {node.worker_health.as_ref().and_then(|h|h.capabilities.max_context_tokens)}
     }
 
     fn required_model_capability(
@@ -1850,13 +1877,17 @@ impl ControlPlaneState {
                 q.is_probe(job) && q.model == model.name
                     && q.fingerprint == crate::qualification::fingerprint(node, model));
         }
+        let mut demand = Self::context_demand_for_job(job, active_graph_node_id);
+        if node.trust.capability_policy_enabled && job_uses_auto_max_tokens(job) && active_graph_node_id.is_none() {
+            demand.required_context_tokens = demand.estimated_input_tokens.saturating_add(demand.requested_output_tokens.min(512)).saturating_add(CONTEXT_SAFETY_TOKENS);
+        }
         if node.trust.qualification_enforced() {
             let Some(q) = node.trust.qualification.as_ref() else { return false; };
             if q.model != model.name || q.fingerprint != crate::qualification::fingerprint(node, model)
                 || !q.passed("chat") || (job.stream && !q.streaming_ready()) {
                 return false;
             }
-            let demand = Self::context_demand_for_job(job, active_graph_node_id);
+
             if q.context_limit().is_none_or(|limit| demand.required_context_tokens > limit)
                 || node.available_memory_mb < 256 {
                 return false;
@@ -1871,6 +1902,14 @@ impl ControlPlaneState {
         }
         let advertised = crate::qualification::advertised_model(node, model);
         let model = &advertised;
+        if node.trust.capability_policy_enabled {
+            if job.stream && !crate::capability_policy::streaming_allowed(node) {return false;}
+            let primary = Self::required_model_capability(job, active_graph_node_id);
+            if !is_native_openai_tool_turn(&job.prompt) && !crate::capability_policy::allows(model, primary) {return false;}
+            for required in Self::effective_capability_requirements(job, active_graph_node_id).iter().filter(|c|c.required) {
+                if !crate::capability_policy::allows(model, &required.capability) {return false;}
+            }
+        }
         if model.name.trim().is_empty()
             || model
                 .task_capabilities
@@ -1897,8 +1936,8 @@ impl ControlPlaneState {
         }
         let workload = Self::graph_workload(job, active_graph_node_id);
         let context_bound_output = model.output_capacity_mode.as_deref() == Some("context_window");
-        let demand = Self::context_demand_for_job(job, active_graph_node_id);
-        let required_context = if context_bound_output || node.trust.qualification_enforced() {
+
+        let required_context = if context_bound_output || node.trust.qualification_enforced() || node.trust.capability_policy_enabled {
             demand.required_context_tokens
         } else {
             workload
@@ -1921,6 +1960,7 @@ impl ControlPlaneState {
         }
         let required_output = demand.requested_output_tokens;
         if !context_bound_output
+            && !(node.trust.capability_policy_enabled && job_uses_auto_max_tokens(job) && active_graph_node_id.is_none())
             && required_output > 0
             && model
                 .max_output_tokens
@@ -1987,7 +2027,8 @@ impl ControlPlaneState {
         Self::model_inventory(node)
             .into_iter()
             .filter(|model| Self::model_can_run_job(node, model, job, active_graph_node_id))
-            .map(|model| {
+            .map(|reported| {
+                let model = crate::qualification::advertised_model(node, &reported);
                 let mut score = 0;
                 let mut reasons = vec![format!("model_capability_required:{required}")];
                 if model.output_capacity_mode.as_deref() == Some("context_window") {
@@ -2539,11 +2580,13 @@ impl ControlPlaneState {
             }) {
                 blocked.push("qualification_pending_or_failed");
             }
+            if node.trust.capability_policy_enabled && !Self::model_inventory(node).iter().any(|model| !crate::capability_policy::advertised_model(node, model).task_capabilities.is_empty())
+                && node.worker_health.as_ref().is_none_or(|h|h.runtime_mode != "media") {blocked.push("capability_policy_no_tasks");}
             let available = blocked.is_empty();
             let models = Self::model_inventory(node).into_iter().map(|mut model| {
                 let detected_model = model.clone();
                 model = crate::qualification::advertised_model(node, &detected_model);
-                let streaming_supported = node.worker_health.as_ref().is_some_and(|h| h.streaming_supported)
+                let streaming_supported = crate::capability_policy::streaming_allowed(node) && node.worker_health.as_ref().is_some_and(|h| h.streaming_supported)
                     && (!node.trust.qualification_enforced() || (model.task_capabilities.iter().any(|c| c == "chat")
                         && node.trust.qualification.as_ref().is_some_and(|q| q.streaming_ready())));
                 let tasks = model.task_capabilities.iter().chain(model.capability_scores.iter().map(|score| &score.capability))
@@ -2555,7 +2598,7 @@ impl ControlPlaneState {
                             "completed_samples":stats.completed_samples, "failed_samples":stats.failed_samples,
                             "mean_latency_ms": if stats.latency_samples > 0 {Some(stats.total_latency_ms / u64::from(stats.latency_samples))} else {None}})
                     }).collect::<Vec<_>>();
-                serde_json::json!({"model": model, "streaming_supported":streaming_supported, "predefined_classification":crate::admission_profile::AdmissionProfile::detected(node,&detected_model), "detected_model":detected_model, "qualification":node.trust.qualification, "qualification_enforced":node.trust.qualification_enforced(), "task_assessments":tasks})
+                serde_json::json!({"model": model, "streaming_supported":streaming_supported, "predefined_classification":crate::admission_profile::AdmissionProfile::detected(node,&detected_model), "detected_model":detected_model, "capability_policy":node.trust.capability_policy, "capability_policy_enabled":node.trust.capability_policy_enabled, "qualification":node.trust.qualification, "qualification_enforced":node.trust.qualification_enforced(), "task_assessments":tasks})
             }).collect::<Vec<_>>();
             serde_json::json!({"node_id":node.node_id,"state":node.state,"updated_at":node.updated_at,
                 "available":available,"blocked_reasons":blocked,"total_slots":total,
@@ -2573,14 +2616,10 @@ impl ControlPlaneState {
         let best_advertised_context = self
             .nodes
             .values()
-            .filter_map(|node| node.worker_health.as_ref())
-            .flat_map(|health| {
-                health
-                    .capabilities
-                    .models
-                    .iter()
-                    .filter_map(|model| model.context_tokens)
-                    .chain(health.capabilities.max_context_tokens)
+            .flat_map(|node| {
+                if node.trust.capability_policy_enabled || node.trust.qualification_enforced() {
+                    Self::advertised_context(node).into_iter().collect::<Vec<_>>()
+                } else {node.worker_health.as_ref().map(|health|health.capabilities.models.iter().filter_map(|m|m.context_tokens).chain(health.capabilities.max_context_tokens).collect()).unwrap_or_default()}
             })
             .max()
             .unwrap_or_default();
@@ -3776,6 +3815,7 @@ impl ControlPlaneState {
             .map(|node| node.trust.clone())
             .unwrap_or_default();
         existing_trust.score = existing_trust.reliability_score();
+        existing_trust.capability_policy_enabled = self.capability_policy_enabled;
         let reported_contribution_percent = heartbeat.contribution_percent;
         let mut record = NodeRecord {
             node_id: heartbeat.node_id.clone(),
@@ -5806,13 +5846,13 @@ fn node_generation_ceiling(node: Option<&NodeRecord>) -> u32 {
     } else {
         memory_generation_ceiling(node.available_memory_mb)
     };
-    let context_ceiling = node
-        .worker_health
-        .as_ref()
-        .and_then(|health| health.capabilities.max_context_tokens)
+    let context_ceiling = ControlPlaneState::advertised_context(node)
         .map(|limit| limit.saturating_sub(512).max(1))
         .unwrap_or(u32::MAX);
-    model_ceiling.min(memory_ceiling).min(context_ceiling)
+    let reported_output_ceiling = if node.trust.capability_policy_enabled {
+        ControlPlaneState::model_inventory(node).iter().filter_map(|m|m.max_output_tokens).filter(|n|*n>0).min().unwrap_or(u32::MAX)
+    } else {u32::MAX};
+    model_ceiling.min(memory_ceiling).min(context_ceiling).min(reported_output_ceiling)
 }
 
 fn scale_auto_generation_budget(baseline: u32, ceiling: u32) -> u32 {
@@ -5848,11 +5888,14 @@ fn job_max_tokens_for_node(job: &JobRecord, claiming_node: &NodeRecord) -> u32 {
         requested
     };
 
-    if job_uses_auto_max_tokens(job) {
+    let budget = if job_uses_auto_max_tokens(job) {
         scale_auto_generation_budget(requested, node_generation_ceiling(Some(claiming_node)))
-    } else {
-        requested.max(1)
-    }
+    } else {requested.max(1)};
+    if claiming_node.trust.capability_policy_enabled {
+        let demand = ControlPlaneState::context_demand_for_job(job, None);
+        budget.min(ControlPlaneState::advertised_context(claiming_node).unwrap_or(2048)
+            .saturating_sub(demand.estimated_input_tokens).saturating_sub(CONTEXT_SAFETY_TOKENS).max(1))
+    } else {budget}
 }
 
 fn graph_node_max_tokens(
@@ -5996,6 +6039,11 @@ fn graph_node_max_tokens(
     } else {
         budget
     };
+    let budget = if let Some(contributor) = claiming_node.filter(|n|n.trust.capability_policy_enabled) {
+        let demand = ControlPlaneState::context_demand_for_job(job, Some(active_node_id));
+        budget.min(ControlPlaneState::advertised_context(contributor).unwrap_or(2048)
+            .saturating_sub(demand.estimated_input_tokens).saturating_sub(dependency_tokens).saturating_sub(CONTEXT_SAFETY_TOKENS).max(1))
+    } else {budget};
     if job.plan.strategy == "dynamic_research"
         && node.responsibility == "chunk_analysis"
         && node.workload.context_budget_tokens <= 2_047
@@ -9445,6 +9493,106 @@ mod tests {
         let reported = ControlPlaneState::model_inventory(&state.nodes["qualified"])[0].clone();
         assert_eq!(crate::qualification::advertised_model(&state.nodes["qualified"], &reported), reported);
         assert!(crate::render_node_classification(&state.nodes["qualified"]).contains("automatic model tests disabled"));
+    }
+
+    fn capability_policy_fixture() -> ControlPlaneState {
+        let mut state = qualification_fixture();
+        state.qualification_enabled = false;
+        state.reconcile_admission_policy();
+        state.enable_capability_policy();
+        let mut h = ready_heartbeat("qualified", "104");
+        h.worker_health.streaming_supported = true;
+        h.worker_health.capabilities.usable_memory_mb = Some(52429);
+        h.worker_health.capabilities.physical_memory_mb = Some(65536);
+        h.worker_health.capabilities.supports_tools = true;
+        h.worker_health.capabilities.supported_tools = vec!["native_tool_calls_v1".into()];
+        h.worker_health.capabilities.roles = vec![NodeRole::Chat, NodeRole::Coding, NodeRole::ToolUse];
+        let model = ModelCapability {name:"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit".into(),context_tokens:Some(131072),
+            active:true, supports_tools:true, task_capabilities:["chat","coding","small_coding","medium_coding","large_coding","math","reasoning","research","synthesizer","tool_use"].map(String::from).to_vec(),..Default::default()};
+        h.worker_health.model_name = Some(model.name.clone());
+        h.worker_health.capabilities.models = vec![model];
+        state.heartbeat(h, "104".into());
+        state
+    }
+
+    #[test]
+    fn catalog_policy_limits_gpu_tiers_without_launching_tests() {
+        let state = capability_policy_fixture();
+        let node = &state.nodes["qualified"];
+        let raw = ControlPlaneState::model_inventory(node)[0].clone();
+        let mac = crate::qualification::advertised_model(node, &raw);
+        assert_eq!(mac.context_tokens, Some(8192)); assert!(mac.task_capabilities.iter().any(|c|c=="large_coding"));
+        assert!(mac.supports_tools); assert!(mac.task_capabilities.iter().any(|c|c=="math"));
+        let mut gpu = node.clone(); gpu.backend = Backend::Cuda;
+        gpu.worker_health.as_mut().unwrap().capabilities.total_vram_mb = Some(8192);
+        let small = crate::qualification::advertised_model(&gpu, &raw);
+        assert!(small.task_capabilities.iter().any(|c|c=="small_coding"));
+        assert!(!small.task_capabilities.iter().any(|c|["medium_coding","large_coding"].contains(&c.as_str())));
+        let mut unknown = raw.clone(); unknown.name="unknown-model".into(); unknown.supports_tools=false;
+        let unknown = crate::qualification::advertised_model(node, &unknown);
+        assert_eq!(unknown.context_tokens,Some(2048)); assert!(!unknown.task_capabilities.iter().any(|c|c=="coding"));
+        assert!(!state.qualification_enabled); assert!(state.jobs.values().all(|j|j.mode.as_deref()!=Some(crate::qualification::MODE) || j.status==JobStatus::Failed));
+    }
+
+    #[test]
+    fn admin_capability_limits_control_routing_and_survive_reconnect() {
+        let mut state = capability_policy_fixture();
+        let settings = crate::capability_policy::Settings {allowed_capabilities:Some(vec!["chat".into(),"small_coding".into()]),
+            max_context_tokens:Some(4096),max_parallel_jobs:Some(2),allow_tools:Some(false),allow_streaming:Some(false),reason:"Small jobs only".into()};
+        state.set_node_capability_policy("qualified",Some(settings.clone()),"admin@example.test".into(),"104".into()).unwrap();
+        let raw=ControlPlaneState::model_inventory(&state.nodes["qualified"])[0].clone();
+        let effective=crate::qualification::advertised_model(&state.nodes["qualified"],&raw);
+        assert_eq!(effective.context_tokens,Some(4096)); assert!(!effective.supports_tools);
+        let public=crate::capability_policy::public_node(&state.nodes["qualified"]);
+        assert_eq!(public["worker_health"]["capabilities"]["models"][0]["context_tokens"],4096);
+        assert_eq!(public["worker_health"]["streaming_supported"],false);
+        assert_eq!(public["reported_worker_health"]["capabilities"]["models"][0]["context_tokens"],131072);
+        assert_eq!(raw.context_tokens,Some(131072));
+        assert!(effective.task_capabilities.iter().any(|c|c=="coding")); assert!(!effective.task_capabilities.iter().any(|c|c=="large_coding"));
+        let request:JobRequest=serde_json::from_value(serde_json::json!({"request_id":"policy-chat","prompt":"Hello","preferred_backend":"m","runtime_mode":"local","execution_mode":"single","max_tokens":64})).unwrap();
+        let mut job=state.submit_job(request.clone(),"104".into());
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        job.stream=true; assert!(!ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        job.stream=false; job.scheduling_requirements.task_type=RequestTaskType::Coding; job.classification.complexity=RequestComplexity::High;
+        assert!(!ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        job.classification.complexity=RequestComplexity::Low; job.scheduling_requirements.capability_requirements.clear();
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        job.max_tokens=Some(32768);job.max_tokens_source=Some("auto".into());
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        assert!(job_max_tokens_for_node(&job,&state.nodes["qualified"]) < 4096);
+        state.nodes.get_mut("qualified").unwrap().worker_health.as_mut().unwrap().capabilities.models[0].max_output_tokens=Some(1024);
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        assert!(job_max_tokens_for_node(&job,&state.nodes["qualified"])<=1024);
+        job.max_tokens_source=Some("explicit".into());
+        assert!(!ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        let saved_health=state.nodes["qualified"].worker_health.clone().unwrap();
+        state.register(m_series_registration("qualified"));
+        let mut h=ready_heartbeat("qualified","105");h.worker_health=saved_health;
+        state.heartbeat(h,"105".into());
+        let restored:ControlPlaneState=serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.nodes["qualified"].trust.capability_policy.as_ref().unwrap().settings,settings);
+        assert_eq!(crate::capability_policy::parallel_limit(&restored.nodes["qualified"],1),1);
+        state.set_node_capability_policy("qualified",None,"admin@example.test".into(),"106".into()).unwrap();
+        assert!(crate::qualification::advertised_model(&state.nodes["qualified"],&raw).supports_tools);
+        assert!(crate::capability_policy::streaming_allowed(&state.nodes["qualified"]));
+    }
+
+    #[test]
+    fn empty_admin_allowlist_blocks_capacity_and_cannot_invent_runtime_support() {
+        let mut state=capability_policy_fixture();
+        let mut settings=crate::capability_policy::Settings {allowed_capabilities:Some(vec![]),reason:"Disable tasks".into(),..Default::default()};
+        state.set_node_capability_policy("qualified",Some(settings.clone()),"admin".into(),"104".into()).unwrap();
+        let directory=state.node_capability_directory(104); let n=&directory["items"][0];
+        assert_eq!(n["available"],false); assert!(n["blocked_reasons"].as_array().unwrap().iter().any(|v|v=="capability_policy_no_tasks"));
+        settings.allowed_capabilities=Some(vec!["vision".into(),"embedding".into(),"tool_use".into()]);settings.allow_tools=Some(true);
+        state.set_node_capability_policy("qualified",Some(settings),"admin".into(),"105".into()).unwrap();
+        let mut raw=ControlPlaneState::model_inventory(&state.nodes["qualified"])[0].clone();raw.supports_tools=false;
+        let model=crate::qualification::advertised_model(&state.nodes["qualified"],&raw);
+        assert!(!model.supports_tools);assert!(!model.supports_vision);assert!(!model.supports_embeddings);
+        let invalid=crate::capability_policy::Settings {allowed_capabilities:Some(vec!["made_up".into()]),reason:"Invalid".into(),..Default::default()};
+        let before=state.nodes["qualified"].trust.clone();
+        assert!(state.set_node_capability_policy("qualified",Some(invalid),"admin".into(),"105".into()).is_err());
+        assert_eq!(state.nodes["qualified"].trust,before);
     }
 
     #[test]

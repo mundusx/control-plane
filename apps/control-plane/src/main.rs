@@ -1,4 +1,5 @@
 mod admission_profile;
+mod capability_policy;
 mod chat_api_keys;
 mod native_stream;
 mod qualification;
@@ -1166,6 +1167,54 @@ fn node_last_seen(updated_at: &str) -> String {
     else { format!("{}d ago", age / 86400) }
 }
 
+fn render_capability_policy_editor(node: &NodeRecord) -> String {
+    if node.worker_health.as_ref().is_some_and(|h|h.runtime_mode=="media") {return r#"<div class="meta">Media profiles use the separate media model policy and node pause/block controls.</div>"#.into();}
+    let settings = node.trust.capability_policy.as_ref().map(|p| &p.settings);
+    let selected = settings.and_then(|s|s.allowed_capabilities.as_ref());
+    let defaults = state::ControlPlaneState::model_inventory(node).iter().flat_map(|model|capability_policy::advertised_model(node,model).task_capabilities).collect::<std::collections::BTreeSet<_>>();
+    let tasks = capability_policy::TASKS.iter().filter(|t| !["coding", "coding_basic", "native_tool_calls_v1"].contains(t)).map(|task|
+        format!(r#"<label style="display:inline-block;margin:6px 14px 6px 0"><input type="checkbox" name="capability" value="{task}" {checked}> {task}</label>"#,
+            checked=if selected.map(|tasks|tasks.iter().any(|t|t==task)).unwrap_or_else(||defaults.contains(*task)) {"checked"} else {""})).collect::<Vec<_>>().join("");
+    format!(r#"<details data-admin-action><summary>Admin capability settings</summary>
+    <p>Catalog rules apply immediately. Overrides can select reported tasks and set limits. No model tests run.</p>
+    <form method="post" action="/v1/nodes/capability-policy" data-admin-action data-capability-policy>
+      <input type="hidden" name="node_id" value="{node_id}">
+      <label>Task policy <select name="task_mode"><option value="catalog">Catalog defaults</option><option value="custom" {custom}>Custom allowed tasks</option></select></label>
+      <fieldset data-capability-tasks style="border:0;padding:0">{tasks}</fieldset><p class="meta">Keep chat enabled for ordinary requests. Other capabilities may be required together for a job.</p>
+      <label>Context cap <input type="number" name="max_context_tokens" min="512" max="2097152" value="{context}" placeholder="Catalog default"></label>
+      <label>Parallel job cap <input type="number" name="max_parallel_jobs" min="1" max="64" value="{parallel}" placeholder="1"></label>
+      <label><input type="checkbox" name="allow_tools" {tools}> Permit reported native tools</label>
+      <label><input type="checkbox" name="allow_streaming" {streaming}> Permit reported streaming</label>
+      <label>Reason <input name="reason" maxlength="512" value="{reason}" required></label>
+      <button type="submit">Save capability settings</button><button type="submit" name="reset" value="true" formnovalidate>Reset to catalog defaults</button>
+      <p role="status" data-capability-status></p>
+    </form></details>
+    <script>
+    document.querySelectorAll('form[data-capability-policy]').forEach(form => {{
+      if(form.dataset.bound) return; form.dataset.bound='true';
+      const mode=form.querySelector('[name=task_mode]'); const tasks=form.querySelector('[data-capability-tasks]');
+      const syncTasks=()=>tasks.disabled=mode.value!=='custom'; syncTasks(); mode.addEventListener('change',syncTasks);
+      form.addEventListener('submit', async event => {{
+        event.preventDefault(); const data=new FormData(form); const status=form.querySelector('[data-capability-status]');
+        const number=name => data.get(name) ? Number(data.get(name)) : null;
+        const policy=event.submitter?.name==='reset' ? null : {{allowed_capabilities:data.get('task_mode')==='custom' ? data.getAll('capability') : null,
+          max_context_tokens:number('max_context_tokens'),max_parallel_jobs:number('max_parallel_jobs'),
+          allow_tools:data.has('allow_tools'),allow_streaming:data.has('allow_streaming'),reason:data.get('reason')}};
+        const buttons=[...form.querySelectorAll('button')]; buttons.forEach(b=>b.disabled=true); status.textContent='Saving...';
+        try {{const response=await fetch(form.action,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{node_id:data.get('node_id'),policy}})}});
+          const result=await response.json(); if(!response.ok) throw new Error(result.error || 'Save failed'); window.location.reload();
+        }} catch(error) {{status.textContent=error.message; buttons.forEach(b=>b.disabled=false);}}
+      }});
+    }});
+    </script>"#,
+        node_id=escape_html(&node.node_id), tasks=tasks,
+        custom=if selected.is_some(){"selected"}else{""}, context=settings.and_then(|s|s.max_context_tokens).map(|n|n.to_string()).unwrap_or_default(),
+        parallel=settings.and_then(|s|s.max_parallel_jobs).map(|n|n.to_string()).unwrap_or_default(),
+        tools=if settings.and_then(|s|s.allow_tools)!=Some(false){"checked"}else{""},
+        streaming=if settings.and_then(|s|s.allow_streaming)!=Some(false){"checked"}else{""},
+        reason=escape_html(settings.map(|s|s.reason.as_str()).unwrap_or("")))
+}
+
 fn render_node_classification(node: &NodeRecord) -> String {
     let advertised = node.capabilities.as_ref();
     let media_health = node.worker_health.as_ref().filter(|health| health.runtime_mode == "media" || !health.media_profiles.is_empty());
@@ -1273,11 +1322,17 @@ fn render_node_classification(node: &NodeRecord) -> String {
         }).collect::<Vec<_>>().join("");
         model_html + &media_html
     };
-    let predefined = node.trust.qualification.as_ref().and_then(|q|q.admission_profile.clone()).or_else(||
-        node.worker_health.as_ref().and_then(|h|h.capabilities.models.iter().find(|m|m.active).or_else(||h.capabilities.models.first()))
-            .map(|model|crate::admission_profile::AdmissionProfile::detected(node,model)));
-    let classification_html=predefined.as_ref().map(|p|format!(r#"<div class="meta"><strong>Predefined classification:</strong> {} / {}<br>Catalog context estimate: {} tokens · estimated, not benchmarked</div>"#,
+    let reported_profile = node.worker_health.as_ref().and_then(|h|h.capabilities.models.iter().find(|m|m.active).or_else(||h.capabilities.models.first()))
+        .map(|model|crate::admission_profile::AdmissionProfile::detected(node,model));
+    let predefined = if node.trust.capability_policy_enabled {reported_profile} else {
+        node.trust.qualification.as_ref().and_then(|q|q.admission_profile.clone()).or(reported_profile)
+    };
+    let mut classification_html=predefined.as_ref().map(|p|format!(r#"<div class="meta"><strong>Predefined classification:</strong> {} / {}<br>Catalog context estimate: {} tokens · estimated, not benchmarked</div>"#,
         escape_html(&p.node_class),escape_html(&p.model_class),p.context_tokens)).unwrap_or_default();
+    if node.trust.capability_policy_enabled {
+        classification_html.push_str(&format!(r#"<div class="meta"><strong>Capability policy:</strong> {} · automatic model tests disabled</div>"#,
+            if node.trust.capability_policy.is_some() {"admin override"} else {"catalog defaults"}));
+    }
     let qualification_html = match node.trust.qualification.as_ref() {
         Some(_q) if !node.trust.qualification_enforced() => r#"<div class="meta">Admission: reported runtime health · automatic model tests disabled</div>"#.to_string(),
         Some(q) => {
@@ -2091,7 +2146,7 @@ fn render_node_profile_panel(state: &ControlPlaneState, node_id: &str) -> String
         String::new()
     };
     let scheduler_fit = render_node_scheduler_fit(state, node);
-    let classification = render_node_classification(node);
+    let classification = render_node_classification(node) + &render_capability_policy_editor(node);
 
     format!(
         r#"<section class="panel node-profile-panel">
@@ -6172,6 +6227,7 @@ fn requires_operator_auth(method: &str, path: &str) -> bool {
             | ("GET", "/v1/admission-policy")
             | ("POST", "/v1/admission-policy")
             | ("POST", "/v1/nodes/policy-override")
+            | ("POST", "/v1/nodes/capability-policy")
             | ("POST", "/v1/nodes/qualification/retest")
             | ("POST", "/actions/admission-policy")
             | ("GET", "/v1/jobs")
@@ -8590,9 +8646,9 @@ fn handle_connection_with_streams(
         ("GET", "/v1/nodes") => {
             let guard = state.lock().expect("state lock");
             if wants_legacy_array(query) {
-                json_response("200 OK", guard.nodes_snapshot())
+                json_response("200 OK", serde_json::json!(guard.nodes.values().map(capability_policy::public_node).collect::<Vec<_>>()))
             } else {
-                let nodes = guard.nodes.values().cloned().collect::<Vec<_>>();
+                let nodes = guard.nodes.values().map(capability_policy::public_node).collect::<Vec<_>>();
                 let nodes = filter_json_items(nodes, query, "nodes");
                 json_response("200 OK", paginated_items_response(nodes, query, "nodes"))
             }
@@ -8928,6 +8984,38 @@ fn handle_connection_with_streams(
                     }
                 }
                 None => json_response("400 Bad Request", serde_json::json!({"error":"node_id is required"})),
+            }
+        }
+        ("POST", "/v1/nodes/capability-policy") => {
+            match serde_json::from_str::<capability_policy::Update>(&request.body) {
+                Ok(update) => {
+                    let actor = admin_login::session_email(&request.headers).unwrap_or_else(|| "operator_token".into());
+                    let mut guard = state.lock().expect("state lock");
+                    let mut candidate = guard.clone();
+                    let now = now_unix_seconds();
+                    match candidate.set_node_capability_policy(&update.node_id, update.policy, actor.clone(), now.clone()) {
+                        Ok(record) => {
+                            let event = candidate.record_job_event(Some(record.node_id.clone()), None, "operator_capability_policy_updated",
+                                serde_json::json!({"node_id":record.node_id,"actor":actor,"policy":record.trust.capability_policy}), now);
+                            let persisted = if let Some(db) = supabase.as_ref() {
+                                db.record_node_snapshot(&record)
+                            } else {save_state(&candidate).map(|_|()).map_err(|error|error.to_string())};
+                            match persisted {
+                                Err(error) => {note_supabase_failure(&sync_status, error); json_response("503 Service Unavailable", serde_json::json!({"error":"Could not persist capability policy; settings were not applied"}))}
+                                Ok(()) => {
+                                    if let Some(db) = supabase.as_ref() {
+                                        if let Err(error) = db.record_job_event(&event) {note_supabase_failure(&sync_status, error);}
+                                        if let Err(error) = save_state(&candidate) {eprintln!("local capability policy cache save failed: {error}");}
+                                    }
+                                    *guard = candidate;
+                                    json_response("200 OK", serde_json::json!({"node_id":record.node_id,"capability_policy":record.trust.capability_policy}))
+                                }
+                            }
+                        }
+                        Err(error) => json_response("400 Bad Request", serde_json::json!({"error":error})),
+                    }
+                }
+                Err(error) => json_response("400 Bad Request", serde_json::json!({"error":error.to_string()})),
             }
         }
         ("POST", "/v1/nodes/policy-override") => {
@@ -10177,6 +10265,7 @@ fn main() {
     // Contributor admission uses reported runtime health; never launch model tests.
     restored_state.qualification_enabled = false;
     restored_state.reconcile_admission_policy();
+    restored_state.enable_capability_policy();
     restored_state.ensure_job_totals_from_hot_history();
     let state = Arc::new(Mutex::new(restored_state));
     let live_streams = Arc::new(Mutex::new(chat_gateway::LiveStreamRegistry::default()));
@@ -13331,6 +13420,17 @@ mod tests {
     #[test]
     fn protects_operator_policy_override_route() {
         assert!(requires_operator_auth("POST", "/v1/nodes/policy-override"));
+    }
+
+    #[test]
+    fn capability_editor_and_api_require_operator_auth() {
+        assert!(requires_operator_auth("POST", "/v1/nodes/capability-policy"));
+        let mut state=ControlPlaneState::default();register_ready_node(&mut state,"node-policy","POLICY","1");
+        let html=crate::render_capability_policy_editor(&state.nodes["node-policy"]);
+        assert!(html.contains("data-admin-action data-capability-policy"));
+        assert!(html.contains("Reset to catalog defaults"));
+        assert!(crate::admin_login::decorate(html.clone(),None).contains("<fieldset disabled"));
+        assert!(!crate::admin_login::decorate(html,Some("admin@example.test")).contains("<fieldset disabled"));
     }
 
     #[test]
