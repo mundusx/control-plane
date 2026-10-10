@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub const MODE: &str = "contributor_qualification_v1";
-pub const SUITE: u32 = 4;
+pub const SUITE: u32 = 5;
 pub fn context_answer(nonce:&str)->String {
     let middle=hex::encode(Sha256::digest(format!("middle:{nonce}").as_bytes()));
     let end=hex::encode(Sha256::digest(format!("end:{nonce}").as_bytes()));
@@ -14,6 +14,8 @@ pub fn context_answer(nonce:&str)->String {
 
 #[derive(Clone, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct Qualification {
+    #[serde(default)]
+    pub admission_profile: Option<crate::admission_profile::AdmissionProfile>,
     pub fingerprint: String,
     pub model: String,
     pub runtime: String,
@@ -42,8 +44,14 @@ pub struct Probe {
 }
 
 pub fn fingerprint(node: &NodeRecord, model: &ModelCapability) -> String {
+    fingerprint_for_suite(node,model,SUITE)
+}
+pub fn legacy_fingerprint(node: &NodeRecord, model: &ModelCapability) -> String {
+    fingerprint_for_suite(node,model,4)
+}
+fn fingerprint_for_suite(node: &NodeRecord, model: &ModelCapability, suite: u32) -> String {
     let health = node.worker_health.as_ref().expect("healthy model inventory");
-    let raw = json!([SUITE, node.public_key_fingerprint, node.public_key_hex,
+    let raw = json!([suite, node.public_key_fingerprint, node.public_key_hex,
         node.backend.to_string(), node.agent_version, health.runtime_mode,
         health.model_path, model.name, model.quantization, model.context_tokens,
         model.max_output_tokens, model.output_capacity_mode,
@@ -62,20 +70,21 @@ impl Qualification {
             0..=8191 => 2048, 8192..=16383 => 4096, 16384..=32767 => 8192, _ => 16384,
         };
         let context = model.context_tokens.unwrap_or(2048).min(budget);
-        let mut kinds = vec!["chat", "context", "coding_basic"];
+        let mut kinds = vec!["chat"];
+        if model.supports_tools { kinds.extend(["native_tools", "tool_result"]); }
+        kinds.extend(["context", "coding_basic"]);
         let coding = model.name.to_ascii_lowercase().contains("coder") || model.task_capabilities.iter().any(|c| c.contains("coding"));
         if coding && context >= 4096 { kinds.push("coding_medium"); }
         if coding && context >= 8192 { kinds.push("coding_large"); }
         if model.supports_vision { kinds.push("vision"); }
         if health.streaming_supported { kinds.push("streaming"); }
-        if model.supports_tools { kinds.extend(["native_tools", "tool_result"]); }
         let probes = kinds.into_iter().map(|kind| Probe {
             kind: kind.into(), job_id: format!("qualification-{}", uuid::Uuid::new_v4()),
             nonce: uuid::Uuid::new_v4().simple().to_string(), status: "pending".into(),
             reason: None, stream_observed: false, prompt_tokens: None,
             completion_tokens: None, elapsed_ms: None, completed_at: None,
         }).collect();
-        Self { fingerprint: fingerprint(node, model), model: model.name.clone(),
+        Self { admission_profile:Some(crate::admission_profile::AdmissionProfile::detected(node, model)), fingerprint: fingerprint(node, model), model: model.name.clone(),
             runtime: health.runtime_mode.clone(), quantization: model.quantization.clone(),
             physical_memory_mb: health.capabilities.physical_memory_mb,
             usable_memory_mb: health.capabilities.usable_memory_mb,
@@ -87,8 +96,20 @@ impl Qualification {
     pub fn passed(&self, kind: &str) -> bool {
         self.probes.iter().any(|p| p.kind == kind && p.status == "passed")
     }
+    fn failed(&self, kind: &str) -> bool { self.probes.iter().any(|p| p.kind == kind && p.status == "failed") }
+    pub fn context_limit(&self) -> Option<u32> {
+        self.tested_context_tokens.or_else(|| self.admission_profile.as_ref().filter(|_| self.passed("chat"))
+            .map(|p| if self.failed("context") {p.context_tokens.min(1024)} else {p.context_tokens.min(self.configured_context_tokens)}))
+    }
+    pub fn streaming_ready(&self) -> bool {
+        self.passed("streaming") || self.probes.iter().any(|p|p.kind=="chat" && p.status=="passed" && p.stream_observed)
+    }
+    fn predefined(&self, capability: &str) -> bool {
+        self.passed("chat") && self.admission_profile.as_ref().is_some_and(|p|p.capabilities.iter().any(|c|c==capability))
+    }
     pub fn status(&self) -> &'static str {
-        if self.probes.iter().any(|p| p.status == "pending") { "testing" }
+        if self.passed("chat") && self.admission_profile.is_some() && self.probes.iter().any(|p|p.status=="pending") { "admitted" }
+        else if self.probes.iter().any(|p| p.status == "pending") { "testing" }
         else if !self.passed("chat") { "failed" }
         else if self.tested_context_tokens.is_none_or(|n|n==0) { "limited" }
         else if self.probes.iter().any(|p| p.status == "failed") { "limited" }
@@ -100,9 +121,9 @@ impl Qualification {
     pub fn allows(&self, capability: &str) -> bool {
         match capability {
             "chat" => self.passed("chat"),
-            "coding" | "coding_basic" | "small_coding" => self.passed("coding_basic"),
-            "medium_coding" => self.passed("coding_basic") && self.passed("coding_medium"),
-            "large_coding" => self.passed("coding_basic") && self.passed("coding_medium") && self.passed("coding_large"),
+            "coding" | "coding_basic" | "small_coding" => !self.failed("coding_basic") && (self.passed("coding_basic") || self.predefined(capability)),
+            "medium_coding" => !self.failed("coding_basic") && !self.failed("coding_medium") && ((self.passed("coding_basic") && self.passed("coding_medium")) || self.predefined(capability)),
+            "large_coding" => !self.failed("coding_basic") && !self.failed("coding_medium") && !self.failed("coding_large") && ((self.passed("coding_basic") && self.passed("coding_medium") && self.passed("coding_large")) || self.predefined(capability)),
             "vision" => self.passed("vision"),
             "long_context" => self.tested_context_tokens.is_some_and(|n| n >= 8192),
             "tool_use" | "native_tool_calls_v1" => self.passed("native_tools") && self.passed("tool_result"),

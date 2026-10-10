@@ -1,3 +1,4 @@
+mod admission_profile;
 mod chat_api_keys;
 mod native_stream;
 mod qualification;
@@ -1271,6 +1272,11 @@ fn render_node_classification(node: &NodeRecord) -> String {
         }).collect::<Vec<_>>().join("");
         model_html + &media_html
     };
+    let predefined = node.trust.qualification.as_ref().and_then(|q|q.admission_profile.clone()).or_else(||
+        node.worker_health.as_ref().and_then(|h|h.capabilities.models.iter().find(|m|m.active).or_else(||h.capabilities.models.first()))
+            .map(|model|crate::admission_profile::AdmissionProfile::detected(node,model)));
+    let classification_html=predefined.as_ref().map(|p|format!(r#"<div class="meta"><strong>Predefined classification:</strong> {} / {}<br>Starting context: {} tokens · one job · estimated, not benchmarked</div>"#,
+        escape_html(&p.node_class),escape_html(&p.model_class),p.context_tokens)).unwrap_or_default();
     let qualification_html = match node.trust.qualification.as_ref() {
         Some(q) => {
             let passed = q.probes.iter().filter(|p| p.status == "passed").map(|p| p.kind.as_str()).collect::<Vec<_>>().join(", ");
@@ -1284,7 +1290,7 @@ fn render_node_classification(node: &NodeRecord) -> String {
             if node.trust.qualification_required { "awaiting healthy runtime" } else { "existing contributor awaiting audit" }),
     };
     format!(
-        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}{qualification_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
+        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}{classification_html}{qualification_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
         node_type = escape_html(node_type), memory = escape_html(&memory),
         capacity = escape_html(capacity), runtime = escape_html(runtime),
         roles = escape_html(&roles), tools = escape_html(&tools),
