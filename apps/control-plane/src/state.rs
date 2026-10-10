@@ -9420,8 +9420,13 @@ mod tests {
         let mut state=qualification_fixture();
         let chat_id=state.nodes["qualified"].trust.qualification.as_ref().unwrap().probes[0].job_id.clone();
         assert!(state.jobs[&chat_id].stream);
+        let readiness=state.claim_job("qualified","101".into()).job.unwrap();
+        assert_eq!(readiness.job_id,chat_id);assert_eq!(readiness.max_tokens,Some(64));
         state.record_qualification_delta("qualified",&chat_id);
         let nonce=probe_nonce(&state,"chat"); finish_probe(&mut state,"chat",nonce,false);
+        let mut heartbeat=ready_heartbeat("qualified","104");
+        heartbeat.worker_health=state.nodes["qualified"].worker_health.clone().unwrap();
+        state.heartbeat(heartbeat,"104".into());
         let q=state.nodes["qualified"].trust.qualification.as_ref().unwrap();
         assert_eq!(q.status(),"admitted"); assert!(q.streaming_ready());
         assert!(q.context_limit().is_some()); assert!(q.tested_context_tokens.is_none());
