@@ -1612,7 +1612,7 @@ impl ControlPlaneState {
             return false;
         }
         if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q|
-            !q.passed("chat") || q.tested_context_tokens.is_none() || (request.stream && !q.passed("streaming"))) {
+            !q.passed("chat") || q.context_limit().is_none() || (request.stream && !q.streaming_ready())) {
             return false;
         }
 
@@ -1852,11 +1852,11 @@ impl ControlPlaneState {
         if node.trust.qualification_required {
             let Some(q) = node.trust.qualification.as_ref() else { return false; };
             if q.model != model.name || q.fingerprint != crate::qualification::fingerprint(node, model)
-                || !q.passed("chat") || (job.stream && !q.passed("streaming")) {
+                || !q.passed("chat") || (job.stream && !q.streaming_ready()) {
                 return false;
             }
             let demand = Self::context_demand_for_job(job, active_graph_node_id);
-            if q.tested_context_tokens.is_none_or(|limit| demand.required_context_tokens > limit)
+            if q.context_limit().is_none_or(|limit| demand.required_context_tokens > limit)
                 || node.available_memory_mb < 256 {
                 return false;
             }
@@ -2530,7 +2530,7 @@ impl ControlPlaneState {
                 blocked.push("runtime_unavailable");
             }
             if free == 0 { blocked.push("no_free_slots"); }
-            if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.passed("chat") || q.tested_context_tokens.is_none()) {
+            if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.passed("chat") || q.context_limit().is_none()) {
                 blocked.push("qualification_pending_or_failed");
             }
             let available = blocked.is_empty();
@@ -2541,7 +2541,7 @@ impl ControlPlaneState {
                         model.task_capabilities.retain(|c| q.allows(c));
                         model.capability_scores.retain(|c| q.allows(&c.capability));
                         model.roles.retain(|r| q.allows(r.as_str()));
-                        model.context_tokens = q.tested_context_tokens;
+                        model.context_tokens = q.context_limit();
                         model.supports_tools = q.allows("native_tool_calls_v1");
                     } else { model.task_capabilities.clear(); model.capability_scores.clear(); model.roles.clear(); model.context_tokens = None; model.supports_tools = false; }
                     model.supports_vision = node.trust.qualification.as_ref().is_some_and(|q| q.model == model.name && q.allows("vision")); model.supports_embeddings = false;
@@ -2555,7 +2555,7 @@ impl ControlPlaneState {
                             "completed_samples":stats.completed_samples, "failed_samples":stats.failed_samples,
                             "mean_latency_ms": if stats.latency_samples > 0 {Some(stats.total_latency_ms / u64::from(stats.latency_samples))} else {None}})
                     }).collect::<Vec<_>>();
-                serde_json::json!({"model": model, "detected_model":detected_model, "qualification":node.trust.qualification, "qualification_enforced":node.trust.qualification_required, "task_assessments":tasks})
+                serde_json::json!({"model": model, "predefined_classification":crate::admission_profile::AdmissionProfile::detected(node,&detected_model), "detected_model":detected_model, "qualification":node.trust.qualification, "qualification_enforced":node.trust.qualification_required, "task_assessments":tasks})
             }).collect::<Vec<_>>();
             serde_json::json!({"node_id":node.node_id,"state":node.state,"updated_at":node.updated_at,
                 "available":available,"blocked_reasons":blocked,"total_slots":total,
@@ -2810,9 +2810,10 @@ impl ControlPlaneState {
             })
             .max_by(
                 |(left_id, left_decision, _), (right_id, right_decision, _)| {
-                    left_decision
-                        .score
-                        .cmp(&right_decision.score)
+                    let admitted = claiming_node.trust.qualification.as_ref().is_some_and(|q|q.admission_profile.is_some() && q.passed("chat"));
+                    let customer = |id: &String| admitted && self.jobs.get(id).is_some_and(|job|job.mode.as_deref()!=Some(crate::qualification::MODE));
+                    customer(left_id).cmp(&customer(right_id))
+                        .then_with(|| left_decision.score.cmp(&right_decision.score))
                         .then_with(|| right_id.cmp(left_id))
                 },
             );
@@ -9028,7 +9029,18 @@ impl ControlPlaneState {
                     }
                 }
             }
-            let q = crate::qualification::Qualification::detected(&node, model, now);
+            let mut q = crate::qualification::Qualification::detected(&node, model, now);
+            // Admission policy changed, but the actual configuration and test
+            // challenges did not. Keep both successful and failed evidence.
+            if let Some(old)=node.trust.qualification.as_ref().filter(|old|old.fingerprint==crate::qualification::legacy_fingerprint(&node,model)) {
+                q.tested_context_tokens=old.tested_context_tokens;
+                q.configured_context_tokens=old.configured_context_tokens;
+                for probe in &mut q.probes {
+                    if let Some(previous)=old.probes.iter().find(|p|p.kind==probe.kind && p.status!="pending") {
+                        *probe=previous.clone();
+                    }
+                }
+            }
             let trust = &mut self.nodes.get_mut(node_id).unwrap().trust;
             trust.qualification = Some(q);
             trust.revision = trust.revision.saturating_add(1);
@@ -9052,14 +9064,24 @@ impl ControlPlaneState {
             }
         }
         let q = q.clone();
+        let next_kind=q.probes.iter().find(|p|p.status=="pending").map(|p|p.kind.as_str());
+        if q.admission_profile.is_some() && q.passed("chat") && !matches!(next_kind,Some("native_tools"|"tool_result")) {
+            let now_seconds=parse_unix_seconds(now).unwrap_or(0);
+            let admitted_at=q.probes.iter().find(|p|p.kind=="chat").and_then(|p|p.completed_at.as_deref()).and_then(parse_unix_seconds).unwrap_or(now_seconds);
+            let recent_work=self.jobs.values().any(|job|job.mode.as_deref()!=Some(crate::qualification::MODE)
+                && ((job.assigned_node_id.as_deref()==Some(node_id) && (job.status==JobStatus::Assigned
+                    || job.completed_at.as_deref().and_then(parse_unix_seconds).is_some_and(|t|now_seconds.saturating_sub(t)<60)))
+                    || (job.status==JobStatus::Queued && Self::node_can_run_job(&node,job))));
+            if now_seconds.saturating_sub(admitted_at)<60 || recent_work {return;}
+        }
         let Some(probe) = q.probes.iter().find(|p| p.status == "pending").cloned() else { return; };
         if self.jobs.contains_key(&probe.job_id) { return; }
         let modes = Self::reported_runtime_modes(node.worker_health.as_ref().unwrap());
         let runtime_mode = modes.iter().find(|m| **m == RuntimeMode::Local).or_else(|| modes.first()).copied().unwrap_or(RuntimeMode::Local);
         let request: JobRequest = serde_json::from_value(serde_json::json!({
             "request_id":probe.job_id, "prompt":q.prompt(&probe), "preferred_backend":node.backend,
-            "runtime_mode":runtime_mode, "execution_mode":"single", "stream":probe.kind == "streaming",
-            "model":q.model, "system_prompt":null, "max_tokens":if probe.kind == "coding_large" {2048} else if probe.kind == "coding_medium" {1024} else if probe.kind == "vision" {256} else {128},
+            "runtime_mode":runtime_mode, "execution_mode":"single", "stream":probe.kind == "streaming" || (probe.kind == "chat" && node.worker_health.as_ref().is_some_and(|h| h.streaming_supported)),
+            "model":q.model, "system_prompt":null, "max_tokens":if probe.kind == "coding_large" {2048} else if probe.kind == "coding_medium" {1024} else if probe.kind == "vision" {256} else if probe.kind == "chat" || probe.kind == "streaming" {64} else {128},
             "max_tokens_source":"qualification", "temperature":0.0, "top_p":1.0, "seed":42
         })).expect("internal qualification request");
         self.submit_job_with_mode(request, Some(crate::qualification::MODE.into()), now.into());
@@ -9370,6 +9392,91 @@ mod tests {
     }
 
     #[test]
+    fn predefined_catalog_distinguishes_mac_and_large_memory_gpu_capacity() {
+        let state = qualification_fixture();
+        let mut node = state.nodes["qualified"].clone();
+        let mut model = ControlPlaneState::model_inventory(&node)[0].clone();
+        model.name = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit".into();
+        model.quantization = None; model.estimated_vram_mb = None; model.context_tokens=Some(131072);
+        node.worker_health.as_mut().unwrap().capabilities.usable_memory_mb=Some(52428);
+        let mac=crate::admission_profile::AdmissionProfile::detected(&node,&model);
+        node.worker_health.as_mut().unwrap().capabilities.usable_memory_mb=Some(104857);
+        let gpu=crate::admission_profile::AdmissionProfile::detected(&node,&model);
+        assert_eq!(mac.model_class,"coding_expert"); assert_eq!(mac.model_class,gpu.model_class);
+        assert_eq!(mac.node_class,"workstation"); assert_eq!(gpu.node_class,"large_memory");
+        assert_eq!(mac.context_tokens,8192); assert_eq!(gpu.context_tokens,16384);
+        assert_eq!(mac.max_parallel_jobs,1); assert_eq!(gpu.max_parallel_jobs,1);
+        model.name="qwen3-coder".into();
+        let alias=crate::admission_profile::AdmissionProfile::detected(&node,&model);
+        assert_eq!(alias.model_class,"coding_family");assert_eq!(alias.context_tokens,4096);
+        assert!(!alias.capabilities.iter().any(|c|c=="large_coding"));
+        model.name="unknown-coder-giant".into();
+        let unknown=crate::admission_profile::AdmissionProfile::detected(&node,&model);
+        assert_eq!(unknown.context_tokens,2048); assert!(!unknown.capabilities.iter().any(|c|c=="coding"));
+    }
+
+    #[test]
+    fn short_readiness_admits_chat_before_deep_tests_and_prioritizes_customers() {
+        let mut state=qualification_fixture();
+        let chat_id=state.nodes["qualified"].trust.qualification.as_ref().unwrap().probes[0].job_id.clone();
+        assert!(state.jobs[&chat_id].stream);
+        state.record_qualification_delta("qualified",&chat_id);
+        let nonce=probe_nonce(&state,"chat"); finish_probe(&mut state,"chat",nonce,false);
+        let q=state.nodes["qualified"].trust.qualification.as_ref().unwrap();
+        assert_eq!(q.status(),"admitted"); assert!(q.streaming_ready());
+        assert!(q.context_limit().is_some()); assert!(q.tested_context_tokens.is_none());
+        assert!(!q.allows("native_tool_calls_v1")); assert!(!q.allows("vision"));
+        let audit=q.probes.iter().find(|p|p.kind=="context").unwrap().job_id.clone();
+        assert!(!state.jobs.contains_key(&audit));
+        state.refresh_qualification("qualified","200");
+        assert!(state.jobs.contains_key(&audit));
+        let request:JobRequest=serde_json::from_value(serde_json::json!({
+            "request_id":"customer-first","prompt":"Hello","preferred_backend":"m",
+            "runtime_mode":"local","execution_mode":"single","stream":true,"max_tokens":64
+        })).unwrap();
+        let job=state.submit_job(request,"104".into());
+        assert_eq!(state.claim_job("qualified","104".into()).job.unwrap().job_id,job.job_id);
+        assert_eq!(state.nodes["qualified"].trust.completed_jobs,0);
+    }
+
+    #[test]
+    fn failed_background_coding_downgrades_predefined_capabilities() {
+        let mut state=qualification_fixture();
+        let nonce=probe_nonce(&state,"chat");finish_probe(&mut state,"chat",nonce,false);
+        let mut node=state.nodes["qualified"].clone();
+        node.worker_health.as_mut().unwrap().capabilities.usable_memory_mb=Some(52428);
+        let mut model=ControlPlaneState::model_inventory(&node)[0].clone();
+        model.name="Qwen/Qwen3-Coder-30B-A3B-Instruct-4bit".into();
+        model.context_tokens=Some(32768);model.estimated_vram_mb=None;model.quantization=None;
+        let q=state.nodes.get_mut("qualified").unwrap().trust.qualification.as_mut().unwrap();
+        q.admission_profile=Some(crate::admission_profile::AdmissionProfile::detected(&node,&model));
+        assert!(q.allows("large_coding"));
+        q.probes.iter_mut().find(|p|p.kind=="coding_basic").unwrap().status="failed".into();
+        assert!(!q.allows("coding"));assert!(!q.allows("large_coding"));
+    }
+
+    #[test]
+    fn admission_policy_migration_preserves_prior_passes_failures_and_history() {
+        let mut state=qualification_fixture();
+        let nonce=probe_nonce(&state,"chat");finish_probe(&mut state,"chat",nonce,false);
+        let nonce=probe_nonce(&state,"context");finish_probe(&mut state,"context",nonce,true);
+        finish_probe(&mut state,"coding_basic","invalid expression".into(),false);
+        let node=state.nodes["qualified"].clone();
+        let model=ControlPlaneState::model_inventory(&node)[0].clone();
+        let trust=&mut state.nodes.get_mut("qualified").unwrap().trust;
+        trust.completed_jobs=7;trust.failed_jobs=2;
+        let q=trust.qualification.as_mut().unwrap();
+        q.fingerprint=crate::qualification::legacy_fingerprint(&node,&model);q.admission_profile=None;
+        let measured=q.tested_context_tokens;
+        state.refresh_qualification("qualified","200");
+        let trust=&state.nodes["qualified"].trust;
+        let q=trust.qualification.as_ref().unwrap();
+        assert!(q.admission_profile.is_some());assert!(q.passed("chat"));assert!(q.passed("context"));
+        assert_eq!(q.tested_context_tokens,measured);assert!(!q.allows("coding"));
+        assert_eq!(trust.completed_jobs,7);assert_eq!(trust.failed_jobs,2);
+    }
+
+    #[test]
     fn qualification_probes_are_targeted_and_cannot_self_qualify_by_tags() {
         let mut state = qualification_fixture();
         state.register(m_series_registration("other"));
@@ -9424,6 +9531,7 @@ mod tests {
     }
 
     fn finish_probe(state: &mut ControlPlaneState, kind: &str, output: String, measured: bool) {
+        state.refresh_qualification("qualified", "200");
         let id = state.nodes["qualified"].trust.qualification.as_ref().unwrap().probes.iter().find(|p| p.kind == kind).unwrap().job_id.clone();
         let job = state.jobs.get_mut(&id).unwrap();
         job.assigned_node_id = Some("qualified".into()); job.status = JobStatus::Assigned; job.assigned_at = Some("101".into());
