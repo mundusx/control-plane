@@ -10,5 +10,8 @@ test('allows repeated code, short labels, and separate mentions', () => {
   assert.doesNotThrow(() => assertNoRepetition('```js\n' + section.repeat(5) + '\n```'));
   assert.doesNotThrow(() => assertNoRepetition('Note: '.repeat(20)));
   assert.doesNotThrow(() => assertNoRepetition('x'.repeat(9000)));
+  assert.doesNotThrow(() => assertNoRepetition('```js\n' + section.repeat(100) + '\n```'));
+  assert.doesNotThrow(() => assertNoRepetition('~~~text\n' + section.repeat(100)));
+  assert.doesNotThrow(() => assertNoRepetition(('https://example.com/long-professional-profile-and-company-background\n'.repeat(4)).repeat(3)));
   assert.doesNotThrow(() => assertNoRepetition(section + 'Another explanation.' + section));
 });
