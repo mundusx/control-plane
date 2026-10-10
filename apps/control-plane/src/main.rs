@@ -1276,9 +1276,10 @@ fn render_node_classification(node: &NodeRecord) -> String {
     let predefined = node.trust.qualification.as_ref().and_then(|q|q.admission_profile.clone()).or_else(||
         node.worker_health.as_ref().and_then(|h|h.capabilities.models.iter().find(|m|m.active).or_else(||h.capabilities.models.first()))
             .map(|model|crate::admission_profile::AdmissionProfile::detected(node,model)));
-    let classification_html=predefined.as_ref().map(|p|format!(r#"<div class="meta"><strong>Predefined classification:</strong> {} / {}<br>Starting context: {} tokens · one job · estimated, not benchmarked</div>"#,
+    let classification_html=predefined.as_ref().map(|p|format!(r#"<div class="meta"><strong>Predefined classification:</strong> {} / {}<br>Catalog context estimate: {} tokens · estimated, not benchmarked</div>"#,
         escape_html(&p.node_class),escape_html(&p.model_class),p.context_tokens)).unwrap_or_default();
     let qualification_html = match node.trust.qualification.as_ref() {
+        Some(_q) if !node.trust.qualification_enforced() => r#"<div class="meta">Admission: reported runtime health · automatic model tests disabled</div>"#.to_string(),
         Some(q) => {
             let passed = q.probes.iter().filter(|p| p.status == "passed").map(|p| p.kind.as_str()).collect::<Vec<_>>().join(", ");
             let results = q.probes.iter().map(|p| format!("{}: {}{}", p.kind, p.status,
@@ -1288,7 +1289,7 @@ fn render_node_classification(node: &NodeRecord) -> String {
                 escape_html(&passed), q.tested_context_tokens.map(|n| format!("{n} tokens")).unwrap_or_else(|| "not measured".into()), escape_html(&results))
         }
         None => format!(r#"<div class="meta"><strong>Qualification:</strong> {} &middot; capability claims remain untested</div>"#,
-            if node.trust.qualification_enforced() { "awaiting healthy runtime" } else { "existing contributor awaiting audit" }),
+            if node.trust.qualification_enforced() { "awaiting healthy runtime" } else { "reported runtime health; automatic model tests disabled" }),
     };
     format!(
         r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}{classification_html}{qualification_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">reported roles: {roles}</div><div class="meta">reported tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
@@ -10173,7 +10174,8 @@ fn main() {
             )
         }
     };
-    restored_state.qualification_enabled = std::env::var("MUNDUSX_QUALIFICATION_MODE").ok().as_deref() == Some("gradual");
+    // Contributor admission uses reported runtime health; never launch model tests.
+    restored_state.qualification_enabled = false;
     restored_state.reconcile_admission_policy();
     restored_state.ensure_job_totals_from_hot_history();
     let state = Arc::new(Mutex::new(restored_state));
