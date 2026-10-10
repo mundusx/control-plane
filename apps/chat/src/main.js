@@ -8117,8 +8117,8 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       // spending tens of seconds in hidden reasoning before its first token.
       { role: "user", content: liveChatRuntimeMessage(message) },
     ],
-    temperature: typeof body?.temperature === "number" ? body.temperature : 0.2,
-    top_p: typeof body?.topP === "number" ? body.topP : 0.9,
+    temperature: typeof body?.temperature === "number" ? body.temperature : undefined,
+    top_p: typeof body?.topP === "number" ? body.topP : undefined,
     max_tokens: initialMaxTokens,
   };
   if (model) requestBody.model = model;
@@ -9443,8 +9443,8 @@ function buildGenericJobBody(message, config, options = {}) {
       options.codeTransformationFollowUp,
     ),
     max_tokens_source: options.maxTokensSource === "explicit" ? "explicit" : "auto",
-    temperature: typeof options.temperature === "number" ? options.temperature : 0.2,
-    top_p: typeof options.topP === "number" ? options.topP : 0.9,
+    temperature: typeof options.temperature === "number" ? options.temperature : undefined,
+    top_p: typeof options.topP === "number" ? options.topP : undefined,
   };
   if (model) {
     jobBody.model = model;
