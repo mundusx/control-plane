@@ -1258,14 +1258,15 @@ fn render_node_classification(node: &NodeRecord) -> String {
     } else if models.is_empty() {
         r#"<div class="meta">Awaiting model advertisement; task suitability unknown</div>"#.to_string()
     } else {
-        let model_html = models.iter().map(|model| {
+        let model_html = models.iter().map(|reported| {
+            let model = crate::qualification::advertised_model(node, reported);
             let tasks = if model.task_capabilities.is_empty() {
-                "task skills not reported".to_string()
+                "no admitted task capabilities".to_string()
             } else { model.task_capabilities.join(", ") };
             let context = model.context_tokens.map(|tokens| format!("{tokens} tokens"))
                 .unwrap_or_else(|| "not reported".to_string());
-            format!(r#"<div class="meta"><strong>Model:</strong> {}<br>Advertised tasks: {}<br>Context: {} &middot; tools: {} &middot; vision: {} &middot; embeddings: {}</div>"#,
-                escape_html(&model.name), escape_html(&tasks), escape_html(&context),
+            format!(r#"<div class="meta"><strong>Model:</strong> {}<br>Reported tasks: {}<br>Advertised tasks: {}<br>Context: {} &middot; tools: {} &middot; vision: {} &middot; embeddings: {}</div>"#,
+                escape_html(&model.name), escape_html(&reported.task_capabilities.join(", ")), escape_html(&tasks), escape_html(&context),
                 if model.supports_tools { "advertised" } else { "not advertised" },
                 if model.supports_vision { "advertised" } else { "not advertised" },
                 if model.supports_embeddings { "advertised" } else { "not advertised" })
@@ -1283,14 +1284,14 @@ fn render_node_classification(node: &NodeRecord) -> String {
             let results = q.probes.iter().map(|p| format!("{}: {}{}", p.kind, p.status,
                 p.reason.as_ref().map(|r| format!(" ({r})")).unwrap_or_default())).collect::<Vec<_>>().join("; ");
             format!(r#"<div class="meta"><strong>Qualification:</strong> {} &middot; {}<br>Passed probes: {}<br>Measured context exercised: {} &middot; network slot limit: 1<details><summary>Probe results</summary>{}</details></div>"#,
-                q.status(), if node.trust.qualification_required { "enforced" } else { "existing contributor audit" },
+                q.status(), if node.trust.qualification_enforced() { "enforced" } else { "existing contributor audit" },
                 escape_html(&passed), q.tested_context_tokens.map(|n| format!("{n} tokens")).unwrap_or_else(|| "not measured".into()), escape_html(&results))
         }
         None => format!(r#"<div class="meta"><strong>Qualification:</strong> {} &middot; capability claims remain untested</div>"#,
-            if node.trust.qualification_required { "awaiting healthy runtime" } else { "existing contributor awaiting audit" }),
+            if node.trust.qualification_enforced() { "awaiting healthy runtime" } else { "existing contributor awaiting audit" }),
     };
     format!(
-        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}{classification_html}{qualification_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">advertised roles: {roles}</div><div class="meta">declared tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
+        r#"<div class="classification"><strong>{node_type}</strong><div class="meta">Last advertised profile &middot; {memory}</div>{model_html}{classification_html}{qualification_html}<div class="meta">Skills are capability claims, not measured answer quality.</div><details><summary class="meta">Runtime and execution details</summary><div class="meta">capacity tier: {capacity} (not machine count)</div><div class="meta">last reported runtime: {runtime}</div><div class="meta">reported roles: {roles}</div><div class="meta">reported tools: {tools}</div><div class="meta"><strong>authority:</strong> {authority}</div></details></div>"#,
         node_type = escape_html(node_type), memory = escape_html(&memory),
         capacity = escape_html(capacity), runtime = escape_html(runtime),
         roles = escape_html(&roles), tools = escape_html(&tools),
@@ -10173,6 +10174,7 @@ fn main() {
         }
     };
     restored_state.qualification_enabled = std::env::var("MUNDUSX_QUALIFICATION_MODE").ok().as_deref() == Some("gradual");
+    restored_state.reconcile_admission_policy();
     restored_state.ensure_job_totals_from_hot_history();
     let state = Arc::new(Mutex::new(restored_state));
     let live_streams = Arc::new(Mutex::new(chat_gateway::LiveStreamRegistry::default()));
@@ -11576,8 +11578,8 @@ mod tests {
         assert!(html.contains("Model:</strong> test-model"));
         assert!(html.contains("Advertised tasks: large_coding"));
         assert!(html.contains("Context: 32768 tokens"));
-        assert!(html.contains("advertised roles: chat, coding"));
-        assert!(html.contains("declared tools: repository"));
+        assert!(html.contains("reported roles: chat, coding"));
+        assert!(html.contains("reported tools: repository"));
         assert!(html.contains("authority:</strong> inference only; no filesystem authority"));
         assert!(html.contains("completed 10 &middot; failed 0 &middot; consecutive failures 0"));
         assert!(

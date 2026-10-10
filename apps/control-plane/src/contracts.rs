@@ -1650,6 +1650,11 @@ impl Default for NodeTrustRecord {
 }
 
 impl NodeTrustRecord {
+    /// Existing audit evidence governs advertisements and routing too.
+    pub fn qualification_enforced(&self) -> bool {
+        self.qualification_required || self.qualification.is_some()
+    }
+
     pub fn reliability_score(&self) -> u8 {
         let recent: Vec<bool> = self.recent_execution_outcomes.iter().filter_map(|value| *value).collect();
         // Preserve a meaningful legacy baseline until ten new eligible outcomes
