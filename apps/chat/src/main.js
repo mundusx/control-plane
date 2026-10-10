@@ -8341,7 +8341,7 @@ export async function relayControlPlaneOpenAiStream(
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
     await hooks.onInterrupted?.({ content, completionId, finishReason, error });
-    const message = `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
+    const message = error.code === "mundusx_repetition_detected" ? error.message : `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
       cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
@@ -8683,7 +8683,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
     await hooks.onInterrupted?.({ content, completionId, finishReason, error });
-    const message = `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
+    const message = error.code === "mundusx_repetition_detected" ? error.message : `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
       cause: error.cause?.code ?? error.code ?? null, finishReason }));
     if (!response.writableEnded) {
