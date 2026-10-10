@@ -102,7 +102,7 @@ impl Qualification {
             .map(|p| if self.failed("context") {p.context_tokens.min(1024)} else {p.context_tokens.min(self.configured_context_tokens)}))
     }
     pub fn streaming_ready(&self) -> bool {
-        self.passed("streaming") || self.probes.iter().any(|p|p.kind=="chat" && p.status=="passed" && p.stream_observed)
+        !self.failed("streaming") && (self.passed("streaming") || self.probes.iter().any(|p|p.kind=="chat" && p.status=="passed" && p.stream_observed))
     }
     fn predefined(&self, capability: &str) -> bool {
         self.passed("chat") && self.admission_profile.as_ref().is_some_and(|p|p.capabilities.iter().any(|c|c==capability))
@@ -167,6 +167,32 @@ impl Qualification {
             _ => format!("Return exactly {} and nothing else.", probe.nonce),
         }
     }
+}
+
+/// Public capability view. Raw contributor claims remain available separately.
+pub fn advertised_model(node: &NodeRecord, reported: &ModelCapability) -> ModelCapability {
+    let mut model = reported.clone();
+    if !node.trust.qualification_enforced() { return model; }
+    let qualification = node.trust.qualification.as_ref().filter(|q|
+        q.model == reported.name && node.worker_health.as_ref().is_some_and(|_| q.fingerprint == fingerprint(node, reported)));
+    if let Some(q) = qualification {
+        for capability in ["chat", "coding", "coding_basic", "small_coding", "medium_coding", "large_coding"] {
+            if q.allows(capability) && !model.task_capabilities.iter().any(|c| c == capability) {
+                model.task_capabilities.push(capability.into());
+            }
+        }
+        model.task_capabilities.retain(|c| q.allows(c));
+        model.capability_scores.retain(|c| q.allows(&c.capability));
+        model.roles.retain(|r| q.allows(r.as_str()));
+        model.context_tokens = q.context_limit();
+        model.supports_tools = reported.supports_tools && q.allows("native_tool_calls_v1");
+        model.supports_vision = reported.supports_vision && q.allows("vision");
+    } else {
+        model.task_capabilities.clear(); model.capability_scores.clear(); model.roles.clear();
+        model.context_tokens = None; model.supports_tools = false; model.supports_vision = false;
+    }
+    model.supports_embeddings = false;
+    model
 }
 
 pub fn validate(probe: &Probe, output: &str) -> Result<(), String> {

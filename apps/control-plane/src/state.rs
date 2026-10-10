@@ -1099,7 +1099,7 @@ impl ControlPlaneState {
             let Some(health) = node.worker_health.as_ref() else {
                 continue;
             };
-            let reported_slots = if node.trust.qualification_required { 1 } else { u32::from(health.parallel_slots.max(1))
+            let reported_slots = if node.trust.qualification_enforced() { 1 } else { u32::from(health.parallel_slots.max(1))
                 .min(health.capabilities.max_parallel_jobs.max(1)) };
             let active = self.active_assignment_count_for_node(&node.node_id) as u32;
             let free_slots = reported_slots.saturating_sub(active);
@@ -1111,22 +1111,23 @@ impl ControlPlaneState {
                 .entry(Self::capacity_class_for(node).as_str().to_string())
                 .or_default() += 1;
             for role in &health.capabilities.roles {
-                if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(role.as_str())) { continue; }
+                if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(role.as_str())) { continue; }
                 *role_counts.entry(role.as_str().to_string()).or_default() += 1;
             }
             for tool in &health.capabilities.supported_tools {
-                if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(tool)) { continue; }
+                if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(tool)) { continue; }
                 let normalized = tool.trim().to_ascii_lowercase();
                 if !normalized.is_empty() && normalized.len() <= 64 {
                     *tool_counts.entry(normalized).or_default() += 1;
                 }
             }
-            for model in &health.capabilities.models {
-                if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| q.model != model.name) { continue; }
+            for reported in &health.capabilities.models {
+                let model = crate::qualification::advertised_model(node, reported);
+                if node.trust.qualification_enforced() && model.task_capabilities.is_empty() { continue; }
                 servable_models = servable_models.saturating_add(1);
                 let mut available_capabilities = BTreeSet::<String>::new();
                 for capability in &model.task_capabilities {
-                    if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(capability)) { continue; }
+                    if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(capability)) { continue; }
                     let normalized = capability.trim().to_ascii_lowercase();
                     if !normalized.is_empty() && normalized.len() <= 64 {
                         *model_capability_counts
@@ -1138,7 +1139,7 @@ impl ControlPlaneState {
                     }
                 }
                 for capability in &model.capability_scores {
-                    if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(&capability.capability)) { continue; }
+                    if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q| !q.allows(&capability.capability)) { continue; }
                     let normalized = capability.capability.trim().to_ascii_lowercase();
                     if free_slots > 0
                         && capability.score >= 50
@@ -1155,7 +1156,7 @@ impl ControlPlaneState {
                 }
             }
             max_context_tokens =
-                max_context_tokens.max(health.capabilities.max_context_tokens.unwrap_or_default());
+                max_context_tokens.max(if node.trust.qualification_enforced() {node.trust.qualification.as_ref().and_then(|q|q.context_limit()).unwrap_or_default()} else {health.capabilities.max_context_tokens.unwrap_or_default()});
             eligible_parallel_slots = eligible_parallel_slots.saturating_add(free_slots);
         }
 
@@ -1442,7 +1443,7 @@ impl ControlPlaneState {
                     .min(health.capabilities.max_parallel_jobs.max(1) as usize)
             })
             .unwrap_or(1);
-        let total=if node.trust.qualification_required || node.trust.qualification.as_ref().is_some_and(|q|q.status()=="testing") {1}else{reported_total};
+        let total=if node.trust.qualification_enforced() || node.trust.qualification.as_ref().is_some_and(|q|q.status()=="testing") {1}else{reported_total};
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
             self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
@@ -1457,7 +1458,7 @@ impl ControlPlaneState {
     }
 
     fn node_parallel_capacity_for_job(node: &NodeRecord, job: &JobRecord) -> usize {
-        if node.trust.qualification_required || node.trust.qualification.as_ref().is_some_and(|q| q.status() == "testing") {
+        if node.trust.qualification_enforced() || node.trust.qualification.as_ref().is_some_and(|q| q.status() == "testing") {
             return 1;
         }
         let Some(worker_health) = node.worker_health.as_ref() else {
@@ -1611,7 +1612,7 @@ impl ControlPlaneState {
         if request.stream && !worker_health.streaming_supported {
             return false;
         }
-        if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q|
+        if node.trust.qualification_enforced() && node.trust.qualification.as_ref().is_none_or(|q|
             !q.passed("chat") || q.context_limit().is_none() || (request.stream && !q.streaming_ready())) {
             return false;
         }
@@ -1849,7 +1850,7 @@ impl ControlPlaneState {
                 q.is_probe(job) && q.model == model.name
                     && q.fingerprint == crate::qualification::fingerprint(node, model));
         }
-        if node.trust.qualification_required {
+        if node.trust.qualification_enforced() {
             let Some(q) = node.trust.qualification.as_ref() else { return false; };
             if q.model != model.name || q.fingerprint != crate::qualification::fingerprint(node, model)
                 || !q.passed("chat") || (job.stream && !q.streaming_ready()) {
@@ -1868,6 +1869,8 @@ impl ControlPlaneState {
                 }
             }
         }
+        let advertised = crate::qualification::advertised_model(node, model);
+        let model = &advertised;
         if model.name.trim().is_empty()
             || model
                 .task_capabilities
@@ -1895,7 +1898,7 @@ impl ControlPlaneState {
         let workload = Self::graph_workload(job, active_graph_node_id);
         let context_bound_output = model.output_capacity_mode.as_deref() == Some("context_window");
         let demand = Self::context_demand_for_job(job, active_graph_node_id);
-        let required_context = if context_bound_output {
+        let required_context = if context_bound_output || node.trust.qualification_enforced() {
             demand.required_context_tokens
         } else {
             workload
@@ -2530,22 +2533,19 @@ impl ControlPlaneState {
                 blocked.push("runtime_unavailable");
             }
             if free == 0 { blocked.push("no_free_slots"); }
-            if node.trust.qualification_required && node.trust.qualification.as_ref().is_none_or(|q| !q.passed("chat") || q.context_limit().is_none()) {
+            if node.trust.qualification_enforced() && !Self::model_inventory(node).iter().any(|reported| {
+                let model = crate::qualification::advertised_model(node, reported);
+                model.task_capabilities.iter().any(|c| c == "chat") && model.context_tokens.is_some()
+            }) {
                 blocked.push("qualification_pending_or_failed");
             }
             let available = blocked.is_empty();
             let models = Self::model_inventory(node).into_iter().map(|mut model| {
                 let detected_model = model.clone();
-                if node.trust.qualification_required {
-                    if let Some(q) = node.trust.qualification.as_ref().filter(|q| q.model == model.name) {
-                        model.task_capabilities.retain(|c| q.allows(c));
-                        model.capability_scores.retain(|c| q.allows(&c.capability));
-                        model.roles.retain(|r| q.allows(r.as_str()));
-                        model.context_tokens = q.context_limit();
-                        model.supports_tools = q.allows("native_tool_calls_v1");
-                    } else { model.task_capabilities.clear(); model.capability_scores.clear(); model.roles.clear(); model.context_tokens = None; model.supports_tools = false; }
-                    model.supports_vision = node.trust.qualification.as_ref().is_some_and(|q| q.model == model.name && q.allows("vision")); model.supports_embeddings = false;
-                }
+                model = crate::qualification::advertised_model(node, &detected_model);
+                let streaming_supported = node.worker_health.as_ref().is_some_and(|h| h.streaming_supported)
+                    && (!node.trust.qualification_enforced() || (model.task_capabilities.iter().any(|c| c == "chat")
+                        && node.trust.qualification.as_ref().is_some_and(|q| q.streaming_ready())));
                 let tasks = model.task_capabilities.iter().chain(model.capability_scores.iter().map(|score| &score.capability))
                     .collect::<BTreeSet<_>>().into_iter().map(|task| {
                         let stats = self.recent_task_node_performance(&node.node_id, Some(&model.name), task);
@@ -2555,7 +2555,7 @@ impl ControlPlaneState {
                             "completed_samples":stats.completed_samples, "failed_samples":stats.failed_samples,
                             "mean_latency_ms": if stats.latency_samples > 0 {Some(stats.total_latency_ms / u64::from(stats.latency_samples))} else {None}})
                     }).collect::<Vec<_>>();
-                serde_json::json!({"model": model, "predefined_classification":crate::admission_profile::AdmissionProfile::detected(node,&detected_model), "detected_model":detected_model, "qualification":node.trust.qualification, "qualification_enforced":node.trust.qualification_required, "task_assessments":tasks})
+                serde_json::json!({"model": model, "streaming_supported":streaming_supported, "predefined_classification":crate::admission_profile::AdmissionProfile::detected(node,&detected_model), "detected_model":detected_model, "qualification":node.trust.qualification, "qualification_enforced":node.trust.qualification_enforced(), "task_assessments":tasks})
             }).collect::<Vec<_>>();
             serde_json::json!({"node_id":node.node_id,"state":node.state,"updated_at":node.updated_at,
                 "available":available,"blocked_reasons":blocked,"total_slots":total,
@@ -9010,6 +9010,18 @@ fn normalize_node_path(value: &str) -> String {
 }
 
 impl ControlPlaneState {
+    /// Apply the admission policy to restored contributors without replacing evidence.
+    pub fn reconcile_admission_policy(&mut self) {
+        if !self.qualification_enabled { return; }
+        for node in self.nodes.values_mut() {
+            if node.worker_health.as_ref().is_some_and(|h| h.runtime_mode == "media") { continue; }
+            if !node.trust.qualification_required {
+                node.trust.qualification_required = true;
+                node.trust.revision = node.trust.revision.saturating_add(1);
+            }
+        }
+    }
+
     pub fn refresh_qualification(&mut self, node_id: &str, now: &str) {
         if !self.qualification_enabled { return; }
         let Some(node) = self.nodes.get(node_id).cloned() else { return; };
@@ -9588,13 +9600,74 @@ mod tests {
     }
 
     #[test]
-    fn existing_contributor_is_audited_without_immediate_enforcement() {
+    fn existing_contributor_audit_evidence_is_enforced_without_resetting_history() {
         let mut state = ControlPlaneState::default();
         state.register(m_series_registration("qualified"));
         state.qualification_enabled = true;
         state.heartbeat(ready_heartbeat("qualified", "100"), "100".into());
         assert!(state.nodes["qualified"].trust.qualification.is_some());
         assert!(!state.nodes["qualified"].trust.qualification_required);
+        assert!(state.nodes["qualified"].trust.qualification_enforced());
+    }
+
+    #[test]
+    fn legacy_advertisements_dashboard_and_routing_share_retained_evidence() {
+        let mut state = qualification_fixture();
+        let node = state.nodes.get_mut("qualified").unwrap();
+        node.trust.qualification_required = false;
+        node.trust.completed_jobs = 56; node.trust.failed_jobs = 19;
+        let mut reported = ControlPlaneState::model_inventory(node)[0].clone();
+        reported.context_tokens = Some(131072); reported.supports_tools = true;
+        reported.task_capabilities = vec!["chat", "coding", "medium_coding", "large_coding", "tool_use", "research"].into_iter().map(String::from).collect();
+        node.worker_health.as_mut().unwrap().capabilities.models = vec![reported.clone()];
+        let mut q = crate::qualification::Qualification::detected(node, &reported, "100");
+        q.tested_context_tokens = Some(16384);
+        for p in &mut q.probes {
+            p.status = if ["native_tools", "tool_result", "streaming", "coding_large"].contains(&p.kind.as_str()) {"failed"} else {"passed"}.into();
+            p.stream_observed = p.kind == "chat";
+        }
+        // Include a retained failed large-coding result even on a small fixture.
+        let mut failed = q.probes[0].clone(); failed.kind = "coding_large".into(); failed.status = "failed".into(); q.probes.push(failed);
+        node.trust.qualification = Some(q.clone());
+        let model = crate::qualification::advertised_model(node, &reported);
+        assert_eq!(model.context_tokens, Some(16384));
+        assert!(model.task_capabilities.iter().any(|c| c == "medium_coding"));
+        assert!(!model.task_capabilities.iter().any(|c| ["tool_use", "research", "large_coding"].contains(&c.as_str())));
+        assert!(!model.supports_tools); assert!(!q.streaming_ready());
+        let html = crate::render_node_classification(node);
+        assert!(html.contains("Reported tasks: chat, coding, medium_coding, large_coding, tool_use, research"));
+        assert!(html.contains("Context: 16384 tokens")); assert!(html.contains("tools: not advertised"));
+        let request: JobRequest = serde_json::from_value(serde_json::json!({"request_id":"legacy-chat","prompt":"Hello","preferred_backend":"m","runtime_mode":"local","execution_mode":"single","max_tokens":64})).unwrap();
+        let job = state.submit_job(request.clone(), "104".into());
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"], &job));
+        let mut streaming = request; streaming.request_id = "legacy-stream".into(); streaming.stream = true;
+        let job = state.submit_job(streaming, "104".into());
+        assert!(!ControlPlaneState::node_can_run_job(&state.nodes["qualified"], &job));
+        let directory = state.node_capability_directory(104);
+        let item = &directory["items"][0]["models"][0];
+        assert_eq!(item["qualification_enforced"], true);
+        assert_eq!(item["streaming_supported"], false);
+        assert_eq!(item["model"]["context_tokens"], 16384);
+        assert_eq!(item["detected_model"]["context_tokens"], 131072);
+        assert_eq!(state.nodes["qualified"].trust.completed_jobs, 56);
+        assert_eq!(state.nodes["qualified"].trust.failed_jobs, 19);
+        assert_eq!(state.nodes["qualified"].trust.qualification.as_ref().unwrap(), &q);
+        let mut waiting = state.nodes["qualified"].clone();
+        waiting.node_id = "waiting".into(); waiting.trust.qualification = None;
+        state.nodes.insert("waiting".into(), waiting.clone());
+        waiting.node_id = "media".into(); waiting.worker_health.as_mut().unwrap().runtime_mode = "media".into();
+        state.nodes.insert("media".into(), waiting);
+        state.reconcile_admission_policy();
+        assert!(state.nodes["waiting"].trust.qualification_required);
+        assert!(!state.nodes["media"].trust.qualification_required);
+        let revision = state.nodes["waiting"].trust.revision;
+        state.reconcile_admission_policy();
+        assert_eq!(state.nodes["waiting"].trust.revision, revision);
+        assert!(state.nodes["qualified"].trust.qualification_required);
+        assert_eq!(state.nodes["qualified"].trust.completed_jobs, 56);
+        assert_eq!(state.nodes["qualified"].trust.qualification.as_ref().unwrap(), &q);
+        let mut changed = reported; changed.name = "different-model".into();
+        assert!(crate::qualification::advertised_model(&state.nodes["qualified"], &changed).task_capabilities.is_empty());
     }
 
     #[test]

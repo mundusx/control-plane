@@ -26,7 +26,12 @@ Deeper context/coding audits start after a 60-second admission grace period and
 yield to eligible queued customer work and recent work on the node. Once a probe
 is running it finishes normally; it is not preempted by a new customer request.
 Failed audits lower allowed capabilities/context; completed measurements can
-replace starting estimates. Existing contributors retain their audit policy.
+replace starting estimates. When qualification rollout is enabled, restored contributors also require
+readiness; media nodes retain their separate policy. Existing contributors with
+audit evidence use the same limits for routing and
+public advertisements. Their reported claims remain visible separately; counters,
+probe results, and measured context are preserved. A failed streaming audit
+overrides an earlier streamed readiness response.
 
 The admission-policy migration preserves prior successful and failed tests for
 the exact same configuration. Pending old probes are replaced with fresh IDs;
