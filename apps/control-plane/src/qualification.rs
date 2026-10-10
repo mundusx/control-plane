@@ -172,7 +172,7 @@ impl Qualification {
 /// Public capability view. Raw contributor claims remain available separately.
 pub fn advertised_model(node: &NodeRecord, reported: &ModelCapability) -> ModelCapability {
     let mut model = reported.clone();
-    if !node.trust.qualification_enforced() { return model; }
+    if !node.trust.qualification_enforced() { return crate::capability_policy::advertised_model(node, reported); }
     let qualification = node.trust.qualification.as_ref().filter(|q|
         q.model == reported.name && node.worker_health.as_ref().is_some_and(|_| q.fingerprint == fingerprint(node, reported)));
     if let Some(q) = qualification {

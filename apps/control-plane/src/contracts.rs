@@ -1607,6 +1607,8 @@ pub struct NodePolicyOverrideInput {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NodeTrustRecord {
+    pub capability_policy_enabled: bool,
+    pub capability_policy: Option<crate::capability_policy::Override>,
     pub revision: u64,
     pub qualification_required: bool,
     pub qualification: Option<crate::qualification::Qualification>,
@@ -1631,6 +1633,8 @@ impl Default for NodeTrustRecord {
     fn default() -> Self {
         Self {
             revision: 0,
+            capability_policy_enabled: false,
+            capability_policy: None,
             qualification_required: false,
             qualification: None,
             recent_execution_outcomes: Vec::new(),
