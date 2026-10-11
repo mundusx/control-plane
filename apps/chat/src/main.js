@@ -56,7 +56,7 @@ export { localProjectAuthority };
 
 const DEFAULT_CONTROL_PLANE_URL = "https://control.mundusx.ai";
 const LEGACY_CONTROL_PLANE_URL = "https://mundusx.ai";
-const DEFAULT_TIMEOUT_SECONDS = 90;
+const DEFAULT_TIMEOUT_SECONDS = 300;
 const DEFAULT_TOOL_PLANNER_TIMEOUT_SECONDS = 12;
 const DEFAULT_WEATHER_TTL_SECONDS = 7200;
 const DEFAULT_WEATHER_URL = "https://wttr.in";
@@ -4977,7 +4977,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       let completionId = response.headers.get("x-mundusx-completion-id") || null;
       let finishReason = null;
       let sawDone = false;
-      const firstTokenDeadline = Date.now() + 90000;
+      const firstTokenDeadline = Date.now() + 300000;
       let unpaintedDeltaCharacters = 0;
 
       const yieldToStreamPaint = () => new Promise((resolve) => {
@@ -4992,7 +4992,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         if (output) return reader.read();
         const remaining = firstTokenDeadline - Date.now();
         if (remaining <= 0) {
-          throw new Error("MundusX did not produce a first token within 90 seconds");
+          throw new Error("MundusX did not produce a first token within 5 minutes");
         }
         let timeoutId;
         try {
@@ -5000,7 +5000,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             reader.read(),
             new Promise((_, reject) => {
               timeoutId = window.setTimeout(() => {
-                reject(new Error("MundusX did not produce a first token within 90 seconds"));
+                reject(new Error("MundusX did not produce a first token within 5 minutes"));
               }, remaining);
             }),
           ]);
@@ -7653,7 +7653,7 @@ const agentProviderAffinity = new Map();
 const nativeToolCapabilityCache = new Map();
 const AGENT_PROVIDER_FAILURE_THRESHOLD = 2;
 const AGENT_PROVIDER_COOLDOWN_MS = 30_000;
-const AGENT_PROVIDER_FIRST_EVENT_TIMEOUT_MS = 60_000;
+const AGENT_PROVIDER_FIRST_EVENT_TIMEOUT_MS = 300_000;
 const AGENT_PROVIDER_AFFINITY_TTL_MS = 10 * 60_000;
 const NATIVE_TOOL_CAPABILITY_TTL_MS = 60_000;
 const NATIVE_TOOL_UNAVAILABLE_TTL_MS = 5_000;

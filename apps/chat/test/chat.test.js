@@ -74,6 +74,47 @@ function plannerJobResponse(intents, jobId = "planner-test") {
   });
 }
 
+test("first-token wait survives 90 seconds and expires after five minutes", async () => {
+  const html = page(configFromEnv({}));
+  const code = html.match(/const readStreamChunk = async \(\) => \{[\s\S]*?\n      \};/)[0];
+  const run = new Function("reader", "window", "Date", "output", "firstTokenDeadline", `${code}; return readStreamChunk();`);
+  let now = 0;
+  let timer;
+  const window = {
+    setTimeout(callback, delay) { timer = { callback, at: now + delay }; return 1; },
+    clearTimeout() { timer = null; },
+  };
+  let resolveRead;
+  const read = new Promise((resolve) => { resolveRead = resolve; });
+  const waiting = run({ read: () => read }, window, { now: () => now }, "", 300_000);
+  let settled = false;
+  waiting.then(() => { settled = true; }, () => { settled = true; });
+  now = 120_000;
+  if (timer.at <= now) timer.callback();
+  await Promise.resolve();
+  assert.equal(settled, false, "a slow first token must survive the old 90-second deadline");
+  resolveRead({ value: "hello", done: false });
+  assert.equal((await waiting).value, "hello");
+  now = 0;
+  const expired = run({ read: () => new Promise(() => {}) }, window, { now: () => now }, "", 300_000);
+  const rejection = assert.rejects(expired, /within 5 minutes/);
+  now = 300_000;
+  assert.ok(timer.at <= now);
+  timer.callback();
+  await rejection;
+  assert.equal(configFromEnv({}).defaultTimeoutSeconds, 300);
+  assert.equal(configFromEnv({ MUNDUSX_CHAT_TIMEOUT_SECONDS: "90" }).defaultTimeoutSeconds, 90);
+});
+
+test("first-token deadline does not limit an already-started response", async () => {
+  const code = page(configFromEnv({})).match(/const readStreamChunk = async \(\) => \{[\s\S]*?\n      \};/)[0];
+  const run = new Function("reader", "window", "Date", "output", "firstTokenDeadline", `${code}; return readStreamChunk();`);
+  const result = await run({ read: async () => ({ value: "next", done: false }) }, {
+    setTimeout() { assert.fail("no first-token timer after output starts"); },
+  }, { now: () => 600_000 }, "hello", 300_000);
+  assert.equal(result.value, "next");
+});
+
 test("renders a usable chat page", () => {
   const html = page(
     configFromEnv({
@@ -282,13 +323,13 @@ test("renders a usable chat page", () => {
   assert.match(html, /streamState\.status = "waiting"/);
   assert.match(html, /Chat · Waiting for the first response token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 90000/);
+  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 300000/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
   assert.match(html, /unpaintedDeltaCharacters >= 24/);
   assert.match(html, /await yieldToStreamPaint\(\)/);
   assert.match(html, /\[chat-stream-render\]/);
   assert.match(html, /live\.textContent = output/);
-  assert.match(html, /MundusX did not produce a first token within 90 seconds/);
+  assert.match(html, /MundusX did not produce a first token within 5 minutes/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
   assert.match(html, /\/api\/chat\/stream/);
