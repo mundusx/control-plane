@@ -38,13 +38,21 @@ impl AdmissionProfile {
         let headroom = memory.saturating_sub(weight.unwrap_or(0));
         let memory_context = match headroom {0..=8191=>2048,8192..=16383=>4096,16384..=65535=>8192,_=>16384};
         let mut capabilities = vec!["chat".into()];
-        let limit = model.context_tokens.unwrap_or(2048).min(context).min(memory_context).min(if family {4096} else if expert || standard || basic {16384} else {2048});
+        // Managed MLX calculates this ceiling from cached architecture, actual
+        // weight bytes, contribution budget, KV precision and parallel slots.
+        // Served vLLM contexts are read from its runtime metadata. A catalog
+        // tier must not replace those bounded runtime contracts with 8K.
+        let runtime_context = node.worker_health.as_ref()
+            .filter(|h| matches!(h.runtime_mode.as_str(), "mlx" | "vllm"))
+            .filter(|_| model.output_capacity_mode.as_deref() == Some("context_window"))
+            .and(model.context_tokens.filter(|n| *n >= 1024));
+        let limit = runtime_context.unwrap_or_else(|| model.context_tokens.unwrap_or(2048).min(context).min(memory_context).min(if family {4096} else if expert || standard || basic {16384} else {2048}));
         if expert || standard || basic || family {
             capabilities.extend(["coding", "coding_basic", "small_coding"].map(String::from));
             if !basic && limit >= 4096 { capabilities.push("medium_coding".into()); }
             if expert && limit >= 8192 { capabilities.push("large_coding".into()); }
         }
-        Self { source:"predefined_estimate".into(), node_class:node_class.into(),
+        Self { source:if runtime_context.is_some() {"runtime_metadata"} else {"predefined_estimate"}.into(), node_class:node_class.into(),
             model_class:if expert {"coding_expert"} else if family {"coding_family"} else if standard {"coding_standard"} else if basic {"coding_basic"} else {"general_chat"}.into(),
             context_tokens:limit, estimated_model_memory_mb:weight, max_parallel_jobs:1, capabilities }
     }
