@@ -282,13 +282,13 @@ test("renders a usable chat page", () => {
   assert.match(html, /streamState\.status = "waiting"/);
   assert.match(html, /Chat · Waiting for the first response token/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
-  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 90000/);
+  assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 300000/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
   assert.match(html, /unpaintedDeltaCharacters >= 24/);
   assert.match(html, /await yieldToStreamPaint\(\)/);
   assert.match(html, /\[chat-stream-render\]/);
   assert.match(html, /live\.textContent = output/);
-  assert.match(html, /MundusX did not produce a first token within 90 seconds/);
+  assert.match(html, /MundusX did not produce a first token within 5 minutes/);
   assert.match(html, /finishReason === "error"/);
   assert.match(html, /replaced an invalid streamed draft with a validated result/);
   assert.match(html, /\/api\/chat\/stream/);
