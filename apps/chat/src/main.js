@@ -8082,17 +8082,6 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
       : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
-  // The agnostic route can select a reasoning model after this request is
-  // submitted. Its generation budget includes hidden reasoning, even when
-  // the requested visible answer is short. Preserve explicit caller limits.
-  const inferredMaxTokens = positiveInteger(body?.maxTokens, 0) > 0
-    ? inferMaxTokens(message, body.maxTokens)
-    : Math.max(1024, inferMaxTokens(message));
-  const initialMaxTokens = codeProjectContinuation
-    ? STREAMING_CONTINUATION_MAX_TOKENS
-    : codeGenerationResponse
-      ? Math.max(STREAMING_CONTINUATION_MAX_TOKENS, inferredMaxTokens)
-      : inferredMaxTokens;
   const boundedHistory = codeGenerationResponse
     ? buildCompressedHistoryContext(historyMessages, {
         currentMessage: message,
@@ -8119,7 +8108,9 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     ],
     temperature: typeof body?.temperature === "number" ? body.temperature : undefined,
     top_p: typeof body?.topP === "number" ? body.topP : undefined,
-    max_tokens: initialMaxTokens,
+    // Inferred budgets are scheduler-owned. Sending them as max_tokens makes
+    // the OpenAI gateway treat a UI default as an explicit context reservation.
+    max_tokens: positiveInteger(body?.maxTokens, 0) || undefined,
   };
   if (model) requestBody.model = model;
 
@@ -8875,7 +8866,7 @@ function buildContinuationRequestBody(currentBody, originalMessages, content, st
     // Keep enough room for the prompt and a recent code tail inside the
     // worker context window. Increasing this budget while also resending the
     // entire growing answer caused every retry to terminate at length.
-    max_tokens: Math.min(
+    max_tokens: currentBody?.max_tokens === undefined ? undefined : Math.min(
       STREAMING_CONTINUATION_MAX_TOKENS,
       Math.max(2048, previousBudget),
     ),
