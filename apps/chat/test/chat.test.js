@@ -4208,7 +4208,7 @@ test("native MundusX Chat streams complete projects as upstream deltas arrive", 
 
   await new Promise((resolve) => setImmediate(resolve));
   const submitted = JSON.parse(requests[0].init.body);
-  assert.equal(submitted.max_tokens, 6144);
+  assert.equal(submitted.max_tokens, undefined);
   assert.match(submitted.messages[0].content, /Project Structure/i);
   assert.match(submitted.messages[0].content, /You are Marie/);
   assert.equal(submitted.messages.at(-1).content, `${prompt}\n/no_think`);
@@ -4582,7 +4582,7 @@ test("normal Chat uses a context-safe code budget without node-capacity discover
     fetchImpl,
   );
 
-  assert.equal(upstreamRequest.max_tokens, 4096);
+  assert.equal(upstreamRequest.max_tokens, undefined);
   assert.match(upstreamRequest.messages[0].content, /finish every requested route/i);
   assert.match(upstreamRequest.messages.at(-1).content, /\/no_think$/);
 });
@@ -4632,8 +4632,8 @@ test("project Chat continues automatically when a streamed answer reaches its ou
   );
 
   assert.equal(requests.length, 2);
-  assert.equal(requests[0].max_tokens, 4096);
-  assert.equal(requests[1].max_tokens, 4096);
+  assert.equal(requests[0].max_tokens, undefined);
+  assert.equal(requests[1].max_tokens, undefined);
   assert.equal(requests[1].messages.at(-2).role, "assistant");
   assert.equal(requests[1].messages.at(-2).content, "const enrollment = {");
   assert.match(requests[1].messages.at(-1).content, /Continue immediately after/);
@@ -4900,7 +4900,7 @@ test("a new full-code Chat request with long history finishes across bounded res
   assert.equal(requests.length, 6);
   assert.match(requests[0].messages[1].content, /Earlier conversation compressed/);
   assert.ok(requests[0].messages.reduce((total, entry) => total + entry.content.length, 0) < 16_000);
-  assert.equal(requests[1].max_tokens, 4096);
+  assert.equal(requests[1].max_tokens, undefined);
   assert.ok(requests.at(-1).messages.at(-2).content.length <= 24_000);
   assert.ok(result.content.startsWith("segment-1:"));
   assert.ok(result.content.endsWith(`${"y".repeat(1990)}\n`));
@@ -5266,9 +5266,9 @@ test("normal Chat gives every code-generation request a full first-pass budget",
     },
   );
   assert.equal(upstreamRequests.length, 2);
-  assert.equal(upstreamRequests[0].max_tokens, 4096);
+  assert.equal(upstreamRequests[0].max_tokens, undefined);
   assert.equal(upstreamRequests[0].mode, "chat");
-  assert.equal(upstreamRequests[1].max_tokens, 4096);
+  assert.equal(upstreamRequests[1].max_tokens, undefined);
 });
 
 test("automatic continuation streams new deltas before the segment completes", async () => {
@@ -7603,8 +7603,8 @@ test("a question with no weather intent is still ignored", () => {
   assert.equal(extractWeatherLocation(null), null);
 });
 
-test("live chat reserves generation room for reasoning while respecting explicit limits", async () => {
-  for (const [maxTokens, expected] of [[undefined, 1024], [128, 128]]) {
+test("live chat delegates automatic budgets while respecting explicit limits", async () => {
+  for (const [maxTokens, expected] of [[undefined, undefined], [128, 128], [6144, 6144]]) {
     let submitted;
     const response = { writableEnded: false, writeHead() {}, flushHeaders() {}, write() { return true; }, end() { this.writableEnded = true; } };
     await streamChatTurn(response, { message: "removed ur cache and try again", toolMode: false, maxTokens },
