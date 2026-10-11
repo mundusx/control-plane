@@ -9516,6 +9516,51 @@ mod tests {
     }
 
     #[test]
+    fn runtime_context_survives_catalog_tier_and_respects_admin_ceiling() {
+        let mut state = capability_policy_fixture();
+        let node = state.nodes.get_mut("qualified").unwrap();
+        node.worker_health.as_mut().unwrap().runtime_mode = "mlx".into();
+        let mut raw = ControlPlaneState::model_inventory(node)[0].clone();
+        raw.output_capacity_mode = Some("context_window".into());
+        let detected = crate::admission_profile::AdmissionProfile::detected(node, &raw);
+        assert_eq!(detected.context_tokens, 131072);
+        assert_eq!(detected.source, "runtime_metadata");
+        assert_eq!(crate::capability_policy::advertised_model(node, &raw).context_tokens, Some(131072));
+        node.trust.capability_policy = Some(crate::capability_policy::Override {
+            settings: crate::capability_policy::Settings { max_context_tokens: Some(16384), reason: "Operator memory reserve".into(), ..Default::default() },
+            actor: "admin".into(), updated_at: "104".into(),
+        });
+        assert_eq!(crate::capability_policy::advertised_model(node, &raw).context_tokens, Some(16384));
+        raw.context_tokens = Some(4096);
+        assert_eq!(crate::capability_policy::advertised_model(node, &raw).context_tokens, Some(4096));
+        raw.output_capacity_mode = None;
+        raw.context_tokens = Some(131072);
+        assert_eq!(crate::admission_profile::AdmissionProfile::detected(node, &raw).context_tokens, 8192);
+    }
+
+    #[test]
+    fn automatic_code_budget_fits_an_eight_k_context_with_long_instructions() {
+        for source in ["explicit", "auto"] {
+            let mut state = capability_policy_fixture();
+            let request: JobRequest = serde_json::from_value(serde_json::json!({
+                "request_id": format!("context-fit-{source}"),
+                "prompt": "give me code in Java for a CRUD student model API",
+                "system_prompt": "x".repeat(9689),
+                "preferred_backend": "m", "runtime_mode": "local", "execution_mode": "single",
+                "max_tokens": 6144, "max_tokens_source": source,
+            })).unwrap();
+            let job = state.submit_job_with_mode(request, Some("chat".into()), "104".into());
+            let node = &state.nodes["qualified"];
+            assert_eq!(ControlPlaneState::node_can_run_job(node, &job), source == "auto");
+            if source == "auto" {
+                let claim = state.claim_job("qualified", "105".into()).job.expect("automatic budget is claimable");
+                let input = ControlPlaneState::context_demand_for_job(&job, None).estimated_input_tokens;
+                assert!(claim.max_tokens.unwrap() + input + CONTEXT_SAFETY_TOKENS <= 8192);
+            }
+        }
+    }
+
+    #[test]
     fn catalog_policy_limits_gpu_tiers_without_launching_tests() {
         let state = capability_policy_fixture();
         let node = &state.nodes["qualified"];
