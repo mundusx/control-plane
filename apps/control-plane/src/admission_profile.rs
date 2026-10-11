@@ -40,10 +40,10 @@ impl AdmissionProfile {
         let mut capabilities = vec!["chat".into()];
         // Managed MLX calculates this ceiling from cached architecture, actual
         // weight bytes, contribution budget, KV precision and parallel slots.
-        // Served vLLM contexts are read from its runtime metadata. A catalog
+        // Served vLLM and llama.cpp contexts come from runtime metadata. A catalog
         // tier must not replace those bounded runtime contracts with 8K.
         let runtime_context = node.worker_health.as_ref()
-            .filter(|h| matches!(h.runtime_mode.as_str(), "mlx" | "vllm"))
+            .filter(|h| matches!(h.runtime_mode.as_str(), "mlx" | "vllm" | "cuda" | "vulkan" | "blas"))
             .filter(|_| model.output_capacity_mode.as_deref() == Some("context_window"))
             .and(model.context_tokens.filter(|n| *n >= 1024));
         let limit = runtime_context.unwrap_or_else(|| model.context_tokens.unwrap_or(2048).min(context).min(memory_context).min(if family {4096} else if expert || standard || basic {16384} else {2048}));

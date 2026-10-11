@@ -9539,6 +9539,30 @@ mod tests {
     }
 
     #[test]
+    fn llama_runtime_context_overrides_compact_estimate_but_not_admin_cap() {
+        for runtime in ["cuda", "vulkan", "blas"] {
+            let mut state = capability_policy_fixture();
+            let node = state.nodes.get_mut("qualified").unwrap();
+            node.worker_health.as_mut().unwrap().runtime_mode = runtime.into();
+            node.worker_health.as_mut().unwrap().capabilities.usable_memory_mb = Some(3277);
+            let mut raw = ControlPlaneState::model_inventory(node)[0].clone();
+            raw.name = "tensorblock/Qwen2.5-3B-Instruct-GGUF".into();
+            raw.context_tokens = Some(4096);
+            raw.output_capacity_mode = Some("context_window".into());
+            assert_eq!(crate::admission_profile::AdmissionProfile::detected(node, &raw).context_tokens, 4096);
+            assert_eq!(crate::capability_policy::advertised_model(node, &raw).context_tokens, Some(4096));
+            node.trust.capability_policy = Some(crate::capability_policy::Override {
+                settings: crate::capability_policy::Settings { max_context_tokens: Some(2048), ..Default::default() },
+                actor: "admin".into(), updated_at: "104".into(),
+            });
+            assert_eq!(crate::capability_policy::advertised_model(node, &raw).context_tokens, Some(2048));
+            raw.output_capacity_mode = None;
+            raw.context_tokens = Some(32768);
+            assert_eq!(crate::admission_profile::AdmissionProfile::detected(node, &raw).context_tokens, 2048);
+        }
+    }
+
+    #[test]
     fn automatic_code_budget_fits_an_eight_k_context_with_long_instructions() {
         for source in ["explicit", "auto"] {
             let mut state = capability_policy_fixture();
