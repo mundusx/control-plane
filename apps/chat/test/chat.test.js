@@ -1878,7 +1878,7 @@ test("routes polynomial subtraction expansion to the math tool", async () => {
 test("identity shorthand uses the identity skill without web or model calls", async () => {
   for (const message of ["who are u", "Who r u?", "what are u?", "who   are   u?"]) {
     const result = await submitChatJob(
-      { message },
+      { message, toolMode: true },
       configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
       async () => { throw new Error("identity shorthand must not call research or inference"); },
     );
