@@ -9638,6 +9638,7 @@ fn handle_connection_with_streams(
                             );
                             return;
                         }
+                        let _ = stream.write_all(chat_gateway::sse_queue_status(&record, &completion_id, created, public_model).as_bytes());
                         let _ = stream.flush();
                     }
                     if live_stream_job {
@@ -9754,7 +9755,9 @@ fn handle_connection_with_streams(
                                             delta,
                                         )
                                     }
-                                    None => chat_gateway::sse_keep_alive().to_string(),
+                                    None => state.lock().ok().and_then(|guard| guard.jobs.get(&record.job_id).cloned())
+                                        .map(|job| chat_gateway::sse_queue_status(&job, &completion_id, created, public_model))
+                                        .unwrap_or_else(chat_gateway::sse_keep_alive),
                                 };
                                 stream
                                     .write_all(event.as_bytes())

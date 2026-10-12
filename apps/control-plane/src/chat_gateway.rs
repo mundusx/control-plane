@@ -855,6 +855,20 @@ pub fn sse_finish(completion: &Value) -> String {
     }
 }
 
+pub fn sse_queue_status(job: &JobRecord, completion_id: &str, created: u64, model: &str) -> String {
+    let (status, message) = match job.status {
+        JobStatus::Queued => ("queued", if job.scheduling_requirements.task_type == crate::contracts::RequestTaskType::Coding {
+            "Queued: waiting for a compatible coding contributor."
+        } else { "Queued: waiting for a compatible contributor." }),
+        JobStatus::Assigned => ("assigned", "A contributor picked up your request. Preparing the response."),
+        _ => return sse_keep_alive(),
+    };
+    sse_frame(&format!("data: {}\n\n", json!({
+        "id":completion_id,"object":"chat.completion.chunk","created":created,"model":model,
+        "choices":[],"mundusx":{"queue_status":status,"message":message}
+    })))
+}
+
 pub fn sse_keep_alive() -> String {
     sse_frame(": mundusx keep-alive\n\n")
 }
