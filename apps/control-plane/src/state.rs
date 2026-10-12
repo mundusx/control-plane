@@ -4288,6 +4288,14 @@ mod execution_reliability_tests {
     }
 }
 
+fn looks_like_history_request(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    // Match chronology words rather than generic research indicators or
+    // substrings such as "prehistorical".
+    let words: Vec<&str> = lower.split(|ch: char| !ch.is_ascii_alphabetic()).collect();
+    words.iter().any(|word| matches!(*word, "history" | "historical" | "timeline" | "chronology"))
+}
+
 fn looks_sectionable_prompt(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     contains_any(
@@ -6997,6 +7005,17 @@ pub fn plan_job_request(request: &JobRequest, classification: &RequestClassifica
             };
         }
 
+        // Generic words such as "explain" or "overview" do not justify
+        // inventing a company's history, founders, or milestones.
+        if !looks_like_history_request(&request.prompt) {
+            return single_execution_plan(
+                request,
+                classification,
+                "No explicit independent sections were identified; answer the submitted request directly.",
+                "Fallback planning preserves scope rather than inventing historical sections.",
+            );
+        }
+
         push_planned_job(
             &mut jobs,
             "job.origins",
@@ -7368,9 +7387,10 @@ fn dynamically_shape_research_plan_with_context(
     original: JobPlan,
 ) -> JobPlan {
     let lower = request.prompt.to_ascii_lowercase();
-    let dynamic_history_requested = lower.contains("to date")
-        || lower.starts_with("brief history")
-        || lower.starts_with("a brief history");
+    let dynamic_history_requested = looks_like_history_request(&request.prompt)
+        && (lower.contains("to date")
+            || lower.starts_with("brief history")
+            || lower.starts_with("a brief history"));
     if request.execution_mode == JobExecutionMode::Single
         || classification.task_type == RequestTaskType::Coding
         || !dynamic_history_requested
@@ -10977,6 +10997,38 @@ mod tests {
     }
 
     #[test]
+    fn generic_explanations_do_not_invent_history_sections() {
+        for prompt in [
+            "Explain how photosynthesis works in detail.",
+            "Give a comprehensive overview of TCP congestion control.",
+            "Analyze the research on battery efficiency to date.",
+            "Write a detailed report about apartment insulation.",
+        ] {
+            let mut request = classification_request(prompt);
+            request.execution_mode = JobExecutionMode::Decompose;
+            let classification = classify_job_request(&request);
+            let base = plan_job_request_for_submission(&request, &classification, 4);
+            let plan = dynamically_shape_research_plan(&request, &classification, 4, Some(16_384), base);
+            assert_eq!(plan.strategy, "single_job", "{prompt}");
+            assert_eq!(plan.jobs.len(), 1, "{prompt}");
+            assert!(!plan.jobs.iter().any(|job| job.name.contains("founders") || job.name.contains("milestones")));
+        }
+    }
+
+    #[test]
+    fn fallback_preserves_requested_nonhistorical_sections() {
+        let request = classification_request("Explain photosynthesis split by light reactions, carbon fixation and limitations.");
+        let classification = classify_job_request(&request);
+        let plan = plan_job_request(&request, &classification);
+        assert_eq!(plan.strategy, "sectioned_research");
+        let names: Vec<_> = plan.jobs.iter().map(|job| job.name.as_str()).collect();
+        assert!(names.contains(&"Light Reactions"));
+        assert!(names.contains(&"Carbon Fixation"));
+        assert!(names.contains(&"Limitations"));
+        assert!(!names.contains(&"Origins and founders"));
+    }
+
+    #[test]
     fn chat_system_prompt_does_not_force_history_requests_into_code_plans() {
         let mut request =
             classification_request("Now tell me the history of Mercedes-Benz from its origins.");
@@ -13991,7 +14043,7 @@ mod tests {
         state.register(m_series_registration("node-2"));
         state.heartbeat(ready_heartbeat("node-2", "1"), "1".to_string());
 
-        let mut request = classification_request("Analyze a topic in parallel.");
+        let mut request = classification_request("Analyze a topic in parallel split by evidence and implications.");
         request.execution_mode = JobExecutionMode::Decompose;
         state.submit_job(request, "2".to_string());
 
