@@ -3,7 +3,7 @@ export function webResearchRequest(message, history = []) {
   let text = String(message || "").trim();
   // Standalone assistant identity belongs to the local persona skill, even
   // with web tools enabled. Keep compound factual requests available to research.
-  if (/^(?:(?:please|pls)\s+)?(?:who\s+(?:are|r)\s+(?:you|u)|what\s+(?:are|r)\s+(?:you|u)|introduce yourself|tell me about yourself|who (?:created|made|built) you|who owns you|what(?:'s| is) your (?:name|purpose)|do (?:you|u) have a (?:name|purpose)|your (?:mission|vision)|mission and vision)[?.!\s]*$/i.test(text)) return null;
+  if (/^(?:(?:please|pls)\s+)?(?:who\s+(?:are|r)\s+(?:you|u)|what\s+(?:are|r)\s+(?:you|u)|introduce yourself|tell me about yourself|who (?:created|made|built) you|who owns you|what(?:'s|s| is) your (?:name|purpose)|do (?:you|u) have a (?:name|purpose)|your (?:mission|vision)|mission and vision)[?.!\s]*$/i.test(text)) return null;
   // Normalize natural person questions before routing as well as cache lookup.
   // Do not strip underscores from handles, code, or URLs.
   const personQuestion = text.normalize("NFKC").replace(/\s+/gu, " ")

@@ -8010,6 +8010,25 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     })
     : Promise.resolve(null);
 
+  const identityTopic = body?.internalAgentTurn !== true && !isMultiIntentPlanningCandidate(message)
+    ? extractAssistantIdentityTopic(message) : null;
+  if (identityTopic) {
+    const identityResult = fetchAssistantIdentityJob(message, identityTopic, body?.voicePersona);
+    const content = identityResult.output;
+    const completionId = normalizeOpenAiCompletionId(body?.requestId);
+    const completion = {
+      id: completionId, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: PUBLIC_MODEL_ID,
+      choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+      mundusx: { job_id: identityResult.job_id, tool: "assistant_identity", execution_mode: "tool" },
+    };
+    startOpenAiStream(response, "direct-tool", completionId);
+    for (const frame of openAiSseFrames(completion, { buffered: false })) response.write(frame);
+    response.end("data: [DONE]\n\n");
+    await userPersistence;
+    await recordAssistantTurn(conversationId, config, fetchImpl, identityResult);
+    return { content, completionId, finishReason: "stop", tool: "assistant_identity" };
+  }
+
   const research = body?.internalAgentTurn !== true && isToolModeEnabled(body)
     ? webResearchRequest(message, historyMessages) : null;
   if (research) {
@@ -11396,10 +11415,10 @@ function extractAssistantIdentityTopic(message) {
   if (!lower) {
     return null;
   }
-  if (/\b(?:do\s+(?:you|u)\s+have\s+a\s+name|what(?:'s| is)\s+your\s+name)\b/i.test(lower)) {
+  if (/\b(?:do\s+(?:you|u)\s+have\s+a\s+name|what(?:'s|s| is)\s+your\s+name)\b/i.test(lower)) {
     return "name";
   }
-  if (/\b(?:do\s+(?:you|u)\s+have\s+a\s+purpose|your\s+mission|your\s+vision|mission and vision|what(?:'s| is)\s+your purpose)\b/i.test(lower)) {
+  if (/\b(?:do\s+(?:you|u)\s+have\s+a\s+purpose|your\s+mission|your\s+vision|mission and vision|what(?:'s|s| is)\s+your purpose)\b/i.test(lower)) {
     return "mission";
   }
   if (
@@ -11687,7 +11706,7 @@ export function extractWeatherLocation(message) {
 
   const patterns = [
     /\b(?:weather|forecast|temperature|temp)\s+(?:in|for|at|of)\s+(.+)$/i,
-    /\b(?:what(?:'s| is)?|how(?:'s| is)?)\s+(?:the\s+)?(?:weather|forecast|temperature|temp)(?:\s+like)?\s+(?:in|for|at|of)\s+(.+)$/i,
+    /\b(?:what(?:'s|s| is)?|how(?:'s| is)?)\s+(?:the\s+)?(?:weather|forecast|temperature|temp)(?:\s+like)?\s+(?:in|for|at|of)\s+(.+)$/i,
     /\b(?:weather|forecast|temperature|temp)\s+(.+)$/i,
   ];
   for (const pattern of patterns) {
@@ -11873,7 +11892,7 @@ function extractCompoundFactualIntents(text) {
 
 function extractCompoundIdentityIntents(text) {
   const pattern =
-    /\b(?:introduce yourself|introduced yourself|tell me about yourself|who\s+(?:are|r)\s+(?:you|u)|what\s+(?:are|r)\s+(?:you|u)|do (?:you|u) have a name|what(?:'s| is) your name|tell me (?:your|ur) name|do (?:you|u) have a purpose|who (?:created|made|built) you|who\s+(?:are|r)\s+(?:you|u) (?:created|made|built) by|who owns you|your mission|your vision|mission and vision)\b/gi;
+    /\b(?:introduce yourself|introduced yourself|tell me about yourself|who\s+(?:are|r)\s+(?:you|u)|what\s+(?:are|r)\s+(?:you|u)|do (?:you|u) have a name|what(?:'s|s| is) your name|tell me (?:your|ur) name|do (?:you|u) have a purpose|who (?:created|made|built) you|who\s+(?:are|r)\s+(?:you|u) (?:created|made|built) by|who owns you|your mission|your vision|mission and vision)\b/gi;
   const seenTopics = new Set();
   const intents = [];
   for (const match of text.matchAll(pattern)) {

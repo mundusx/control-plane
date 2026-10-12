@@ -1875,6 +1875,31 @@ test("routes polynomial subtraction expansion to the math tool", async () => {
   assert.match(result.output, /Answer: -3x\^4 \+ 6x\^3 - 15x\^2 - 13x - 7/);
 });
 
+test("browser streaming uses the identity skill for shorthand and names", async () => {
+  for (const [message, voicePersona, expected] of [
+    ["who are u?", "atlas", "I'm Atlas, the MundusX assistant."],
+    ["who r u", "atlas", "I'm Atlas, the MundusX assistant."],
+    ["whats your name", "atlas", "My name is Atlas."],
+    ["what's your name?", "marie", "My name is Marie."],
+  ]) {
+    const writes = [];
+    const response = { writableEnded: false, writeHead() {}, flushHeaders() {},
+      write(frame) { writes.push(frame); return true; },
+      end(frame = "") { writes.push(frame); this.writableEnded = true; } };
+    const result = await streamChatTurn(response, { message, toolMode: true, voicePersona,
+      historyMessages: [{role:"assistant",content:"Earlier incorrect user: u assistant: answer"}] },
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async () => { throw new Error("Identity stream must not call a model or research service"); });
+    assert.equal(result.tool, "assistant_identity");
+    assert.ok(result.content.startsWith(expected));
+    const streamed = writes.join("").split("\n").filter(line => line.startsWith("data: {")).map(line =>
+      JSON.parse(line.slice(6)).choices?.[0]?.delta?.content ?? "").join("");
+    assert.equal(streamed, result.content);
+    assert.match(writes.join(""), /data: \[DONE\]/);
+    assert.doesNotMatch(result.content, /user:|assistant:|who the user is/);
+  }
+});
+
 test("identity shorthand uses the identity skill without web or model calls", async () => {
   for (const message of ["who are u", "Who r u?", "what are u?", "who   are   u?"]) {
     const result = await submitChatJob(
