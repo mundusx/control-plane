@@ -1875,6 +1875,20 @@ test("routes polynomial subtraction expansion to the math tool", async () => {
   assert.match(result.output, /Answer: -3x\^4 \+ 6x\^3 - 15x\^2 - 13x - 7/);
 });
 
+test("identity shorthand uses the identity skill without web or model calls", async () => {
+  for (const message of ["who are u", "Who r u?", "what are u?", "who   are   u?"]) {
+    const result = await submitChatJob(
+      { message },
+      configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" }),
+      async () => { throw new Error("identity shorthand must not call research or inference"); },
+    );
+    assert.equal(result.status, "completed");
+    assert.equal(result.tool, "assistant_identity");
+    assert.match(result.output, /^I'm Atlas, the MundusX assistant\./);
+    assert.ok(selectChatSkills(message).some(skill => skill.name === "persona-atlas.md"));
+  }
+});
+
 test("routes assistant identity prompts to deterministic persona answers", async () => {
   const result = await submitChatJob(
     { message: "Introduce yourself please" },
@@ -2782,7 +2796,7 @@ test("falls back to normal chat when the LLM planner returns no usable plan and 
 
 test("falls back to deterministic compound tools when planner misses obvious direct intents", async () => {
   const calls = [];
-  const prompt = "what's the weather in Stuttgart Germany? and Introduced yourself? Who is Donald Trump?";
+  const prompt = "what's the weather in Stuttgart Germany? and who are u? Who is Donald Trump?";
   const fetchImpl = async (url, init = {}) => {
     calls.push({ url, init });
     if (url === "https://uat.mundusx.ai/v1/jobs") {
