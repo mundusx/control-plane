@@ -7779,7 +7779,19 @@ export async function relayNativeHermesToolStream(
   body,
   config = configFromEnv(),
   fetchImpl = fetch,
+  onTiming = (timing) => console.info(JSON.stringify({ event: "hermes_model_turn_timing", ...timing })),
 ) {
+  const startedAt = performance.now();
+  let committed = false;
+  let activeController;
+  let disconnected = false;
+  const onClose = () => {
+    if (!response.writableEnded) { disconnected = true; activeController?.abort(); }
+  };
+  response.once?.("close", onClose);
+  const recordTiming = (fields) => {
+    try { onTiming({ request_id: String(body?.request_id || ""), total_ms: Math.round(performance.now() - startedAt), ...fields }); } catch { /* Telemetry cannot fail a model turn. */ }
+  };
   const configured = Array.isArray(config.agentModelProviders) && config.agentModelProviders.length
     ? config.agentModelProviders
     : [{
@@ -7799,6 +7811,9 @@ export async function relayNativeHermesToolStream(
 
   for (const provider of providers) {
     const controller = new AbortController();
+    activeController = controller;
+    if (disconnected) { response.off?.("close", onClose); return; }
+    const attemptStartedAt = performance.now();
     let timeout = setTimeout(() => controller.abort(), AGENT_PROVIDER_FIRST_EVENT_TIMEOUT_MS);
     timeout.unref?.();
     let reader;
@@ -7821,6 +7836,7 @@ export async function relayNativeHermesToolStream(
         body: JSON.stringify(upstreamBody),
         signal: controller.signal,
       });
+      const headersMs = Math.round(performance.now() - attemptStartedAt);
       if (!upstream.ok) {
         const detail = (await upstream.text()).trim().slice(0, 500);
         lastError = `native agent provider returned ${upstream.status}: ${detail || upstream.statusText}`;
@@ -7866,6 +7882,7 @@ export async function relayNativeHermesToolStream(
         await reader.cancel().catch(() => {});
         continue;
       }
+      const firstEventMs = Math.round(performance.now() - attemptStartedAt);
 
       clearTimeout(timeout);
       noteAgentProviderSuccess(provider);
@@ -7876,20 +7893,32 @@ export async function relayNativeHermesToolStream(
         });
       }
       startOpenAiStream(response, "native-agent-tools");
+      committed = true;
       for (const chunk of buffered) response.write(chunk);
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         response.write(value);
       }
+      recordTiming({ outcome: "completed", upstream_headers_ms: headersMs, first_event_ms: firstEventMs, provider: new URL(provider.baseUrl).hostname });
+      response.off?.("close", onClose);
       return response.end();
     } catch (error) {
+      if (disconnected) { recordTiming({ outcome: "cancelled" }); response.off?.("close", onClose); return; }
+      // Once bytes have reached Hermes, another provider must never replay the
+      // same turn into that response. Send an explicit stream failure instead.
+      if (committed) {
+        recordTiming({ outcome: "stream_failed" });
+        response.off?.("close", onClose);
+        response.write(`data: ${JSON.stringify({error:{message:"Hermes model stream interrupted. Earlier project work is preserved.",type:"upstream_stream_error"}})}\n\n`);
+        return response.end();
+      }
       if (projectTaskId && agentProviderAffinity.get(projectTaskId)?.baseUrl === provider.baseUrl) {
         agentProviderAffinity.delete(projectTaskId);
       }
       // Context and payload errors require a smaller request, not retries or
       // another provider. Preserve their status for the desktop connector.
-      if ([400, 413, 422].includes(error?.statusCode)) throw error;
+      if ([400, 413, 422].includes(error?.statusCode)) { response.off?.("close", onClose); throw error; }
       lastError = error?.name === "AbortError"
         ? "native agent provider timed out before its first OpenAI event"
         : String(error?.message || error);
@@ -7897,8 +7926,12 @@ export async function relayNativeHermesToolStream(
       await reader?.cancel?.().catch(() => {});
     } finally {
       clearTimeout(timeout);
+      await reader?.cancel?.().catch(() => {});
+      controller.abort();
     }
   }
+  recordTiming({ outcome: "providers_failed" });
+  response.off?.("close", onClose);
   throw httpError(502, `All native agent model providers failed: ${lastError}`);
 }
 
