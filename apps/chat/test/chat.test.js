@@ -4751,8 +4751,9 @@ test("live Chat starts the model stream before the user-message database write c
     write: () => true,
     end() { this.writableEnded = true; },
   };
-  const fetchImpl = async (url) => {
+  const fetchImpl = async (url, init = {}) => {
     if (url.includes("/v1/conversations/conversation-nonblocking/messages")) {
+      if (init.method !== "POST") return jsonResponse({ messages: [] });
       messageWrites += 1;
       if (messageWrites === 1) {
         return new Promise((resolve) => { releaseUserWrite = () => resolve(jsonResponse({ stored: true })); });
@@ -7713,4 +7714,46 @@ test("live chat delegates automatic budgets while respecting explicit limits", a
       });
     assert.equal(submitted.max_tokens, expected);
   }
+});
+
+
+test("streaming project extensions reload saved memory and carry application scope", async () => {
+  for (const message of ["add course crud api also", "wow nice, course api also"]) {
+    let upstream;
+    const writes = [];
+    const response = { writableEnded:false, writeHead(){}, flushHeaders(){}, write(){return true;}, end(){this.writableEnded=true;} };
+    const result = await streamChatTurn(response, {message, conversationId:"saved-project", toolMode:false},
+      configFromEnv({MUNDUSX_CONTROL_PLANE_URL:"https://uat.mundusx.ai"}), async (url, init={}) => {
+        if (url.includes("/v1/conversations/saved-project/messages")) {
+          if (init.method === "POST") {writes.push(JSON.parse(init.body));return jsonResponse({stored:true});}
+          return jsonResponse({messages:[
+            {role:"user",content:"Build a full Node.js student CRUD API with MongoDB and Mongoose."},
+            {role:"assistant",content:"```javascript\nconst mongoose = require('mongoose');\nconst Student = mongoose.model('Student', new mongoose.Schema({name:String}));\n```"},
+          ]});
+        }
+        if (url.endsWith("/v1/chat/completions")) {
+          upstream = JSON.parse(init.body);
+          return new Response('data: {"id":"chatcmpl-memory","choices":[{"delta":{"content":"Course API implementation."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+            {status:200,headers:{"X-MundusX-Stream-Mode":"live-delta"}});
+        }
+        throw new Error(`unexpected URL ${url}`);
+      });
+    assert.equal(result.finishReason,"stop");
+    assert.match(JSON.stringify(upstream.messages), /MongoDB|mongoose/);
+    assert.match(upstream.messages.at(-1).content, /Implement the requested extension to the existing application project:/);
+    assert.ok(upstream.messages.at(-1).content.includes(message));
+    assert.equal(writes[0].content,message);
+    assert.equal(upstream.max_tokens,undefined);
+  }
+});
+
+test("streaming follow-ups fail clearly when saved conversation cannot be loaded", async () => {
+  let modelCalls=0;
+  const response={writeHead(){},write(){},end(){}};
+  await assert.rejects(streamChatTurn(response,{message:"add course crud api also",conversationId:"missing-memory",toolMode:false},
+    configFromEnv({MUNDUSX_CONTROL_PLANE_URL:"https://uat.mundusx.ai"}),async(url)=>{
+      if(url.endsWith("/v1/chat/completions"))modelCalls++;
+      throw new Error("history service unavailable");
+    }),/Could not load the existing conversation/);
+  assert.equal(modelCalls,0);
 });
