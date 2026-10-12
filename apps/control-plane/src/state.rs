@@ -9539,7 +9539,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen_three_b_instruct_can_take_small_coding_without_claiming_large_coding() {
+    fn qwen_three_b_coder_can_take_small_coding_without_claiming_large_coding() {
         let mut state = capability_policy_fixture();
         let node = state.nodes.get_mut("qualified").unwrap();
         node.backend = Backend::Cuda;
@@ -9547,7 +9547,7 @@ mod tests {
         health.runtime_mode = "cuda".into();
         health.capabilities.total_vram_mb = Some(4096);
         health.capabilities.usable_memory_mb = Some(3277);
-        health.capabilities.models[0].name = "tensorblock/Qwen2.5-3B-Instruct-GGUF".into();
+        health.capabilities.models[0].name = "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF".into();
         health.capabilities.models[0].context_tokens = Some(4096);
         health.capabilities.models[0].max_output_tokens = None;
         health.capabilities.models[0].output_capacity_mode = Some("context_window".into());
@@ -9556,6 +9556,9 @@ mod tests {
         let advertised = crate::capability_policy::advertised_model(node, &raw);
         assert!(advertised.task_capabilities.iter().any(|c| c=="small_coding"));
         assert!(!advertised.task_capabilities.iter().any(|c| c=="medium_coding" || c=="large_coding"));
+        let mut general = raw.clone();
+        general.name = "tensorblock/Qwen2.5-3B-Instruct-GGUF".into();
+        assert!(!crate::capability_policy::advertised_model(node, &general).task_capabilities.iter().any(|c| c=="coding"));
         let request: JobRequest = serde_json::from_value(serde_json::json!({
             "request_id":"small-crud", "prompt":"give me a code in nodejs full crud student crud api",
             "system_prompt":"x".repeat(9272), "preferred_backend":"auto", "stream":true,
