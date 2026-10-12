@@ -16,13 +16,15 @@ export function splitMarkdownCode(value) {
       outer = { marker, start: markers.lastIndex, language: info.split(/\s+/)[0] || "code" };
       continue;
     }
-    const markdown = /^(?:markdown|md)$/i.test(outer.language);
+    const markdown = /^(?:markdown|md|(?:[\w./-]+\.)md)$/i.test(outer.language);
     // Tolerate generated Markdown files whose inner labeled fences use the
     // same delimiter length as the outer file. Keep their contents verbatim.
     if (markdown && inner) {
       if (!info && marker[0] === inner[0] && marker.length >= inner.length) inner = null;
       continue;
     }
+    // Tolerate a redundant language opener inside a filename-labelled file.
+    if (markdown && /\.md$/i.test(outer.language) && /^(?:markdown|md)$/i.test(info) && match.index === outer.start) continue;
     if (markdown && info) { inner = marker; continue; }
     if (!info && marker[0] === outer.marker[0] && marker.length >= outer.marker.length) {
       parts.push({ type: "code", language: outer.language, value: text.slice(outer.start, match.index) });
