@@ -8393,6 +8393,13 @@ export async function relayControlPlaneOpenAiStream(
     return { content, completionId, finishReason };
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+    // Close only the presentation fence before surfacing a separate SSE error.
+    // This preserves partial source without placing the error inside that source.
+    const markdownRepair = closeDanglingMarkdownFence(content);
+    if (markdownRepair) {
+      content += markdownRepair;
+      writeContinuationContent(response, markdownRepair, completionId);
+    }
     await hooks.onInterrupted?.({ content, completionId, finishReason, error });
     const message = error.code === "mundusx_repetition_detected" ? error.message : `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
@@ -8513,8 +8520,9 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         try {
           const chunk = JSON.parse(data);
           if (chunk?.error) {
-            writeResponse(`${eventText}\n\n`);
-            return;
+            const error = new Error(chunk.error.message || "Upstream generation failed");
+            error.code = "mundusx_upstream_terminal_error";
+            throw error;
           }
           completionId ||= String(chunk?.id ?? "").trim() || null;
           const choice = chunk?.choices?.[0];
@@ -8553,7 +8561,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
             return;
           }
         } catch (error) {
-          if (error.code === "mundusx_repetition_detected") throw error;
+          if (["mundusx_repetition_detected", "mundusx_upstream_terminal_error"].includes(error.code)) throw error;
           // Relay unknown upstream events as-is.
         }
         writeResponse(`${eventText}\n\n`);
@@ -8583,7 +8591,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
 
       if (streamError) {
-        if (streamError.code === "mundusx_repetition_detected") throw streamError;
+        if (["mundusx_repetition_detected", "mundusx_upstream_terminal_error"].includes(streamError.code)) throw streamError;
         if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
 
         // A later continuation may already have produced verified text before
@@ -8743,6 +8751,11 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
     return { content, completionId, finishReason };
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+    const markdownRepair = closeDanglingMarkdownFence(content);
+    if (markdownRepair) {
+      content += markdownRepair;
+      writeContinuationContent(response, markdownRepair, completionId);
+    }
     await hooks.onInterrupted?.({ content, completionId, finishReason, error });
     const message = error.code === "mundusx_repetition_detected" ? error.message : `MundusX response stream interrupted before completion: ${error.message ?? "stream failed"}`;
     console.error("[openai-stream]", JSON.stringify({ completionId, message,
