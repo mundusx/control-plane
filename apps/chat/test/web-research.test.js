@@ -6,6 +6,14 @@ test('joined who-is typo keeps the requested identity and biography filters', ()
 });
 import { streamChatTurn, submitChatTurn, configFromEnv } from "../src/main.js";
 
+test("standalone assistant identity never enters web research", () => {
+  for (const message of ["who are u", "Who r u?", "who are you?", "what are u?", "please introduce yourself", "who made you?"]) {
+    assert.equal(webResearchRequest(message), null);
+  }
+  assert.equal(webResearchRequest("who is Donald Trump?").researchMode, "biography");
+  assert.notEqual(webResearchRequest("who are u and what is the latest PostgreSQL version?"), null);
+});
+
 test("person lookup normalizes stray trailing underscores, spacing, and contractions before routing", () => {
   for (const message of ["who is alex eala_?", "who is alex eala__?!", "who’s alex eala?", "who   is alex   eala?", "ｗｈｏ is alex eala？"]) {
     const request = webResearchRequest(message);
