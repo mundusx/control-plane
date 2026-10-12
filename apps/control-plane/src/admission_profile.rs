@@ -24,10 +24,10 @@ impl AdmissionProfile {
         let expert = name.starts_with("qwen3-coder-30b-") && name.contains("instruct");
         let family = name == "qwen3-coder";
         let standard = ["qwen2.5-coder-7b-", "qwen2.5-coder-14b-", "qwen2.5-coder-32b-"].iter().any(|prefix|name.starts_with(prefix)) && name.contains("instruct");
-        let basic = ["qwen2.5-coder-0.5b-", "qwen2.5-coder-1.5b-", "qwen2.5-coder-3b-"].iter().any(|prefix|name.starts_with(prefix)) && name.contains("instruct");
+        let basic = ["qwen2.5-coder-0.5b-", "qwen2.5-coder-1.5b-", "qwen2.5-coder-3b-", "qwen2.5-1.5b-", "qwen2.5-3b-"].iter().any(|prefix|name.starts_with(prefix)) && name.contains("instruct");
         let quant = model.quantization.as_deref().filter(|q|!q.trim().is_empty()).unwrap_or(&name).to_ascii_lowercase().replace('-', "");
         let parameters = if expert {Some(30.5)} else if standard || basic {
-            [0.5, 1.5, 3.0, 7.0, 14.0, 32.0].into_iter().find(|n|name.starts_with(&format!("qwen2.5-coder-{n}b-")))
+            [0.5, 1.5, 3.0, 7.0, 14.0, 32.0].into_iter().find(|n|name.starts_with(&format!("qwen2.5-coder-{n}b-")) || name.starts_with(&format!("qwen2.5-{n}b-")))
         } else {None};
         let per_billion = if quant.contains("4bit") || quant.contains("int4") || quant.contains("q4") {640.0}
             else if quant.contains("5bit") || quant.contains("q5") {750.0}

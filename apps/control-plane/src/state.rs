@@ -9539,6 +9539,39 @@ mod tests {
     }
 
     #[test]
+    fn qwen_three_b_instruct_can_take_small_coding_without_claiming_large_coding() {
+        let mut state = capability_policy_fixture();
+        let node = state.nodes.get_mut("qualified").unwrap();
+        node.backend = Backend::Cuda;
+        let health = node.worker_health.as_mut().unwrap();
+        health.runtime_mode = "cuda".into();
+        health.capabilities.total_vram_mb = Some(4096);
+        health.capabilities.usable_memory_mb = Some(3277);
+        health.capabilities.models[0].name = "tensorblock/Qwen2.5-3B-Instruct-GGUF".into();
+        health.capabilities.models[0].context_tokens = Some(4096);
+        health.capabilities.models[0].max_output_tokens = None;
+        health.capabilities.models[0].output_capacity_mode = Some("context_window".into());
+        health.capabilities.models[0].task_capabilities = vec!["chat".into(), "coding".into()];
+        let raw = ControlPlaneState::model_inventory(node)[0].clone();
+        let advertised = crate::capability_policy::advertised_model(node, &raw);
+        assert!(advertised.task_capabilities.iter().any(|c| c=="small_coding"));
+        assert!(!advertised.task_capabilities.iter().any(|c| c=="medium_coding" || c=="large_coding"));
+        let request: JobRequest = serde_json::from_value(serde_json::json!({
+            "request_id":"small-crud", "prompt":"give me a code in nodejs full crud student crud api",
+            "system_prompt":"x".repeat(9272), "preferred_backend":"auto", "stream":true,
+            "max_tokens_source":"auto", "runtime_mode":"local", "execution_mode":"single"
+        })).unwrap();
+        let job = state.submit_job_with_mode(request, Some("chat".into()), "104".into());
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"], &job));
+        let mut queued = job.clone();
+        queued.status = JobStatus::Queued;
+        let event = crate::chat_gateway::sse_queue_status(&queued, "chatcmpl-test", 104, "mundusx-agnostic");
+        assert!(event.contains("queued")); assert!(event.contains("coding contributor"));
+        queued.status = JobStatus::Assigned;
+        assert!(crate::chat_gateway::sse_queue_status(&queued, "chatcmpl-test", 104, "mundusx-agnostic").contains("assigned"));
+    }
+
+    #[test]
     fn llama_runtime_context_overrides_compact_estimate_but_not_admin_cap() {
         for runtime in ["cuda", "vulkan", "blas"] {
             let mut state = capability_policy_fixture();
