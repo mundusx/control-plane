@@ -7776,3 +7776,20 @@ test("browser project follow-up validates JavaScript using prior runtime context
   assert.equal(repairs,1); assert.equal(result.finishReason,"stop");assert.match(result.content,/router.delete\('/);
   assert.match(writes.join(""),/replace_content/);assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length,1);
 });
+
+
+test("upstream stream errors remain separate from an unfinished code block", async () => {
+  const writes=[];
+  const response={writableEnded:false,writeHead(){},flushHeaders(){},write(value){writes.push(String(value));return true;},end(value=""){writes.push(String(value));this.writableEnded=true;}};
+  const result=await streamChatTurn(response,{message:"Write a Node.js CRUD API",toolMode:false},
+    configFromEnv({MUNDUSX_CONTROL_PLANE_URL:"https://uat.mundusx.ai"}),async()=>new Response(
+      'data: '+JSON.stringify({id:"failed-code",choices:[{delta:{content:"```javascript\nconst app ="},finish_reason:null}]})+'\n\n'+
+      'data: '+JSON.stringify({error:{message:"worker failed",type:"upstream_stream_error"}})+'\n\ndata: [DONE]\n\n',
+      {status:200,headers:{"X-MundusX-Stream-Mode":"live-delta"}}));
+  assert.equal(result.finishReason,"error");
+  assert.match(result.content,/\n```\n$/);
+  assert.doesNotMatch(result.content,/worker failed|MundusX request failed/);
+  const events=writes.join("");
+  assert.ok(events.indexOf('content":"\\n```\\n') < events.indexOf('"error":'));
+  assert.equal(events.match(/data: \[DONE\]/g)?.length,1);
+});
