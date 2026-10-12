@@ -152,3 +152,14 @@ test("repeated unsafe continuations remain bounded and preserve the original cod
   assert.equal(result.finishReason, "length");
   assert.equal(result.content, first);
 });
+
+
+test("filename-labelled README fences do not request duplicate documentation", async () => {
+  for (const label of ["README.md", "docs/README.md"]) {
+    const file = "```" + label + "\n```markdown\n# Bus API\n\n## Installation\n```bash\nnpm install\n```\n\n## Run\n```bash\nnpm start\n```\n```\n";
+    assert.deepEqual(projectCompletionGaps(file + summary), []);
+    const {result,requests} = await runReply(prompt,[file + summary]);
+    assert.equal(requests.length,1);
+    assert.equal(result.finishReason,"stop");
+  }
+});

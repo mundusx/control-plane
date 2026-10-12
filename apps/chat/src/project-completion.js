@@ -11,6 +11,7 @@ export function projectCompletionGaps(value) {
   let readmeEndInProse = -1;
   for (const part of splitMarkdownCode(text)) {
     if (part.type === "code") {
+      if (/^(?:[\w./-]+\/)?README\.md$/i.test(part.language)) readmeSection = true;
       if (readmeSection) {
         readme += part.value + "\n";
         readmeEndInProse = prose.join("\n").length;
