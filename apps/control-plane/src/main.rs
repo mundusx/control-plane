@@ -9813,17 +9813,8 @@ fn handle_connection_with_streams(
                                     let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
                                     return;
                                 }
-                                let completion = chat_gateway::completion_response(
-                                    &completion_id,
-                                    created,
-                                    public_model,
-                                    &format!("MundusX request failed: {error}"),
-                                    "stop",
-                                    None,
-                                    None,
-                                );
-                                let _ = stream
-                                    .write_all(chat_gateway::sse_finish(&completion).as_bytes());
+                                let event = serde_json::json!({"error":{"message":error,"type":"upstream_stream_error"}});
+                                let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
                                 return;
                             }
                             let status = if error.contains("timed out") {

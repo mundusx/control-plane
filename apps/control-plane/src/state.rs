@@ -3190,7 +3190,17 @@ impl ControlPlaneState {
                         .output
                         .as_deref()
                         .is_some_and(crate::chat_gateway::output_hit_generation_limit);
-                if hit_generation_limit && job_uses_auto_max_tokens(job) {
+                if hit_generation_limit && job.stream {
+                    // A streamed prefix is already visible. Preserve it and report
+                    // length so the chat relay can continue rather than regenerate it.
+                    job.status = JobStatus::Completed;
+                    job.output = output;
+                    job.error = None;
+                    job.completed_at = Some(completed_at.clone());
+                    job.quality_gate.status = QualityGateStatus::CompletedPartial;
+                    job.graph.updated_at = completed_at.clone();
+                    job.clone()
+                } else if hit_generation_limit && job_uses_auto_max_tokens(job) {
                     if job_is_auto_token_retry(job) {
                         job.status = JobStatus::Failed;
                         job.output = None;
@@ -11611,6 +11621,32 @@ mod tests {
         let claimed_job = claim.job.expect("claimed job");
 
         assert_eq!(claimed_job.max_tokens, Some(512));
+    }
+
+    #[test]
+    fn streamed_generation_limit_preserves_prefix_for_relay_continuation() {
+        for source in ["auto", "auto_retry", "explicit"] {
+            let mut state = ready_state();
+            let mut heartbeat = ready_heartbeat("node-1", "1");
+            heartbeat.worker_health.streaming_supported = true;
+            state.heartbeat(heartbeat, "1".into());
+            let mut request = classification_request("Write a complete JavaScript function.");
+            request.stream = true;
+            request.max_tokens = Some(512);
+            request.max_tokens_source = Some(source.into());
+            state.submit_job(request, "2".into());
+            let claim = state.claim_job("node-1", "3".into()).job.expect("claim");
+            let partial = state.complete_job(JobCompletion {
+                job_id: claim.job_id, node_id: "node-1".into(), worker_id: "worker-1".into(), backend: Backend::M,
+                status: JobStatus::Completed, output: Some("[truncated: hit the generation limit] ```js\nfunction value() {".into()),
+                error: None, latency_ms: Some(10),
+            }, "4".into()).expect("partial completion");
+            assert_eq!(partial.status, JobStatus::Completed);
+            assert!(partial.output.as_deref().unwrap().contains("function value() {"));
+            assert_eq!(crate::chat_gateway::finish_reason_for_job(&partial), "length");
+            assert!(partial.error.is_none());
+            assert_eq!(partial.max_tokens_source.as_deref(), Some(source));
+        }
     }
 
     #[test]
