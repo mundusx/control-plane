@@ -9491,10 +9491,9 @@ fn handle_connection_with_streams(
                     let adaptive_native_edit = native_tool_turn
                         && chat_gateway::apply_adaptive_native_edit_policy(&mut request_body);
                     let (system_prompt, prompt) = if native_tool_turn {
-                        let mut native_request = request_body.clone();
                         // The worker returns a complete native assistant message;
-                        // the control plane wraps it as SSE after validation.
-                        native_request.stream = Some(false);
+                        // omit null options rejected by native MLX runtimes.
+                        let native_request = chat_gateway::native_tool_payload(&request_body);
                         (
                             None,
                             format!(

@@ -13,6 +13,46 @@ pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]
 
 /// Keep harness tool results on the native path even during a final turn that
 /// omits tool definitions. Server lookups must not replace the harness's answer.
+/// Native runtimes accept omitted options, but MLX rejects explicit JSON null
+/// for numeric generation parameters. Message nulls (e.g. tool-call content)
+/// remain intact; only optional top-level fields are omitted.
+pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value {
+    let mut payload = serde_json::to_value(request).expect("validated request serializes");
+    payload.as_object_mut().expect("request object").retain(|_, value| !value.is_null());
+    payload["stream"] = serde_json::json!(false);
+    payload["max_tokens"] = serde_json::json!(request.max_tokens.unwrap_or(3_072));
+    payload
+}
+
+#[cfg(test)]
+mod native_payload_tests {
+    use super::*;
+    #[test]
+    fn native_payload_omits_null_options_but_preserves_message_nulls() {
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"status","arguments":"{}"}}]}],
+            "tools":[{"type":"function","function":{"name":"status"}}],
+            "max_tokens":null,"temperature":null,"top_p":null,"stream":true
+        })).unwrap();
+        let payload = native_tool_payload(&request);
+        assert_eq!(payload["max_tokens"], 3072);
+        assert_eq!(payload["stream"], false);
+        assert!(payload.get("temperature").is_none());
+        assert!(payload.get("top_p").is_none());
+        assert!(payload["messages"][0]["content"].is_null());
+    }
+    #[test]
+    fn native_payload_respects_explicit_limits_and_sampling() {
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "messages":[{"role":"user","content":"Run tests"}],"max_tokens":512,"temperature":0.1,"top_p":0.9
+        })).unwrap();
+        let payload = native_tool_payload(&request);
+        assert_eq!(payload["max_tokens"],512);
+        assert_eq!(payload["temperature"],0.1);
+        assert_eq!(payload["top_p"],0.9);
+    }
+}
+
 pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
     request
         .tools
