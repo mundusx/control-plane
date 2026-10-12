@@ -1875,6 +1875,25 @@ test("routes polynomial subtraction expansion to the math tool", async () => {
   assert.match(result.output, /Answer: -3x\^4 \+ 6x\^3 - 15x\^2 - 13x - 7/);
 });
 
+test("browser Node code stream repairs syntax before its final done event", async () => {
+  const writes = []; const encoder = new TextEncoder(); let repairs = 0;
+  const response = {writableEnded:false,writeHead(){},flushHeaders(){},write(frame){writes.push(frame);return true;},end(frame=""){writes.push(frame);this.writableEnded=true;}};
+  const bad = "```javascript\nrouter.delete/:id', handler);\n```";
+  const result = await streamChatTurn(response,{message:"Write a single-file Node.js CRUD API, code only",toolMode:false},
+    configFromEnv({MUNDUSX_CONTROL_PLANE_URL:"https://uat.mundusx.ai"}),async (url, init={}) => {
+      if (url.endsWith("/v1/chat/completions")) return new Response(new ReadableStream({start(controller){
+        controller.enqueue(encoder.encode('data: '+JSON.stringify({id:"code-job",choices:[{delta:{content:bad},finish_reason:null}]})+'\n\n'+
+          'data: '+JSON.stringify({id:"code-job",choices:[{delta:{},finish_reason:"stop"}]})+'\n\ndata: [DONE]\n\n'));controller.close();
+      }}),{status:200,headers:{"X-MundusX-Stream-Mode":"live-delta"}});
+      if (url.includes("/v1/nodes")) return jsonResponse({items:[]});
+      if (url.endsWith("/v1/jobs")) {repairs++; const body=JSON.parse(init.body);assert.match(body.prompt,/Repair only the syntax/);
+        return jsonResponse({job_id:"repair",status:"completed",output:"```javascript\nrouter.delete('/:id', handler);\n```"});}
+      throw new Error("Unexpected request "+url);
+    });
+  assert.equal(repairs,1); assert.equal(result.finishReason,"stop");assert.match(result.content,/router.delete\('/);
+  assert.match(writes.join(""),/replace_content/);assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length,1);
+});
+
 test("browser queue events update waiting state without becoming answer tokens", () => {
   const html = page();
   const start = html.indexOf("const consumeEvent = (eventText) => {", html.indexOf("const firstTokenDeadline"));
@@ -1893,9 +1912,11 @@ test("browser queue events update waiting state without becoming answer tokens",
   consume('data: {"choices":[{"delta":{"content":"const app = express();"}}]}');
   assert.equal(streamState.status, "streaming");
   assert.equal(streamState.output, "const app = express();");
+  consume('data: {"choices":[],"mundusx":{"replace_content":"const repaired = 1;"}}');
+  assert.equal(streamState.output, "const repaired = 1;");
   consume('data: {"choices":[],"mundusx":{"queue_status":"queued","message":"Late event"}}');
   assert.equal(streamState.status, "streaming");
-  assert.equal(streamState.output, "const app = express();");
+  assert.equal(streamState.output, "const repaired = 1;");
 });
 
 test("queue status survives the relay without becoming answer content", () => {
