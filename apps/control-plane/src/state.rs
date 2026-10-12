@@ -150,6 +150,12 @@ impl ControlPlaneState {
             })
             .or(job.max_tokens)
             .unwrap_or_default();
+        let requested_output_tokens = if active_graph_node_id.is_none()
+            && (job_uses_auto_max_tokens(job) || job.max_tokens.is_none())
+            && job.classification.task_type == RequestTaskType::Coding
+            && looks_like_application_project_prompt(&job.prompt.to_ascii_lowercase()) {
+                3072
+            } else { requested_output_tokens };
         let calculated = estimated_input_tokens
             .saturating_add(requested_output_tokens)
             .saturating_add(CONTEXT_SAFETY_TOKENS);
@@ -1878,7 +1884,8 @@ impl ControlPlaneState {
                     && q.fingerprint == crate::qualification::fingerprint(node, model));
         }
         let mut demand = Self::context_demand_for_job(job, active_graph_node_id);
-        if node.trust.capability_policy_enabled && job_uses_auto_max_tokens(job) && active_graph_node_id.is_none() {
+        if node.trust.capability_policy_enabled && job_uses_auto_max_tokens(job) && active_graph_node_id.is_none()
+            && !looks_like_application_project_prompt(&job.prompt.to_ascii_lowercase()) {
             demand.required_context_tokens = demand.estimated_input_tokens.saturating_add(demand.requested_output_tokens.min(512)).saturating_add(CONTEXT_SAFETY_TOKENS);
         }
         if node.trust.qualification_enforced() {
@@ -4585,6 +4592,13 @@ fn looks_like_complete_code_prompt(lower_prompt: &str) -> bool {
     ))
 }
 
+fn looks_like_application_project_prompt(lower: &str) -> bool {
+    !lower.starts_with("__mundusx_openai_tool_turn_v1__")
+        && contains_any(lower, &["crud", " api", "backend", "application", "project"])
+        && contains_any(lower, &["write", "build", "create", "generate", "implement", "give me", "make", "code", "full", "complete", "production"])
+        && !contains_any(lower, &["single-file", "single file", "in-memory", "in memory", "example", "demo", "prototype", "minimal", "simple"])
+}
+
 fn looks_like_substantial_code_scope(lower_prompt: &str) -> bool {
     contains_any(
         lower_prompt,
@@ -5871,6 +5885,7 @@ fn scale_auto_generation_budget(baseline: u32, ceiling: u32) -> u32 {
 
 fn job_max_tokens_for_node(job: &JobRecord, claiming_node: &NodeRecord) -> u32 {
     let requested = job.max_tokens.unwrap_or_else(|| {
+        if job.classification.task_type == RequestTaskType::Coding && looks_like_application_project_prompt(&job.prompt.to_ascii_lowercase()) { return 3072; }
         match (
             job.classification.output_format,
             job.classification.complexity,
@@ -6522,6 +6537,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
     let complete_code_prompt = looks_like_complete_code_prompt(&lower);
     let substantial_code_scope = looks_like_substantial_code_scope(&lower);
     let detailed_research_prompt = looks_like_detailed_research_prompt(&lower);
+    let application_project_prompt = looks_like_application_project_prompt(&lower);
 
     let task_type = if complete_code_prompt
         || contains_any(
@@ -6583,6 +6599,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
         ) {
         RequestComplexity::High
     } else if prompt_chars > 800
+        || application_project_prompt
         || contains_any(
             &lower,
             &["analyze", "compare", "implement", "plan", "debug", "design"],
@@ -9539,6 +9556,39 @@ mod tests {
     }
 
     #[test]
+    fn full_crud_projects_require_medium_coding_even_when_prompt_is_short() {
+        for prompt in ["give me a code in nodejs full crud student crud api", "write a complete Express REST API", "build a full student backend API"] {
+            let request: JobRequest = serde_json::from_value(serde_json::json!({"request_id":"full-api","preferred_backend":"auto","prompt":prompt,"execution_mode":"single","runtime_mode":"local"})).unwrap();
+            let classification = classify_job_request(&request);
+            assert_eq!(classification.task_type, RequestTaskType::Coding);
+            assert_ne!(classification.complexity, RequestComplexity::Low);
+        }
+        let request: JobRequest = serde_json::from_value(serde_json::json!({"request_id":"bounded-api","preferred_backend":"auto","prompt":"write a complete single-file in-memory student CRUD API","execution_mode":"single","runtime_mode":"local"})).unwrap();
+        assert_eq!(classify_job_request(&request).complexity, RequestComplexity::Low);
+    }
+
+    #[test]
+    fn automatic_full_api_budget_fits_eight_k_but_not_four_k() {
+        let mut state = capability_policy_fixture();
+        let request: JobRequest = serde_json::from_value(serde_json::json!({
+            "request_id":"full-app-context","preferred_backend":"auto",
+            "prompt":"give me a code in nodejs full crud student crud api",
+            "system_prompt":"x".repeat(8920),"max_tokens_source":"auto",
+            "runtime_mode":"local","execution_mode":"single"
+        })).unwrap();
+        let job=state.submit_job_with_mode(request,Some("chat".into()),"104".into());
+        let demand=ControlPlaneState::context_demand_for_job(&job,None);
+        assert_eq!(demand.requested_output_tokens,3072);
+        assert!(demand.required_context_tokens>4096 && demand.required_context_tokens<8192);
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"],&job));
+        let node=state.nodes.get_mut("qualified").unwrap();
+        node.worker_health.as_mut().unwrap().runtime_mode="mlx".into();
+        node.worker_health.as_mut().unwrap().capabilities.models[0].context_tokens=Some(4096);
+        node.worker_health.as_mut().unwrap().capabilities.models[0].output_capacity_mode=Some("context_window".into());
+        assert!(!ControlPlaneState::node_can_run_job(node,&job));
+    }
+
+    #[test]
     fn qwen_three_b_coder_can_take_small_coding_without_claiming_large_coding() {
         let mut state = capability_policy_fixture();
         let node = state.nodes.get_mut("qualified").unwrap();
@@ -9560,7 +9610,7 @@ mod tests {
         general.name = "tensorblock/Qwen2.5-3B-Instruct-GGUF".into();
         assert!(!crate::capability_policy::advertised_model(node, &general).task_capabilities.iter().any(|c| c=="coding"));
         let request: JobRequest = serde_json::from_value(serde_json::json!({
-            "request_id":"small-crud", "prompt":"give me a code in nodejs full crud student crud api",
+            "request_id":"small-crud", "prompt":"write a compact single-file in-memory student CRUD API",
             "system_prompt":"x".repeat(9272), "preferred_backend":"auto", "stream":true,
             "max_tokens_source":"auto", "runtime_mode":"local", "execution_mode":"single"
         })).unwrap();
@@ -10777,7 +10827,7 @@ mod tests {
             ..Default::default()
         }];
         state.heartbeat(heartbeat, "2".into());
-        let mut request = classification_request("create me a code in nodejs CRUD API student model\n/no_think");
+        let mut request = classification_request("create a simple single-file in-memory Node.js student CRUD API\n/no_think");
         request.model = None;
         request.stream = true;
         request.max_tokens = Some(6_144);
