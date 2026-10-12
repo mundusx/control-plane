@@ -2548,7 +2548,35 @@ impl ControlPlaneState {
                 decision
             })
             .collect();
-        candidates.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.node_id.cmp(&right.node_id)));
+        // Eligibility remains authoritative: only capable nodes with free slots reach
+        // this stage. Small direct requests preserve larger contributors for heavier work.
+        let smallest_first = !job.graph_execution_enabled
+            && job.routing_mode != RoutingMode::Max
+            && job.classification.complexity == RequestComplexity::Low
+            && job.scheduling_requirements.context_size == ContextSize::Small;
+        if smallest_first {
+            let priority = |decision: &SchedulerDecision| {
+                let node = &self.nodes[&decision.node_id];
+                let credible = node.trust.consecutive_failures < 3
+                    && node.trust.reliability_score() >= 70;
+                // Unrated contributors may join immediately without an inference test.
+                let unrated = node.trust.completed_jobs == 0 && node.trust.failed_jobs == 0;
+                (!(credible || unrated), Self::capacity_class_for(node))
+            };
+            candidates.sort_by(|left, right| priority(left).cmp(&priority(right))
+                .then_with(|| right.score.cmp(&left.score))
+                .then_with(|| left.node_id.cmp(&right.node_id)));
+            for decision in &mut candidates {
+                let (unreliable, capacity) = priority(decision);
+                decision.reasons.push(format!(
+                    "small_request_priority:{} capacity:{}",
+                    if unreliable { "reliability_fallback" } else { "credible_smallest_first" },
+                    capacity.as_str()
+                ));
+            }
+        } else {
+            candidates.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.node_id.cmp(&right.node_id)));
+        }
         candidates
     }
 
@@ -10170,6 +10198,59 @@ mod tests {
         assert_eq!(candidates["reservation"], false);
         assert_eq!(state.jobs["job-1"].status, JobStatus::Queued);
         assert!(state.job_candidates("missing").is_none());
+    }
+
+    fn small_request_fleet() -> ControlPlaneState {
+        let mut state = ready_state();
+        state.register(m_series_registration("node-large"));
+        state.heartbeat(ready_heartbeat("node-large", "1"), "1".into());
+        state.nodes.get_mut("node-1").unwrap().worker_health.as_mut().unwrap().capabilities.capacity_class = "micro".into();
+        state.nodes.get_mut("node-large").unwrap().worker_health.as_mut().unwrap().capabilities.capacity_class = "heavy".into();
+        state.submit_job(classification_request("Hello"), "2".into());
+        state
+    }
+
+    #[test]
+    fn small_requests_prefer_smallest_credible_available_capacity() {
+        let mut state = small_request_fleet();
+        // Larger node's score can win within its tier, but cannot override the tier.
+        state.nodes.get_mut("node-large").unwrap().trust.completed_jobs = 100;
+        state.nodes.get_mut("node-large").unwrap().trust.score = 100;
+        assert_eq!(state.ranked_candidates_for_job(&state.jobs["job-1"])[0].node_id, "node-1");
+        let claim = state.claim_job("node-large", "3".into());
+        assert!(claim.job.is_none());
+        assert!(state.claim_job("node-1", "3".into()).job.is_some());
+    }
+
+    #[test]
+    fn small_requests_fall_back_when_small_node_is_unhealthy_or_unreliable() {
+        let mut state = small_request_fleet();
+        state.nodes.get_mut("node-1").unwrap().worker_health.as_mut().unwrap().healthy = false;
+        assert_eq!(state.ranked_candidates_for_job(&state.jobs["job-1"])[0].node_id, "node-large");
+        state.nodes.get_mut("node-1").unwrap().worker_health.as_mut().unwrap().healthy = true;
+        state.nodes.get_mut("node-1").unwrap().trust.failed_jobs = 3;
+        state.nodes.get_mut("node-1").unwrap().trust.consecutive_failures = 3;
+        assert_eq!(state.ranked_candidates_for_job(&state.jobs["job-1"])[0].node_id, "node-large");
+    }
+
+    #[test]
+    fn small_requests_fall_back_when_small_node_is_busy() {
+        let mut state = small_request_fleet();
+        assert!(state.claim_job("node-1", "3".into()).job.is_some());
+        let mut request = classification_request("Hello again");
+        request.request_id = "job-2".into();
+        state.submit_job(request, "4".into());
+        assert_eq!(state.ranked_candidates_for_job(&state.jobs["job-2"])[0].node_id, "node-large");
+        assert!(state.claim_job("node-large", "5".into()).job.is_some());
+    }
+
+    #[test]
+    fn explicit_max_routing_preserves_larger_node_preference() {
+        let mut state = small_request_fleet();
+        state.jobs.get_mut("job-1").unwrap().routing_mode = RoutingMode::Max;
+        let candidates = state.ranked_candidates_for_job(&state.jobs["job-1"]);
+        assert_eq!(candidates[0].node_id, "node-large");
+        assert!(!candidates[0].reasons.iter().any(|reason| reason.starts_with("small_request_priority:")));
     }
 
     #[test]
