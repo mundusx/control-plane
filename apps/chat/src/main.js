@@ -8009,13 +8009,31 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
   }
   const message = redactSensitiveText(rawMessage);
   const conversationId = String(body?.conversationId ?? "").trim() || null;
-  const historyMessages = Array.isArray(body?.historyMessages)
+  let historyMessages = Array.isArray(body?.historyMessages)
     ? body.historyMessages
       .map((entry) => ({ role: normalizeOpenAiRole(entry?.role), content: openAiMessageText(entry?.content) }))
       .filter((entry) => entry.content)
       .slice(-20)
     : [];
+  // Browser cache is an optimization, not the source of conversation truth.
+  // Reload persisted turns when an old tab or cache miss submits no history.
+  if (conversationId && historyMessages.length === 0 && body?.internalAgentTurn !== true) {
+    try {
+      const saved = await fetchChatConversation(conversationId, config, fetchImpl, 80);
+      if (saved.unavailable) throw new Error(saved.reason || "Conversation storage unavailable");
+      historyMessages = removeCurrentMessageFromHistory(saved.messages, message).messages;
+    } catch (error) {
+      console.warn(`[conversation] failed to load streaming history: ${error.message}`);
+      if (/\b(?:also|too|it|existing|continue|extend|add|update)\b/i.test(message)) {
+        throw httpError(503, "Could not load the existing conversation. Please retry so the project context is preserved.");
+      }
+    }
+  }
   const codeProjectContinuation = isCodeProjectContinuation(message, historyMessages);
+  const projectApiExtension = codeProjectContinuation && /\b(?:crud|api|endpoint|routes?|database|backend)\b/i.test(message);
+  const runtimeMessage = projectApiExtension
+    ? `Implement the requested extension to the existing application project: ${message}`
+    : message;
   const completeCodeResponse = codeProjectContinuation || looksLikeCompleteProgramRequest(message.toLowerCase());
   const codeGenerationResponse = completeCodeResponse || looksLikeCodeGenerationRequest(message.toLowerCase());
   const userPersistence = conversationId
@@ -8116,13 +8134,11 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       ? " Continue the existing code project and finish every requested route, model, relationship, and closing delimiter. Return complete runnable code without TODOs, placeholders, or omitted sections."
       : " Finish the requested runnable code, including every required function and closing delimiter. Do not stop at an outline, TODO, placeholder, or partial implementation.";
   }
-  const boundedHistory = codeGenerationResponse
-    ? buildCompressedHistoryContext(historyMessages, {
-        currentMessage: message,
-        maxTokens: STREAMING_CODE_HISTORY_TOKENS,
-        recentMessages: 4,
-      })
-    : null;
+  const boundedHistory = buildCompressedHistoryContext(historyMessages, {
+    currentMessage: message,
+    maxTokens: STREAMING_CODE_HISTORY_TOKENS,
+    recentMessages: 4,
+  });
   const requestHistoryMessages = boundedHistory?.compressed
     ? [{
         role: "system",
@@ -8138,7 +8154,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
       // Qwen3 workers released before node-agent 0.1.40 do not pass
       // chat_template_kwargs to vLLM. The soft switch keeps live chat from
       // spending tens of seconds in hidden reasoning before its first token.
-      { role: "user", content: liveChatRuntimeMessage(message) },
+      { role: "user", content: liveChatRuntimeMessage(runtimeMessage) },
     ],
     temperature: typeof body?.temperature === "number" ? body.temperature : undefined,
     top_p: typeof body?.topP === "number" ? body.topP : undefined,
@@ -14417,7 +14433,8 @@ function isCodeTransformationFollowUp(message, history) {
 
 function isCodeProjectContinuation(message, history) {
   const lower = String(message ?? "").toLowerCase();
-  const asksToExtendProject = /\b(?:add|build|connect|create|extend|implement|include|integrate|update)\b/.test(lower);
+  const asksToExtendProject = /\b(?:add|build|connect|create|extend|implement|include|integrate|update)\b/.test(lower)
+    || (/\b(?:also|too)\b/.test(lower) && /\b(?:crud|api|endpoint|routes?|model|controller|tests?)\b/.test(lower));
   if (!asksToExtendProject || !Array.isArray(history)) {
     return false;
   }
