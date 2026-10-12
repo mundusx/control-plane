@@ -5024,6 +5024,11 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         const chunk = JSON.parse(data);
         if (chunk.error) throw new Error(chunk.error.message || "MundusX stream failed");
         completionId = completionId || chunk.id || null;
+        if (!output && ["queued", "assigned"].includes(chunk.mundusx?.queue_status)) {
+          streamState.queueStatus = chunk.mundusx.queue_status;
+          streamState.waitingMessage = chunk.mundusx.message;
+          renderConversationStreamState(streamState);
+        }
         const choice = chunk.choices?.[0];
         const delta = String(choice?.delta?.content || "");
         if (delta) {
@@ -5199,12 +5204,15 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
       if (state.status === "waiting") {
         const body = node.querySelector(".message-body");
-        body.textContent = "MundusX received your request. Waiting for response content…";
+        body.textContent = state.waitingMessage || "MundusX received your request. Checking contributor availability…";
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = "Chat · Waiting for the first response token";
+        meta.textContent = state.queueStatus === "queued"
+          ? "Chat · Waiting for a compatible contributor"
+          : state.queueStatus === "assigned" ? "Chat · Contributor assigned · Waiting for the first token"
+          : "Chat · Checking contributor availability";
         body.appendChild(meta);
-        setStatus("working", "Streaming");
+        setStatus("working", state.queueStatus === "queued" ? "Queued" : "Preparing response");
         scrollChatToLatest();
         return;
       }
@@ -8917,7 +8925,8 @@ export function normalizePublicOpenAiStreamEvent(eventText) {
     const hasContent = typeof content === "string" && content.length > 0;
     const terminal = choice?.finish_reason != null || payload?.usage != null || payload?.error != null;
     const hasToolCall = choice?.delta?.tool_calls?.length > 0 || choice?.delta?.function_call != null;
-    if (!hasContent && !hasToolCall && !terminal) return null;
+    const hasQueueStatus = ["queued", "assigned"].includes(payload?.mundusx?.queue_status);
+    if (!hasContent && !hasToolCall && !terminal && !hasQueueStatus) return null;
     if (payload && typeof payload === "object" && !payload.error) payload.model = PUBLIC_MODEL_ID;
     return `data: ${JSON.stringify(payload)}`;
   } catch {
