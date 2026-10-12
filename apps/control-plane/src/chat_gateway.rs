@@ -48,8 +48,8 @@ mod native_payload_tests {
         })).unwrap();
         let payload = native_tool_payload(&request);
         assert_eq!(payload["max_tokens"],512);
-        assert_eq!(payload["temperature"],0.1);
-        assert_eq!(payload["top_p"],0.9);
+        assert!((payload["temperature"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert!((payload["top_p"].as_f64().unwrap() - 0.9).abs() < 1e-6);
     }
 }
 
