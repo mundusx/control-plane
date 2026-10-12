@@ -8036,6 +8036,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     : message;
   const completeCodeResponse = codeProjectContinuation || looksLikeCompleteProgramRequest(message.toLowerCase());
   const codeGenerationResponse = completeCodeResponse || looksLikeCodeGenerationRequest(message.toLowerCase());
+  const codeLanguageContext = [message, ...historyMessages.slice(-4).map((entry) => entry.content)].join("\n");
   const userPersistence = conversationId
     ? appendConversationMessage(conversationId, "user", message, config, fetchImpl).catch((error) => {
       console.warn(`[conversation] failed to persist streaming user message: ${error.message}`);
@@ -8192,7 +8193,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     // first segment finishes normally, while preventing any unrecognized
     // code phrasing from surfacing a truncated answer to the browser.
     continueOnLength: true,
-    validateCompleteAnswer: codeGenerationResponse && /\b(?:node(?:\.?js)?|express)\b/i.test(message) && !/\b(?:react|jsx|tsx|next\.?js)\b/i.test(message)
+    validateCompleteAnswer: codeGenerationResponse && /\b(?:node(?:\.?js)?|express)\b/i.test(codeLanguageContext) && !/\b(?:react|jsx|tsx|next\.?js)\b/i.test(codeLanguageContext)
       ? (content, { signal }) => repairJavascriptCodeBlocks(content, async (code, error) => {
           if (signal.aborted) throw new Error("Code validation cancelled");
           const repaired = await submitChatTurn({

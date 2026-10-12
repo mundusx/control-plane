@@ -7757,3 +7757,22 @@ test("streaming follow-ups fail clearly when saved conversation cannot be loaded
     }),/Could not load the existing conversation/);
   assert.equal(modelCalls,0);
 });
+
+test("browser project follow-up validates JavaScript using prior runtime context", async () => {
+  const writes = []; const encoder = new TextEncoder(); let repairs = 0;
+  const response = {writableEnded:false,writeHead(){},flushHeaders(){},write(frame){writes.push(frame);return true;},end(frame=""){writes.push(frame);this.writableEnded=true;}};
+  const bad = "```javascript\nrouter.delete/:id', handler);\n```";
+  const result = await streamChatTurn(response,{message:"add course crud api also",toolMode:false,historyMessages:[{role:"user",content:"Build a Node.js Express student CRUD API"},{role:"assistant",content:"```javascript\nconst express = require('express');\n```"}]},
+    configFromEnv({MUNDUSX_CONTROL_PLANE_URL:"https://uat.mundusx.ai"}),async (url, init={}) => {
+      if (url.endsWith("/v1/chat/completions")) return new Response(new ReadableStream({start(controller){
+        controller.enqueue(encoder.encode('data: '+JSON.stringify({id:"code-job",choices:[{delta:{content:bad},finish_reason:null}]})+'\n\n'+
+          'data: '+JSON.stringify({id:"code-job",choices:[{delta:{},finish_reason:"stop"}]})+'\n\ndata: [DONE]\n\n'));controller.close();
+      }}),{status:200,headers:{"X-MundusX-Stream-Mode":"live-delta"}});
+      if (url.includes("/v1/nodes")) return jsonResponse({items:[]});
+      if (url.endsWith("/v1/jobs")) {repairs++; const body=JSON.parse(init.body);assert.match(body.prompt,/Repair only the syntax/);
+        return jsonResponse({job_id:"repair",status:"completed",output:"```javascript\nrouter.delete('/:id', handler);\n```"});}
+      throw new Error("Unexpected request "+url);
+    });
+  assert.equal(repairs,1); assert.equal(result.finishReason,"stop");assert.match(result.content,/router.delete\('/);
+  assert.match(writes.join(""),/replace_content/);assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length,1);
+});
