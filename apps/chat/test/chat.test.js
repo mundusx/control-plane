@@ -321,7 +321,7 @@ test("renders a usable chat page", () => {
   assert.match(html, /state\.node\?\.isConnected/);
   assert.match(html, /conversationStreamStates\.get\(state\.conversationId\) === state/);
   assert.match(html, /streamState\.status = "waiting"/);
-  assert.match(html, /Chat · Waiting for the first response token/);
+  assert.match(html, /Chat · Waiting for a compatible contributor/);
   assert.match(html, /response\.headers\.get\("x-mundusx-completion-id"\)/);
   assert.match(html, /const firstTokenDeadline = Date\.now\(\) \+ 300000/);
   assert.match(html, /const yieldToStreamPaint = \(\) => new Promise/);
@@ -345,7 +345,7 @@ test("renders a usable chat page", () => {
   assert.match(html, /\["PageUp", "Home", "ArrowUp"\]/);
   assert.match(html, /new ResizeObserver\(\(\) => scrollChatToLatest\(\)\)/);
   assert.doesNotMatch(html, /followLatestMessage = isChatNearBottom\(\)/);
-  assert.match(html, /setStatus\("working", "Streaming"\);\s*scrollChatToLatest\(\)/);
+  assert.match(html, /state\.queueStatus === "queued" \? "Queued" : "Preparing response"/);
   assert.doesNotMatch(html, /messagesEl\.scrollTop = messagesEl\.scrollHeight/);
   const embeddedScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
   assert.equal(embeddedScripts.length, 2);
@@ -1873,6 +1873,42 @@ test("routes polynomial subtraction expansion to the math tool", async () => {
   assert.equal(result.response.answer, "-3x^4 + 6x^3 - 15x^2 - 13x - 7");
   assert.match(result.output, /Expression: 6x\^3 - 9x\^2 - 13x - 4 - \(3x\^4 \+ 6x\^2 \+ 3\)/);
   assert.match(result.output, /Answer: -3x\^4 \+ 6x\^3 - 15x\^2 - 13x - 7/);
+});
+
+test("browser queue events update waiting state without becoming answer tokens", () => {
+  const html = page();
+  const start = html.indexOf("const consumeEvent = (eventText) => {", html.indexOf("const firstTokenDeadline"));
+  const end = html.indexOf("\n      };", start) + "\n      };".length;
+  assert.ok(start > 0 && end > start);
+  const streamState = {status:"waiting"};
+  const consume = new Function("streamState", "renderConversationStreamState",
+    'let output="",completionId=null,sawDone=false,finishReason=null,unpaintedDeltaCharacters=0;' +
+    html.slice(start,end) + ';return consumeEvent;')(streamState, () => {});
+  consume('data: {"choices":[],"mundusx":{"queue_status":"queued","message":"Waiting for a coding contributor"}}');
+  assert.equal(streamState.status, "waiting");
+  assert.equal(streamState.queueStatus, "queued");
+  assert.equal(streamState.output, undefined);
+  consume('data: {"choices":[],"mundusx":{"queue_status":"assigned","message":"Preparing response"}}');
+  assert.equal(streamState.queueStatus, "assigned");
+  consume('data: {"choices":[{"delta":{"content":"const app = express();"}}]}');
+  assert.equal(streamState.status, "streaming");
+  assert.equal(streamState.output, "const app = express();");
+  consume('data: {"choices":[],"mundusx":{"queue_status":"queued","message":"Late event"}}');
+  assert.equal(streamState.status, "streaming");
+  assert.equal(streamState.output, "const app = express();");
+});
+
+test("queue status survives the relay without becoming answer content", () => {
+  for (const queue_status of ["queued", "assigned"]) {
+    const event = normalizePublicOpenAiStreamEvent("data: " + JSON.stringify({
+      model:"internal-model",choices:[],mundusx:{queue_status,message:"Waiting for a contributor"}
+    }));
+    const parsed = JSON.parse(event.slice(6));
+    assert.equal(parsed.mundusx.queue_status, queue_status);
+    assert.deepEqual(parsed.choices, []);
+    assert.equal(parsed.model, "mundusx-agnostic");
+  }
+  assert.equal(normalizePublicOpenAiStreamEvent('data: {"choices":[],"mundusx":{"queue_status":"unknown"}}'), null);
 });
 
 test("browser streaming uses the identity skill for shorthand and names", async () => {
