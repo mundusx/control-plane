@@ -1,4 +1,5 @@
 import { repairJavascriptCodeBlocks } from "./javascript-code-validation.js";
+import { normalizeNativeToolSse, NativeToolFormatError } from './native-tool-response.js';
 import { assertNoRepetition } from './repetition-guard.js';
 import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
@@ -173,19 +174,18 @@ const WELCOME_INNER_HTML = `<div class="welcome-inner">
 export function parseAgentModelProviders(env = process.env) {
   const urls = String(env.MUNDUSX_AGENT_MODEL_BASE_URLS ?? "")
     .split(",")
-    .map((value) => normalizeOrigin(value.trim()))
-    .filter(Boolean);
+    .map((value) => value.trim());
   const keys = String(env.MUNDUSX_AGENT_MODEL_API_KEYS ?? "")
     .split(",")
     .map((value) => value.trim());
   const models = String(env.MUNDUSX_AGENT_MODEL_IDS ?? "")
     .split(",")
     .map((value) => value.trim());
-  return urls.map((baseUrl, index) => ({
-    baseUrl,
+  return urls.flatMap((baseUrl, index) => baseUrl ? [{
+    baseUrl: normalizeOrigin(baseUrl),
     apiKey: keys[index] || keys[0] || "",
     model: models[index] || models[0] || "",
-  }));
+  }] : []);
 }
 
 export function configFromEnv(env = process.env) {
@@ -7780,6 +7780,7 @@ export async function relayNativeHermesToolStream(
   config = configFromEnv(),
   fetchImpl = fetch,
   onTiming = (timing) => console.info(JSON.stringify({ event: "hermes_model_turn_timing", ...timing })),
+  recoveryUsed = false,
 ) {
   const startedAt = performance.now();
   let committed = false;
@@ -7865,6 +7866,7 @@ export async function relayNativeHermesToolStream(
         inspected += decoder.decode(value, { stream: true });
         const verdict = inspectNativeOpenAiEvents(inspected);
         if (verdict.error) {
+          if (/native OpenAI model ended with tool_calls but returned no tool call/.test(verdict.error)) throw new NativeToolFormatError('Required tool call missing');
           if (/maximum context length|context_length_exceeded|exceeds the model's context/i.test(verdict.error)) {
             throw httpError(400, verdict.error);
           }
@@ -7892,19 +7894,32 @@ export async function relayNativeHermesToolStream(
           expiresAt: Date.now() + AGENT_PROVIDER_AFFINITY_TTL_MS,
         });
       }
-      startOpenAiStream(response, "native-agent-tools");
-      committed = true;
-      for (const chunk of buffered) response.write(chunk);
+      // Tool arguments are executable input. Hold this turn until its terminal
+      // frame so incomplete Qwen markup cannot masquerade as a final answer.
+      let totalBytes = buffered.reduce((sum, chunk) => sum + chunk.length, 0);
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        response.write(value);
+        totalBytes += value.length;
+        if (totalBytes > MAX_AGENT_MODEL_BODY_BYTES) throw new Error('Native tool response exceeds the response budget');
+        buffered.push(value);
       }
+      const normalized = normalizeNativeToolSse(Buffer.concat(buffered).toString('utf8'), body);
+      startOpenAiStream(response, "native-agent-tools");
+      committed = true;
+      response.write(normalized);
       recordTiming({ outcome: "completed", upstream_headers_ms: headersMs, first_event_ms: firstEventMs, provider: new URL(provider.baseUrl).hostname });
       response.off?.("close", onClose);
       return response.end();
     } catch (error) {
       if (disconnected) { recordTiming({ outcome: "cancelled" }); response.off?.("close", onClose); return; }
+      if (error?.code === 'native_tool_format' && !recoveryUsed) {
+        await reader?.cancel?.().catch(() => {});
+        controller.abort();
+        response.off?.("close", onClose);
+        recordTiming({ outcome: "tool_format_recovery" });
+        return await relayNativeHermesToolStream(response, {...body, messages:[...body.messages,{role:'user',content:'The previous model response was rejected and executed nothing. Continue from successful tool results. Return one complete native tool call with all required arguments; no markup, narration, repeated exploration, or partial code. If finished and tools are optional, return a concise final answer.'}]}, config, fetchImpl, onTiming, true);
+      }
       // Once bytes have reached Hermes, another provider must never replay the
       // same turn into that response. Send an explicit stream failure instead.
       if (committed) {
