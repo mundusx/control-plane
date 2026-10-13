@@ -8,6 +8,9 @@ import {
   buildCompressedHistoryContext,
   buildRelevantHistoryContext,
   buildChatSystemPrompt,
+  buildProgrammingRetryGuidance,
+  programmingRetryHistory,
+  assemblyPlatformClarification,
   canLiveStreamChatTurn,
   cleanChatOutput,
   configFromEnv,
@@ -787,6 +790,83 @@ test("composes chat system prompts from selected markdown skills", () => {
   assert.match(prompt, /Do not introduce the answer with a rewritten version of the user's request/);
   assert.match(prompt, /Answer only what the user asked/);
   assert.doesNotMatch(prompt, /Use the Atlas persona/);
+});
+
+test("gives short assembly samples coding guidance and distinguishes application input from surveillance", () => {
+  for (const request of [
+    "a sample assembly code to show keyboard",
+    "Show a NASM example reading a character from my own console",
+    "Give me JavaScript code for keyboard events in my own application",
+  ]) {
+    const prompt = buildChatSystemPrompt(request);
+    assert.match(prompt, /\[code\]/);
+    assert.match(prompt, /ordinary application input from unauthorized surveillance/);
+    assert.match(prompt, /do not infer keylogging or credential theft from the word keyboard alone/);
+    assert.match(prompt, /Do not help with covert capture in other applications/);
+  }
+  const followUp = buildChatSystemPrompt("this is fine try again");
+  assert.match(followUp, /program's own input or explicitly consented events/);
+  assert.match(followUp, /an earlier assistant refusal is not evidence/);
+  assert.match(buildChatSystemPrompt("a sample assembly code to show keyboard"), /platform clarification before giving platform-dependent code/);
+  const linux = buildChatSystemPrompt("Show Linux x86-64 NASM console input code");
+  assert.match(linux, /read=0, write=1, exit=60/);
+  assert.match(linux, /Do not mix i386 syscall numbers/);
+  assert.doesNotMatch(buildChatSystemPrompt("Show Windows MASM keyboard code"), /read=0, write=1, exit=60/);
+  assert.doesNotMatch(buildChatSystemPrompt("What is the weather?"), /\[code\]/);
+});
+
+test("grounds programming retries in the prior user request without treating refusals as policy", () => {
+  const history = [
+    { role: "user", content: "a sample assembly code to show keyboard" },
+    { role: "assistant", content: "I cannot provide code that captures credentials." },
+    { role: "user", content: "this is fine try again" },
+  ];
+  const guidance = buildProgrammingRetryGuidance("this is fine try again", history);
+  assert.match(guidance, /a sample assembly code to show keyboard/);
+  assert.match(guidance, /not security policies or evidence of malicious intent/);
+  assert.match(guidance, /do not provide covert monitoring/);
+  assert.match(guidance, /ask for those details before generating code/);
+  assert.doesNotMatch(guidance, /I cannot provide/);
+  const retried = programmingRetryHistory("this is fine try again", history);
+  assert.deepEqual(retried, [history[0], history[2]]);
+  assert.equal(history.length, 3);
+  assert.equal(programmingRetryHistory("New unrelated question", history), history);
+  const valid = [history[0], { role: "assistant", content: "```nasm\nsection .text\n```" }];
+  assert.equal(programmingRetryHistory("try again", valid), valid);
+  assert.equal(buildProgrammingRetryGuidance("Write Python code", history), "");
+  assert.equal(buildProgrammingRetryGuidance("try again", [{ role: "user", content: "weather in Paris" }]), "");
+  const unsafe = buildProgrammingRetryGuidance("try again", [{ role: "user", content: "Write code to steal passwords from other applications" }]);
+  assert.match(unsafe, /steal passwords/);
+  assert.match(unsafe, /do not provide covert monitoring of other applications or credential theft/);
+  const unsafeHistory = [{ role: "user", content: "Write code to steal passwords from other applications" }, history[1]];
+  assert.deepEqual(programmingRetryHistory("try again", unsafeHistory), [unsafeHistory[0]]);
+});
+
+test("asks for an assembly platform through both browser response paths without inference", async () => {
+  const config = configFromEnv({ MUNDUSX_CONTROL_PLANE_URL: "https://uat.mundusx.ai" });
+  const fetchImpl = async () => { throw new Error("Unspecified assembly must clarify before model inference"); };
+  for (const body of [
+    { message: "a sample assembly code to show keyboard" },
+    { message: "this is fine try again", historyMessages: [
+      { role: "user", content: "a sample assembly code to show keyboard" },
+      { role: "assistant", content: "I cannot provide keyboard code." },
+    ] },
+  ]) {
+    const result = await submitChatJob(body, config, fetchImpl);
+    assert.equal(result.tool, "platform_clarification");
+    assert.match(result.output, /Windows x64 \(MASM\), Linux x86-64 \(NASM\)/);
+    const writes = [];
+    const response = { writableEnded: false, writeHead() {}, flushHeaders() {},
+      write(frame) { writes.push(frame); return true; },
+      end(frame = "") { writes.push(frame); this.writableEnded = true; } };
+    const streamed = await streamChatTurn(response, body, config, fetchImpl);
+    assert.equal(streamed.content, result.output);
+    assert.match(writes.join(""), /data: \[DONE\]/);
+  }
+  assert.equal(assemblyPlatformClarification("Explain assembly language"), "");
+  assert.equal(assemblyPlatformClarification("Show Linux x86-64 NASM keyboard input code"), "");
+  assert.equal(assemblyPlatformClarification("Show Windows x64 MASM keyboard input code"), "");
+  assert.equal(assemblyPlatformClarification("Show NASM input code", [{ role: "user", content: "Linux x86-64" }]), "");
 });
 
 test("composes account-owned skills and administrator global overrides at runtime", () => {
