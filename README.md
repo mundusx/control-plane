@@ -144,3 +144,7 @@ These unauthenticated routes are the stable client boundary for Open WebUI, Herm
 - **`operatorAuth: disabled (MUNDUSX_AUTH_DISABLED=true)`** in logs means operator endpoints are deliberately open for local/UAT smoke tests. Startup rejects this setting when `MUNDUSX_ENVIRONMENT` is `production` or another non-local environment.
 - **`operatorAuth: disabled (MUNDUSX_OPERATOR_TOKEN missing)`** in logs means operator endpoints are open because no token was configured.
 - **`operatorAuth warning: OPENGPU_OPERATOR_TOKEN is deprecated`** in logs means the process is using the old token alias and should be renamed to `MUNDUSX_OPERATOR_TOKEN`.
+
+## License
+
+Project-owned source code is licensed under [Apache License 2.0](LICENSE), including commercial use. Third-party components retain their respective licenses and notices.
