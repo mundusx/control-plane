@@ -7947,7 +7947,7 @@ export async function relayNativeHermesToolStream(
         controller.abort();
         response.off?.("close", onClose);
         recordTiming({ outcome: "tool_format_recovery" });
-        return await relayNativeHermesToolStream(response, {...body, messages:[...body.messages,{role:'user',content:'The previous model response was rejected and executed nothing. Continue from successful tool results. Return one complete native tool call with all required arguments; no markup, narration, repeated exploration, or partial code. If finished and tools are optional, return a concise final answer.'}]}, config, fetchImpl, onTiming, true);
+        return await relayNativeHermesToolStream(response, {...body, messages:[...body.messages,{role:'user',content:'The previous model response was rejected and executed nothing. Continue from successful tool results. Return one small, complete native tool call using only the selected tool schema fields and all required arguments; no markup, narration, repeated exploration, or partial code. Use an editing tool for edits; never send replacement text to a read tool. Repair with a targeted patch rather than rewriting a large file. If finished and tools are optional, return a concise final answer.'}]}, config, fetchImpl, onTiming, true);
       }
       // Once bytes have reached Hermes, another provider must never replay the
       // same turn into that response. Send an explicit stream failure instead.

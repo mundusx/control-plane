@@ -2,6 +2,13 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {normalizeNativeToolSse} from '../src/native-tool-response.js';
 const request={tool_choice:'required',tools:[{type:'function',function:{name:'read_file',parameters:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}}}]};
 const stream=(content,finish='stop')=>'data: '+JSON.stringify({id:'probe',choices:[{delta:{content},finish_reason:finish}]})+'\n\ndata: [DONE]\n\n';
+
+test('an edit disguised as a read is rejected before a tool can ignore its edit fields',()=>{
+ const definition={...request.tools[0].function,parameters:{type:'object',properties:{path:{type:'string'}},required:['path']}};
+ const source='data: '+JSON.stringify({choices:[{delta:{tool_calls:[{index:0,id:'misnamed-edit',type:'function',function:{name:'read_file',arguments:JSON.stringify({path:'server.cjs',old_string:'broken',new_string:'fixed'})}}]},finish_reason:'tool_calls'}]})+'\n\ndata: [DONE]\n\n';
+ assert.throws(()=>normalizeNativeToolSse(source,{...request,tools:[{type:'function',function:definition}]}),/undeclared fields/);
+ assert.doesNotThrow(()=>normalizeNativeToolSse(source,{...request,tools:[{type:'function',function:{...definition,parameters:{...definition.parameters,additionalProperties:true}}}]}));
+});
 test('complete Qwen markup becomes a real native tool call',()=>{const s=normalizeNativeToolSse(stream('<function=read_file>\n<parameter=path>\npackage.json\n</parameter>\n</function>\n</tool_call>'),request);assert.match(s,/"tool_calls"/);assert.match(s,/package.json/);assert.ok(!s.includes('<function='));});
 test('incomplete, unknown, duplicate and schema-invalid tool calls are rejected',()=>{for(const content of ['<function=read_file><parameter=path>x</parameter>','<function=delete></function>','<function=read_file><parameter=path>x</parameter><parameter=path>y</parameter></function>','<function=read_file><parameter=extra>3</parameter></function>','<function=read_file></function>'])assert.throws(()=>normalizeNativeToolSse(stream(content),request));assert.throws(()=>normalizeNativeToolSse(stream('hello','tool_calls'),request));assert.throws(()=>normalizeNativeToolSse(stream('hello','length'),request));});
 test('plain optional answers remain intact; transport errors are not protocol repairs',()=>{const source=stream('Finished');assert.equal(normalizeNativeToolSse(source,{...request,tool_choice:'auto'}),source);assert.throws(()=>normalizeNativeToolSse('data: {"error":{"message":"socket failed"}}\n\n',request),e=>e.code==='upstream_error');});
