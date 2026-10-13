@@ -452,6 +452,10 @@ export function page(config = configFromEnv()) {
           <a class="harness-download primary" id="harness-download" href="${escapeHtml(config.harnessRunnerDownloadUrl)}" download>Download MundusX + Hermes</a>
           <p id="harness-runner-status" aria-live="polite">After installation, connect this computer to your account and approve it in the browser. Compute contribution remains off unless you enable it separately.</p>
         </section>
+        <div class="project-create-progress" id="project-create-progress" role="status" aria-live="polite" hidden>
+          <span class="project-create-spinner" aria-hidden="true"></span>
+          <span><strong id="project-create-progress-title">Creating project…</strong><small>Your local agent is preparing the folder. This may take a moment.</small></span>
+        </div>
         <footer class="project-actions" id="project-actions">
           <output id="harness-result" aria-live="polite"></output>
           <button class="harness-submit" type="submit" disabled>Create project</button>
@@ -1938,6 +1942,13 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     .harness-form fieldset label { display: flex; align-items: center; gap: 8px; }
     .project-browser { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); }
     .project-browser summary { font-weight: 700; cursor: pointer; }
+    .project-create-progress { display:flex; align-items:center; gap:12px; padding:14px; border:1px solid var(--line); border-radius:12px; }
+    .project-create-progress[hidden] { display:none; }
+    .project-create-progress > span:last-child { display:grid; gap:4px; }
+    .project-create-progress small { color:var(--muted); }
+    .project-create-spinner { flex:none; width:22px; height:22px; border:3px solid var(--line-strong); border-top-color:var(--cyan); border-radius:50%; animation:mx-spin .8s linear infinite; }
+    .harness-submit[aria-busy="true"] { cursor:wait; }
+    @media (prefers-reduced-motion: reduce) { .project-create-spinner { animation:none; } }
     .harness-submit { border: 0; border-radius: 10px; background: var(--gradient); color: white; padding: 12px; font: inherit; font-weight: 700; cursor: pointer; }
     .sr-only { position: absolute!important; width: 1px!important; height: 1px!important; padding: 0!important; margin: -1px!important; overflow: hidden!important; clip: rect(0,0,0,0)!important; white-space: nowrap!important; border: 0!important; }
     .projects-overlay { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:10px; background:rgba(38,44,62,.42); backdrop-filter:blur(2px); }
@@ -3726,8 +3737,23 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       if (projectSlugEl.value !== slug) projectSlugEl.value = slug;
       updateProjectCreateAvailability();
     });
+    let projectCreateBusy = false;
     function updateProjectCreateAvailability() {
-      if (harnessSubmitEl) harnessSubmitEl.disabled = !projectSlugEl?.value.trim() || !localRunnerReady;
+      if (harnessSubmitEl) harnessSubmitEl.disabled = projectCreateBusy || !projectSlugEl?.value.trim() || !localRunnerReady;
+    }
+    function setProjectCreateBusy(busy, message) {
+      projectCreateBusy = busy;
+      harnessFormEl?.setAttribute("aria-busy", String(busy));
+      const progress = document.getElementById("project-create-progress");
+      const title = document.getElementById("project-create-progress-title");
+      if (progress) progress.hidden = !busy;
+      if (title && message) title.textContent = message;
+      for (const input of harnessFormEl?.querySelectorAll("input") || []) input.disabled = busy;
+      if (harnessSubmitEl) {
+        harnessSubmitEl.textContent = busy ? "Creating…" : "Create project";
+        harnessSubmitEl.setAttribute("aria-busy", String(busy));
+      }
+      updateProjectCreateAvailability();
     }
     function projectExecutionMode(template) {
       const preferred = template === "java-maven" ? ["hybrid", "sandbox"] : ["sandbox", "hybrid"];
@@ -3797,24 +3823,25 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     });
     harnessFormEl?.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!projectsAvailableOnDevice()) return;
+      if (projectCreateBusy || !projectsAvailableOnDevice()) return;
       const data = new FormData(harnessFormEl);
       const projectSlug = normalizeProjectSlug(data.get("project_slug"));
       if (!projectSlug) {
         harnessResultEl.textContent = "Enter a lowercase project name";
         return;
       }
-      await loadHarnessRunners().catch(() => []);
-      if (!localRunnerReady) {
-        harnessResultEl.textContent = currentUser
-          ? "A connected local coding agent is required before creating this project."
-          : "Sign in before connecting a local project.";
-        if (!currentUser) openAuthentication();
-        return;
-      }
-      setActiveProject({ slug: projectSlug });
-      harnessResultEl.textContent = data.get("initialize_git") ? "Creating project and initializing Git…" : "Creating project…";
+      harnessResultEl.textContent = "";
+      setProjectCreateBusy(true, "Checking your local agent…");
       try {
+        await loadHarnessRunners().catch(() => []);
+        if (!localRunnerReady) {
+          harnessResultEl.textContent = currentUser
+            ? "A connected local coding agent is required before creating this project."
+            : "Sign in before connecting a local project.";
+          if (!currentUser) openAuthentication();
+          return;
+        }
+        setProjectCreateBusy(true, data.get("initialize_git") ? "Creating project and initializing Git…" : "Creating project…");
         if (data.get("initialize_git")) {
           await projectOperation(projectSlug, {
             operation: "git_init",
@@ -3824,16 +3851,16 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
         } else {
           await projectOperation(projectSlug, { operation: "ensure_project" }, true);
         }
+        setActiveProject({ slug: projectSlug });
+        harnessFormEl.reset();
+        closeProjects();
+        showToast('Project "' + projectSlug + '" created');
+        promptEl?.focus();
       } catch (error) {
         harnessResultEl.textContent = error.message || "Project could not be created";
-        return;
+      } finally {
+        setProjectCreateBusy(false);
       }
-      harnessResultEl.textContent = "";
-      harnessFormEl.reset();
-      updateProjectCreateAvailability();
-      closeProjects();
-      showToast('Project "' + projectSlug + '" created');
-      promptEl?.focus();
     });
 
     enterToSendToggleEl?.addEventListener("click", () => {
