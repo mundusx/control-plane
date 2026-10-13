@@ -48,7 +48,7 @@ export function normalizeNativeToolSse(source,request) {
   }
   content='';
  }
- const ids=new Set();for(const call of normalized){const definition=request.tools?.find(t=>t.function?.name===call.function.name);if(!definition||!call.id||ids.has(call.id))throw new NativeToolFormatError('Unknown or duplicate tool call');ids.add(call.id);let args;try{args=JSON.parse(call.function.arguments)}catch{throw new NativeToolFormatError('Incomplete tool arguments');}validate(args,definition.function.parameters);}
+ const ids=new Set();for(const call of normalized){const definition=request.tools?.find(t=>t.function?.name===call.function.name);if(!definition||!call.id||ids.has(call.id))throw new NativeToolFormatError('Unknown or duplicate tool call');ids.add(call.id);let args;try{args=JSON.parse(call.function.arguments)}catch{throw new NativeToolFormatError('Incomplete tool arguments');}const parameters=definition.function.parameters;const declared=parameters?.properties;if(declared&&Object.keys(declared).length&&parameters.additionalProperties===undefined&&args&&typeof args==='object'&&!Array.isArray(args)&&Object.keys(args).some(key=>!Object.hasOwn(declared,key)))throw new NativeToolFormatError('Tool arguments contain undeclared fields');validate(args,parameters);}
  if(!normalized.length&&(finish==='tool_calls'||request.tool_choice==='required'))throw new NativeToolFormatError('Required tool call missing');
  if(!normalized.length&&!content.trim())throw new NativeToolFormatError('Empty model answer');
  if(!normalized.length)return source;
