@@ -1,3 +1,4 @@
+import { applyHermesExecutionPolicy } from "./features/agent/execution-policy.js";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { Pool } from "pg";
@@ -646,7 +647,7 @@ export class PostgresAuthStore {
         where connection_id = $1::uuid and user_id = $2::uuid and revoked_at is null`,
       [connectionId, userId]);
     }
-    return result.rows[0] ?? null;
+    return applyHermesExecutionPolicy(result.rows[0] ?? null);
   }
 
   async heartbeatLocalAgentTask(userId, connectionId, taskId) {
