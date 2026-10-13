@@ -28,6 +28,7 @@ function describeAgentProgress(event = {}, active = false) {
     return {label, purpose: type === "tool_completed" && active ? "Waiting for the next agent action; this tool has finished." : purpose, source:"Tool", outcome};
   }
   const labels = {
+    swarm_fallback:["Continuing with one Hermes worker", "Project Swarm is no longer active; Hermes is handling this task sequentially.", "Harness"],
     harness_started:["Opening the project workspace", "Prepare the harness for this request.", "Harness"],
     model_turn_queued:["Preparing a model request", "Gather the context for the next action.", "Harness"],
     model_requested:["Waiting for the model response", "A model request has been sent for the next action or answer.", "Model"],
@@ -42,4 +43,26 @@ function describeAgentProgress(event = {}, active = false) {
   if (type === "skills_selected") return {label:"Loaded skills: " + (Array.isArray(metadata.skills) ? metadata.skills : []).map(s => String(s).replaceAll("-", " ")).join(", "),purpose:"Use these workflows for this project task.",source:"Harness",outcome:"info"};
   const [label,purpose,source] = labels[type] || [String(event?.summary || "Waiting for the connector"), "The next update will appear when the harness reports activity.", "Harness"];
   return {label,purpose,source,outcome:type === "model_failed" ? "failed" : "info"};
+}
+
+function meaningfulAgentProgressEvents(events) {
+  const items = (Array.isArray(events) ? events : []).filter(item => item?.event
+    && (item.event.type !== "agent_progress" || (item.event.summary && item.event.summary !== "Hermes is working")));
+  const hasFallback = items.some(item => item.event.type === "swarm_fallback");
+  return items.filter(item => !hasFallback || !String(item.event.type).startsWith("swarm_") || item.event.type === "swarm_fallback")
+    .map((item, index) => ({item, index, at: Date.parse(item.created_at)}))
+    .sort((a, b) => Number.isFinite(a.at) && Number.isFinite(b.at) ? a.at - b.at || a.index - b.index : a.index - b.index)
+    .map(entry => entry.item);
+}
+
+function agentProgressActivityMarker(payload) {
+  const items = meaningfulAgentProgressEvents(payload?.events);
+  const latest = items.at(-1);
+  return [payload?.state, items.length, latest?.sequence, latest?.event?.type, latest?.event?.summary].join(":");
+}
+
+function agentProgressLastActivityAt(payload, fallback) {
+  const latest = meaningfulAgentProgressEvents(payload?.events).at(-1);
+  const at = Date.parse(latest?.created_at);
+  return Number.isFinite(at) ? at : fallback;
 }

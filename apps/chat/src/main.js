@@ -4619,10 +4619,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const renderProgress = (extra = {}) => {
         const events = Array.isArray(payload?.events) ? payload.events : [];
         const latestEvent = events.at(-1);
-        const marker = [payload?.state, events.length, latestEvent?.sequence, latestEvent?.event?.type, latestEvent?.event?.summary].join(":");
+        const marker = agentProgressActivityMarker(payload);
         if (marker !== progressMarker) {
           progressMarker = marker;
-          progressLastActivityAt = Date.now();
+          progressLastActivityAt = agentProgressLastActivityAt(payload, Date.now());
         }
         renderLocalAgentProgressSafely(pending, payload, runtimeLabel, {
           onCancel: cancelTask,
@@ -4763,7 +4763,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
 
     async function resumeLocalAgentPolling(pending, initialPayload, saved) {
       let payload = initialPayload;
-      let lastActivityAt = Date.now();
+      let lastActivityAt = agentProgressLastActivityAt(payload, Date.now());
       let marker = "";
       let pollRecoveryDeadline = 0;
       let cancellationRequested = false;
@@ -4771,10 +4771,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const renderProgress = (extra = {}) => {
         const events = Array.isArray(payload?.events) ? payload.events : [];
         const latestEvent = events.at(-1);
-        const nextMarker = [payload?.state, events.length, latestEvent?.sequence, latestEvent?.event?.type, latestEvent?.event?.summary].join(":");
+        const nextMarker = agentProgressActivityMarker(payload);
         if (nextMarker !== marker) {
           marker = nextMarker;
-          lastActivityAt = Date.now();
+          lastActivityAt = agentProgressLastActivityAt(payload, Date.now());
         }
         renderLocalAgentProgressSafely(pending, payload, saved.runtimeLabel || "Hermes", {
           conversationId: saved.conversationId,
@@ -4866,7 +4866,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const body = pending.querySelector(".message-body");
       if (!body) return;
       const events = Array.isArray(payload?.events) ? payload.events : [];
-      const meaningfulEvents = events.filter((item) => item?.event && (item.event.type !== "agent_progress" || (item.event.summary && item.event.summary !== "Hermes is working")));
+      const meaningfulEvents = meaningfulAgentProgressEvents(events);
       const latest = meaningfulEvents.at(-1)?.event || null;
       const progress = describeAgentProgress(latest, true);
       const compute = watchProjectCompute(pending,payload,runtimeLabel,options);
