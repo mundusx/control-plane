@@ -10,10 +10,10 @@ test('Hermes relay reports timings without logging messages or credentials',asyn
  await relayNativeHermesToolStream(r,{request_id:'turn-1',messages:[{role:'user',content:'private project prompt'}],tools:[{}]},config(),async()=>new Response(event+'data: [DONE]\n\n',{headers:{'content-type':'text/event-stream'}}),t=>timings.push(t));
  assert.equal(timings.length,1);assert.equal(timings[0].outcome,'completed');assert.equal(timings[0].request_id,'turn-1');assert.ok(timings[0].first_event_ms>=0);assert.ok(!JSON.stringify(timings).includes('private project prompt'));assert.ok(r.chunks.join('').includes('hello'));
 });
-test('Hermes relay never switches providers after emitting a partial model turn',async()=>{
+test('Hermes relay never exposes an interrupted tool turn',async()=>{
  resetAgentProviderCircuits();const r=response(),timings=[];let calls=0,pulls=0;
- await relayNativeHermesToolStream(r,{messages:[],tools:[{}]},config(),async()=>{calls++;return new Response(new ReadableStream({pull(c){if(pulls++===0)c.enqueue(encoder.encode(event));else c.error(new Error('socket failed'));}}),{headers:{'content-type':'text/event-stream'}})},t=>timings.push(t));
- assert.equal(calls,1);assert.equal(timings[0].outcome,'stream_failed');assert.ok(r.chunks.join('').includes('upstream_stream_error'));assert.equal(r.writableEnded,true);
+ await assert.rejects(relayNativeHermesToolStream(r,{messages:[],tools:[{}]},config(),async()=>{calls++;return new Response(new ReadableStream({pull(c){if(pulls++===0)c.enqueue(encoder.encode(event));else c.error(new Error('socket failed'));}}),{headers:{'content-type':'text/event-stream'}})},t=>timings.push(t)),/providers failed/);
+ assert.equal(calls,2);assert.equal(timings[0].outcome,'providers_failed');assert.equal(r.chunks.length,0);
 });
 test('disconnecting the project runner aborts its upstream model request',async()=>{
  resetAgentProviderCircuits();const {EventEmitter}=await import('node:events');const r=Object.assign(new EventEmitter(),response());const timings=[];let aborted=false;
