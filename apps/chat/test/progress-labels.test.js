@@ -13,7 +13,7 @@ test("queued tasks render before any progress event exists",()=>{
   const nodes=[];
   const element=()=>{const node={style:{},setAttribute(){},append(){},appendChild(){},replaceChildren(){}};nodes.push(node);return node;};
   const body=element();
-  const runtime=vm.createContext({document:{createElement:element},describeAgentProgress:describe,activeHistoryId:"test",setStatus(){}});
+  const runtime=vm.createContext({document:{createElement:element},describeAgentProgress:describe,watchProjectCompute:()=>({state:"unknown"}),activeHistoryId:"test",setStatus(){}});
   const html=page();
   vm.runInContext(html.slice(html.indexOf("    function renderLocalAgentProgress("),html.indexOf("    async function tryLiveChatTurn(")),runtime);
   for(const events of [undefined,[],[null,{event:null}]]) {
@@ -34,7 +34,7 @@ test("an expired worker lease replaces stale model progress and recovers after r
   const nodes=[];
   const element=()=>{const node={style:{},setAttribute(){},append(){},appendChild(){},replaceChildren(){}};nodes.push(node);return node;};
   const body=element(), statuses=[];
-  const runtime=vm.createContext({document:{createElement:element},describeAgentProgress:describe,activeHistoryId:"test",setStatus(...args){statuses.push(args);}});
+  const runtime=vm.createContext({document:{createElement:element},describeAgentProgress:describe,watchProjectCompute:()=>({state:"unknown"}),activeHistoryId:"test",setStatus(...args){statuses.push(args);}});
   const html=page();
   vm.runInContext(html.slice(html.indexOf("    function renderLocalAgentProgress("),html.indexOf("    async function tryLiveChatTurn(")),runtime);
   const payload={state:"running",worker_connected:false,events:[{sequence:1131,event:{type:"model_requested"}}]};
