@@ -3,7 +3,7 @@ import { streamAgentTask } from "./task-stream.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 
-export function createLocalAgentHttpController({ authStore, readJsonBody, sendJson, waitFor = delay }) {
+export function createLocalAgentHttpController({ authStore, readJsonBody, sendJson, waitFor = delay, computeAvailability }) {
   if (!authStore || !readJsonBody || !sendJson) {
     throw new TypeError("Local agent HTTP controller dependencies are incomplete");
   }
@@ -77,6 +77,11 @@ export function createLocalAgentHttpController({ authStore, readJsonBody, sendJs
     const session = await requireSession(request, authStore);
     if (request.method === "GET" && url.pathname === "/api/agent/status") {
       sendJson(response, 200, await authStore.localAgentStatus(session.id));
+      return true;
+    }
+    if (request.method === "GET" && url.pathname === "/api/agent/compute") {
+      try { sendJson(response, 200, await computeAvailability()); }
+      catch { sendJson(response, 200, {state:'unknown'}); }
       return true;
     }
     if (request.method === "POST" && url.pathname === "/api/agent/tasks") {

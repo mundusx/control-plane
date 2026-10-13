@@ -1,5 +1,6 @@
 import { repairJavascriptCodeBlocks } from "./javascript-code-validation.js";
 import { normalizeNativeToolSse, NativeToolFormatError } from './native-tool-response.js';
+import { projectComputeAvailability } from './features/agent/compute-availability.js';
 import { assertNoRepetition } from './repetition-guard.js';
 import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
@@ -4800,6 +4801,28 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
     ${readFileSync(resolve(CHAT_ROOT, "src/features/agent/task-stream-client.js"), "utf8")}
 
     // Rendering telemetry must never interrupt polling an already accepted task.
+    const projectComputeStates = new WeakMap();
+    function watchProjectCompute(pending, payload, runtimeLabel, options) {
+      let watch = projectComputeStates.get(pending);
+      if (!watch) {
+        watch = {state:'unknown',payload,runtimeLabel,options};
+        projectComputeStates.set(pending,watch);
+        const refresh = async () => {
+          if (!pending.isConnected || ['completed','failed','cancelled'].includes(watch.payload?.state)) return;
+          try {
+            const response = await fetch('/api/agent/compute',{signal:AbortSignal.timeout(5000)});
+            const data = await response.json();
+            watch.state = response.ok ? data.state : 'unknown';
+          } catch { watch.state = 'unknown'; }
+          if (!pending.isConnected || ['completed','failed','cancelled'].includes(watch.payload?.state)) return;
+          renderLocalAgentProgressSafely(pending,watch.payload,watch.runtimeLabel,watch.options);
+          setTimeout(refresh,5000);
+        };
+        setTimeout(refresh,0);
+      }
+      Object.assign(watch,{payload,runtimeLabel,options});
+      return watch;
+    }
     function renderLocalAgentProgressSafely(pending, payload, runtimeLabel, options = {}) {
       try {
         renderLocalAgentProgress(pending, payload, runtimeLabel, options);
@@ -4819,6 +4842,10 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       const meaningfulEvents = events.filter((item) => item?.event && (item.event.type !== "agent_progress" || (item.event.summary && item.event.summary !== "Hermes is working")));
       const latest = meaningfulEvents.at(-1)?.event || null;
       const progress = describeAgentProgress(latest, true);
+      const compute = watchProjectCompute(pending,payload,runtimeLabel,options);
+      const localToolActive = ['tool_started','tool_proposed','approval_required'].includes(latest?.type);
+      const computePaused = !localToolActive && ['queued','running'].includes(payload?.state) && compute.state === 'unavailable';
+      const computeBusy = latest?.type === 'model_turn_queued' && compute.state === 'busy';
       const workerDisconnected = payload?.state === "running" && payload.worker_connected === false;
       const summary = options.cancelling
         ? "Stopping safely"
@@ -4826,6 +4853,8 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           ? "Reconnecting without losing progress"
           : workerDisconnected
             ? "Local worker disconnected"
+            : computePaused ? 'Paused — no eligible compute node is available'
+            : computeBusy ? 'Queued — eligible compute nodes are busy'
             : progress.label;
       const steps = meaningfulEvents.slice(0, -1).filter((item) => !["tool_started", "tool_proposed", "model_turn_queued"].includes(item.event.type)).slice(-4).map((item) => describeAgentProgress(item.event));
       body.replaceChildren();
@@ -4833,7 +4862,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       headingRow.className = "agent-progress-heading";
       const orb = document.createElement("span");
       orb.className = "agent-progress-orb";
-      if (workerDisconnected) orb.style.animation = "none";
+      if (workerDisconnected || computePaused) orb.style.animation = "none";
       orb.setAttribute("aria-hidden", "true");
       const heading = document.createElement("strong");
       heading.textContent = "MundusX · " + runtimeLabel;
@@ -4862,15 +4891,14 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       current.className = "agent-progress-current";
       const dot = document.createElement("span");
       dot.className = "agent-progress-dot";
-      if (workerDisconnected) dot.style.animation = "none";
+      if (workerDisconnected || computePaused) dot.style.animation = "none";
       dot.setAttribute("aria-hidden", "true");
       const currentText = document.createElement("span");
-      const updateNumber = Number(meaningfulEvents.at(-1)?.sequence || 0);
-      currentText.textContent = progress.source + (updateNumber ? " · Update " + updateNumber : "") + " · " + summary;
+      currentText.textContent = (computePaused || computeBusy ? 'Compute' : progress.source) + " · " + summary;
       current.append(dot, currentText);
       timeline.appendChild(current);
       const purpose = document.createElement("p"); purpose.className = "meta";
-      purpose.textContent = options.cancelling ? "Waiting for the current operation to stop." : options.reconnecting ? "Checking the existing task; your request is not being submitted again." : workerDisconnected ? "The local worker stopped checking in. Reconnect the MundusX agent to resume this task from the project files and saved progress." : progress.purpose;
+      purpose.textContent = options.cancelling ? "Waiting for the current operation to stop." : options.reconnecting ? "Checking the existing task; your request is not being submitted again." : workerDisconnected ? "The local worker stopped checking in. Reconnect the MundusX agent to resume this task from the project files and saved progress." : computePaused ? 'Saved project progress is preserved. Checking for an eligible node every five seconds.' : computeBusy ? 'Your request is waiting for a free compute slot. Saved project progress is preserved.' : progress.purpose;
       timeline.appendChild(purpose);
       const formatDuration = (milliseconds) => {
         const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -7036,6 +7064,7 @@ export function createServerApp(config = configFromEnv()) {
     authStore,
     readJsonBody,
     sendJson,
+    computeAvailability: async () => projectComputeAvailability(await fleet()),
   });
   const handleSkillsRequest = createSkillsHttpController({
     authStore,
