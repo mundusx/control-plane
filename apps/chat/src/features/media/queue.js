@@ -3,7 +3,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, 
 import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
-import { rankedMediaWorker } from './routing.js';
+import { rankedMediaWorker, eligibleMediaNode } from './routing.js';
 const hash = v => createHash('sha256').update(String(v)).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export class MediaQueue {
@@ -184,7 +184,30 @@ export class MediaQueue {
     row.pending_requests = Number(row.pending_requests);
     row.max_pending_requests = 2;
     row.queue_scope = 'queued jobs with the same media profile; position may change as workers become available';
+    row.worker_availability = 'unknown';
+    if (row.state === 'queued' && this.fleet) {
+      try {
+        const now = this.store.now();
+        const nodes = new Map((await this.fleet()).filter(node => eligibleMediaNode(node,row.request.profile_id,now)).map(node => [node.node_id,node]));
+        const workers = (await this.store.pool.query(`select p.node_id,p.public_key_hex,
+          exists(select 1 from public.media_generation_jobs q where q.node_id=p.node_id and q.state='running') as busy
+          from public.media_worker_presence p where p.last_poll_at>$1 and p.profiles ? $2`,
+          [new Date(now-45000),row.request.profile_id])).rows.filter(worker => nodes.get(worker.node_id)?.public_key_hex === worker.public_key_hex);
+        row.worker_availability = workers.length ? workers.some(worker => !worker.busy && nodes.get(worker.node_id).state === 'ready') ? 'available' : 'busy' : 'offline';
+      } catch { row.worker_availability = 'unknown'; }
+    }
     if(row.artifact_id) row.artifact=await this.store.owned(row.artifact_id,owner);
     return row;
+  }
+  async cancel(owner,id) {
+    await this.store.transaction(async db => {
+      const row = (await db.query('select state from public.media_generation_jobs where job_id=$1 and owner_user_id=$2 for update',[id,owner])).rows[0];
+      if (!row) throw httpError(404,'Media job not found');
+      if (row.state === 'cancelled') return;
+      if (row.state !== 'queued') throw httpError(409,'Only waiting requests can be cancelled; generation may already have started');
+      await db.query("update public.media_generation_jobs set state='cancelled',completed_at=$2 where job_id=$1",[id,new Date(this.store.now())]);
+      await db.query("update public.jobs set status='media_cancelled',completed_at_epoch=$2 where job_id=$1",[id,Math.floor(this.store.now()/1000)]);
+    });
+    return {job_id:id,state:'cancelled'};
   }
 }
