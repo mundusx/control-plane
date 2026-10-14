@@ -9869,7 +9869,7 @@ fn handle_connection_with_streams(
                     if matches!(job.status, crate::contracts::JobStatus::Completed)
                         || job.last_completed_graph_node_id.is_some()
                     {
-                        if let Some(award) = guard.award_job_reward(job, completed_at) {
+                        if let Some(award) = guard.award_job_reward_with_usage(job, completed_at, &token_usage) {
                             credit_event = Some(guard.record_job_event(
                                 award.device_id.clone(),
                                 award.job_id.clone(),

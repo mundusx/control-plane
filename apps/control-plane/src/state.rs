@@ -452,6 +452,15 @@ impl ControlPlaneState {
         job: &JobRecord,
         completed_at: String,
     ) -> Option<CreditsLedgerRecord> {
+        self.award_job_reward_with_usage(job, completed_at, &[])
+    }
+
+    pub fn award_job_reward_with_usage(
+        &mut self,
+        job: &JobRecord,
+        completed_at: String,
+        usage: &[crate::runtime_usage::RuntimeTokenUsage],
+    ) -> Option<CreditsLedgerRecord> {
         let graph_node = job
             .last_completed_graph_node_id
             .as_ref()
@@ -483,13 +492,20 @@ impl ControlPlaneState {
         let output_chars = output_text
             .map(|output| output.chars().count() as f64)
             .unwrap_or(0.0);
-        let work_units = ((prompt_chars + output_chars) / 400.0).ceil().max(1.0);
+        let measured = crate::runtime_usage::measured_totals(usage);
+        let work_units = measured.map(|(input,output)| (input+output).div_ceil(100) as f64)
+            .unwrap_or_else(|| ((prompt_chars + output_chars) / 400.0).ceil().max(1.0));
         let amount = (work_units * 100.0).round() / 100.0;
         let graph_node_id = graph_node.map(|node| node.id.clone());
         let graph_node_name = graph_node.map(|node| node.name.clone());
         let parent_job_id = graph_node_id.as_ref().map(|_| job.job_id.clone());
         let metadata = serde_json::json!({
-            "formula": "ceil((prompt_chars + output_chars) / 400)",
+            "formula": if measured.is_some() { "ceil((input_tokens + output_tokens) / 100)" } else { "ceil((prompt_chars + output_chars) / 400)" },
+            "usage_source": if measured.is_some() { "runtime" } else { "character_estimate" },
+            "estimated": measured.is_none(),
+            "input_tokens": measured.map(|(input,_)|input),
+            "output_tokens": measured.map(|(_,output)|output),
+            "tokens_per_credit": if measured.is_some() { Some(100) } else { None },
             "prompt_chars": prompt_chars,
             "output_chars": output_chars,
             "contribution_percent": node.contribution_percent,
@@ -13517,11 +13533,25 @@ mod tests {
                 "4".to_string(),
             )
             .expect("completion");
+        let mut measured_state=state.clone();
+        let usage=vec![crate::runtime_usage::RuntimeTokenUsage {
+            call_id:uuid::Uuid::new_v4().to_string(),prompt_tokens:Some(200),completion_tokens:1050,source:"runtime".into()
+        }];
+        let measured_award=measured_state.award_job_reward_with_usage(&completed,"5".into(),&usage).expect("measured award");
+        assert_eq!(measured_award.amount,13.0);
+        assert_eq!(measured_award.metadata["input_tokens"],200);
+        assert_eq!(measured_award.metadata["output_tokens"],1050);
+        assert_eq!(measured_award.metadata["estimated"],false);
+        assert_eq!(measured_award.metadata["usage_source"],"runtime");
+        assert!(measured_state.award_job_reward_with_usage(&completed,"6".into(),&usage).is_none());
         let award = state
             .award_job_reward(&completed, "5".to_string())
             .expect("award");
 
         assert_eq!(award.amount, 3.0);
+        assert_eq!(award.metadata["estimated"],true);
+        assert_eq!(award.metadata["usage_source"],"character_estimate");
+        assert!(award.metadata["input_tokens"].is_null());
         assert_eq!(
             award
                 .metadata
