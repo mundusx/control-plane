@@ -131,6 +131,12 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
         heading.textContent = error.status === 404 ? 'Request no longer available' : error.status === 410 ? 'Download expired' : 'Status unavailable';
         status.textContent = error.status === 404 ? 'This request no longer exists on this server. Submit a new request.' : error.message;
         if (lastUpdated) diagnostic.textContent = 'Request ID: ' + item.job_id + ' · Last successful check ' + lastUpdated;
+        if (error.status === 410) {
+          card.classList.add('media-chat-expired');
+          heading.textContent = item.kind === 'video' ? 'Video expired' : 'Image expired';
+          visual.hidden=true;detail.hidden=true;status.hidden=true;queue.hidden=true;diagnostic.hidden=true;
+          for (const button of card.querySelectorAll('button')) button.hidden=true;
+        }
         if (!error.terminal && ![401,403,404,410].includes(error.status)) {
           const retry = document.createElement('button'); retry.type='button'; retry.textContent='Check again';
           const resume=()=>{if(!live() || !retry.isConnected)return;retry.remove();visual.classList.remove('media-chat-still');card.setAttribute('aria-busy','true');monitor();};
@@ -173,6 +179,7 @@ export const mediaChatCss = `
 .media-chat-loader svg{display:block;width:32px;height:32px;animation:media-vector-turn 1.4s linear infinite;transform-origin:center}
 @keyframes media-vector-turn{to{transform:rotate(360deg)}}
 .media-chat-still svg{animation:none;opacity:.4}.media-chat-card button{grid-column:2;width:fit-content}
+.media-chat-expired{display:block;padding:2px 0}.media-chat-expired strong{font-size:13px;font-weight:400;color:var(--muted)}
 .media-chat-complete{width:min(100%,540px);display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--line);border-radius:20px;background:var(--panel);overflow:hidden}
 .media-chat-complete .media-chat-detail{display:block}.media-chat-output{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:13px;background:#10131a}
 .media-chat-output[hidden]{display:none}
