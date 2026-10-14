@@ -6629,6 +6629,11 @@ fn capability_requirements_for_request(
 }
 
 pub fn plan_job_request(request: &JobRequest, classification: &RequestClassification) -> JobPlan {
+    if is_native_openai_tool_turn(&request.prompt) {
+        return single_execution_plan(request, classification,
+            "Native agent turn uses one direct execution unit.",
+            "Tool definitions and conversation context are transport data, not orchestration instructions.");
+    }
     let lower = request.prompt.to_ascii_lowercase();
 
     let decomposition_needed = classification.complexity == RequestComplexity::High
@@ -7061,6 +7066,9 @@ fn plan_job_request_for_submission(
     classification: &RequestClassification,
     compatible_ready_nodes: usize,
 ) -> JobPlan {
+    if is_native_openai_tool_turn(&request.prompt) {
+        return plan_job_request(request, classification);
+    }
     if request.execution_mode == JobExecutionMode::Auto
         && looks_sectionable_prompt(&request.prompt)
         && !looks_like_deployment_procedure_prompt(&request.prompt.to_ascii_lowercase())
@@ -9721,6 +9729,22 @@ mod tests {
             .expect("tool-use requirement");
         assert!(requirement.required);
         assert_eq!(requirement.minimum_score, 60);
+    }
+
+    #[test]
+    fn native_agent_context_never_creates_a_deployment_or_research_plan() {
+        let request = classification_request(concat!(
+            "__MUNDUSX_OPENAI_TOOL_TURN_V1__",
+            r#"{"messages":[{"role":"assistant","content":"How to deploy a smart contract to production mainnet step by step. Detailed research sections."},{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"deploy","description":"Deployment mainnet production"}}]}"#
+        ));
+        let classification = classify_job_request(&request);
+        for plan in [plan_job_request(&request, &classification),
+            plan_job_request_for_submission(&request, &classification, 0),
+            plan_job_request_for_submission(&request, &classification, 8)] {
+            assert_eq!(plan.strategy, "single_job");
+            assert_eq!(plan.jobs.len(), 1);
+            assert_eq!(plan.jobs[0].id, "job.direct_response");
+        }
     }
 
     #[test]
