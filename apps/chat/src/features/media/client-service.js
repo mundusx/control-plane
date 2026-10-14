@@ -52,6 +52,10 @@ export class MediaClientService {
     if (!this.queue || !this.origin) throw httpError(503, 'Media generation is not configured');
     return this.describe(await this.queue.owned(owner, id));
   }
+  async cancel(owner,id) {
+    if (!this.queue) throw httpError(503,'Media generation is not configured');
+    return this.queue.cancel(owner,id);
+  }
   async result(owner, id, { ownerOnly = false } = {}) {
     const job = await this.status(owner, id);
     if (job.state !== 'completed') throw httpError(409, 'Media is not completed; check job status first');
