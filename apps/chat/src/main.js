@@ -7318,7 +7318,7 @@ export function createServerApp(config = configFromEnv()) {
         const body = await readJsonBody(request);
         return sendJson(response, 200, { intent: await detectMediaIntent(session.id, body.message) });
       }
-      if (url.pathname === "/api/media/chat" || /^\/api\/media\/chat\/jobs\/[0-9a-f-]{36}(?:\/result)?$/.test(url.pathname)) {
+      if (url.pathname === "/api/media/chat" || /^\/api\/media\/chat\/jobs\/[0-9a-f-]{36}(?:\/(?:result|cancel))?$/.test(url.pathname)) {
         const session = request.mundusxSession ?? await authStore.session(request);
         if (!session) throw httpError(401, "Sign in to generate media");
         if (request.method === "POST") authStore.requireCsrf(request, session);
@@ -7336,9 +7336,10 @@ export function createServerApp(config = configFromEnv()) {
           catch (error) { if (error.statusCode === 409) throw error; historySaved = false; }
           return sendJson(response,202,{...job,history_saved:historySaved});
         }
-        const match = url.pathname.match(/^\/api\/media\/chat\/jobs\/([0-9a-f-]{36})(\/result)?$/);
+        const match = url.pathname.match(/^\/api\/media\/chat\/jobs\/([0-9a-f-]{36})(\/(?:result|cancel))?$/);
         if (match && request.method === "GET" && !match[2]) return sendJson(response,200,await mediaService.status(session.id,match[1]));
-        if (match && request.method === "POST" && match[2]) return sendJson(response,200,await mediaService.result(session.id,match[1],{ownerOnly:true}));
+        if (match && request.method === "POST" && match[2] === '/cancel') return sendJson(response,200,await mediaService.cancel(session.id,match[1]));
+        if (match && request.method === "POST" && match[2] === '/result') return sendJson(response,200,await mediaService.result(session.id,match[1],{ownerOnly:true}));
         throw httpError(405,"Method not allowed");
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {

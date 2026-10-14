@@ -3,9 +3,11 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
   const controllers = new WeakMap();
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function api(path, body) {
-    const response = await fetch(path, body === undefined ? {} : {
+    const timeout = AbortSignal.timeout(15000);
+    const options = body === undefined ? {} : {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
+    };
+    const response = await fetch(path, {...options,signal:timeout,cache:'no-store'});
     const value = await response.json().catch(() => ({}));
     if (!response.ok) throw Object.assign(new Error(value.error || 'Media request failed'), { status: response.status });
     return value;
@@ -31,20 +33,37 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
     detail.textContent = item.kind === 'video' ? (item.duration_seconds || 3) + ' seconds · Maximum 10 seconds' : 'Qwen Image · ' + (item.width || 832) + ' × ' + (item.height || 480);
     const status = document.createElement('p'); status.className = 'media-chat-status'; status.setAttribute('role','status');
     const queue = document.createElement('p'); queue.className = 'media-chat-queue';
+    const diagnostic = document.createElement('p'); diagnostic.className = 'media-chat-queue';
+    diagnostic.textContent = item.job_id ? 'Request ID: ' + item.job_id : '';
     status.textContent = 'Submitting request…';
-    card.setAttribute('aria-busy','true'); card.append(visual,heading,detail,status,queue); body.append(card);
+    card.setAttribute('aria-busy','true'); card.append(visual,heading,detail,status,queue,diagnostic); body.append(card);
     if (item.kind === 'image') {
       const another = document.createElement('button'); another.type = 'button'; another.className = 'media-chat-another';
       another.textContent = 'Create another image'; another.onclick = () => requestAnother(); card.append(another);
     }
     const live = () => identity() === owner && !control.signal.aborted && node.isConnected && activeConversation() === conversationId;
+    const cancel = document.createElement('button'); cancel.type='button';cancel.textContent='Cancel waiting request';cancel.hidden=true;card.append(cancel);
+    cancel.onclick=async()=>{
+      cancel.disabled=true;
+      try {
+        await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id) + '/cancel',{});
+        if(!live())return;
+        control.abort();cancel.hidden=true;queue.textContent='';heading.textContent='Request cancelled';status.textContent='Your waiting request was removed from the queue.';
+        const another=card.querySelector('.media-chat-another');if(another)another.disabled=false;
+        card.setAttribute('aria-busy','false');visual.classList.add('media-chat-still');
+      } catch(error){if(live()){status.textContent=error.message;cancel.disabled=false;}}
+    };
     const remember = () => identity() === owner && cache(conversationId, { role:'assistant', content:item.kind === 'video' ? 'Video generation' : 'Image generation', jobId:item.job_id,
       payload:{media_job:{...item}} });
     async function monitor() {
+      let lastUpdated;
       try {
         while (live()) {
           const job = await api('/api/media/chat/jobs/' + encodeURIComponent(item.job_id));
           if (!live()) return;
+          lastUpdated = new Date().toLocaleTimeString();
+          cancel.hidden=job.state !== 'queued';
+          diagnostic.textContent = 'Request ID: ' + item.job_id + ' · Last checked ' + lastUpdated;
           const pending = Number(job.pending_requests);
           queue.textContent = job.state === 'queued'
             ? (Number.isInteger(job.queue_position) ? 'Queue position: ' + job.queue_position + ' · ' : '') +
@@ -94,6 +113,9 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
           if (job.state === 'failed' || job.state === 'cancelled') throw Object.assign(new Error(job.error || 'Generation ' + job.state + '. Please try a new request.'),{terminal:true});
           heading.textContent = job.state === 'running' ? 'Generating…' : (item.kind === 'video' ? 'Video request · Queued' : 'Image request · Queued');
           status.textContent = job.state === 'running' ? ''
+            : job.worker_availability === 'offline' ? 'Waiting for a media contributor to come online. Your request remains queued.'
+            : job.worker_availability === 'busy' ? 'Media contributor busy. Your request remains queued.'
+            : job.worker_availability === 'unknown' ? 'Contributor availability is temporarily unavailable. Your request remains queued.'
             : Number.isInteger(job.queue_position) ? job.jobs_ahead + ' compatible request' + (job.jobs_ahead === 1 ? '' : 's') + ' ahead'
             : 'Queued — waiting for an available contributor. You can keep chatting.';
           await delay(Math.max(5, Math.min(60, Number(job.poll_after_seconds) || 30)) * 1000);
@@ -101,11 +123,19 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
       } catch (error) {
         if (!live()) return;
         card.setAttribute('aria-busy','false'); visual.classList.add('media-chat-still');
-        heading.textContent = error.status === 410 ? 'Download expired' : 'Generation update';
-        status.textContent = error.message;
+        queue.textContent = '';
+        if(error.terminal || [401,403,404,410].includes(error.status))cancel.hidden=true;
+        if(error.terminal || [404,410].includes(error.status)) {
+          const another=card.querySelector('.media-chat-another');if(another)another.disabled=false;
+        }
+        heading.textContent = error.status === 404 ? 'Request no longer available' : error.status === 410 ? 'Download expired' : 'Status unavailable';
+        status.textContent = error.status === 404 ? 'This request no longer exists on this server. Submit a new request.' : error.message;
+        if (lastUpdated) diagnostic.textContent = 'Request ID: ' + item.job_id + ' · Last successful check ' + lastUpdated;
         if (!error.terminal && ![401,403,404,410].includes(error.status)) {
           const retry = document.createElement('button'); retry.type='button'; retry.textContent='Check again';
-          retry.onclick=()=>{retry.remove();visual.classList.remove('media-chat-still');card.setAttribute('aria-busy','true');monitor();};card.append(retry);
+          const resume=()=>{if(!live() || !retry.isConnected)return;retry.remove();visual.classList.remove('media-chat-still');card.setAttribute('aria-busy','true');monitor();};
+          retry.onclick=resume;card.append(retry);
+          await delay(30000);resume();
         }
       }
     }
