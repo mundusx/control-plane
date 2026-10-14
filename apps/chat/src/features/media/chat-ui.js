@@ -125,6 +125,9 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
         card.setAttribute('aria-busy','false'); visual.classList.add('media-chat-still');
         queue.textContent = '';
         if(error.terminal || [401,403,404,410].includes(error.status))cancel.hidden=true;
+        if(error.terminal || [404,410].includes(error.status)) {
+          const another=card.querySelector('.media-chat-another');if(another)another.disabled=false;
+        }
         heading.textContent = error.status === 404 ? 'Request no longer available' : error.status === 410 ? 'Download expired' : 'Status unavailable';
         status.textContent = error.status === 404 ? 'This request no longer exists on this server. Submit a new request.' : error.message;
         if (lastUpdated) diagnostic.textContent = 'Request ID: ' + item.job_id + ' · Last successful check ' + lastUpdated;
