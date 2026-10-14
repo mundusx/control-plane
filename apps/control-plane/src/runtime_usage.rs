@@ -8,6 +8,17 @@ pub struct RuntimeTokenUsage {
     pub source: String,
 }
 
+pub fn measured_totals(records: &[RuntimeTokenUsage]) -> Option<(u64,u64)> {
+    if records.is_empty() { return None; }
+    let mut input=0u64;
+    let mut output=0u64;
+    for record in records {
+        input=input.checked_add(record.prompt_tokens?)?;
+        output=output.checked_add(record.completion_tokens)?;
+    }
+    Some((input,output))
+}
+
 pub fn parse(body: &str) -> Result<Vec<RuntimeTokenUsage>, String> {
     let payload: serde_json::Value=serde_json::from_str(body).map_err(|e|e.to_string())?;
     let Some(value)=payload.get("token_usage") else {return Ok(Vec::new());};
@@ -26,6 +37,20 @@ pub fn parse(body: &str) -> Result<Vec<RuntimeTokenUsage>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credit_token_totals_require_complete_usage_and_sum_each_call_once() {
+        let call=|input,output|super::RuntimeTokenUsage{call_id:String::new(),prompt_tokens:input,completion_tokens:output,source:"runtime".into()};
+        assert_eq!(super::measured_totals(&[]),None);
+        assert_eq!(super::measured_totals(&[call(None,1000)]),None);
+        assert_eq!(super::measured_totals(&[call(Some(20),1000),call(None,10)]),None);
+        let (input,output)=super::measured_totals(&[call(Some(200),1000),call(Some(0),50)]).unwrap();
+        assert_eq!((input+output).div_ceil(100),13);
+        assert_eq!(super::measured_totals(&[call(Some(0),0)]),Some((0,0)));
+        for (total,expected) in [(1u64,1u64),(100,1),(101,2),(1_000_020,10_001)] {
+            let (input,output)=super::measured_totals(&[call(Some(20.min(total)),total-20.min(total))]).unwrap();
+            assert_eq!((input+output).div_ceil(100),expected);
+        }
+    }
     #[test]
     fn only_runtime_counts_are_measured_and_missing_usage_stays_unknown() {
         assert!(super::parse("{}").unwrap().is_empty());
