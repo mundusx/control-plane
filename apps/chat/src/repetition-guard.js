@@ -2,6 +2,20 @@
 function repeatedCodeBlock(content) {
   for (const fence of content.matchAll(/```[^\n]*\n([\s\S]*?)(?:```|$)|~~~[^\n]*\n([\s\S]*?)(?:~~~|$)/g)) {
     const lines = (fence[1] ?? fence[2]).slice(-12288).split('\n');
+    let property = null;
+    let propertyRepeats = 0;
+    for (const sourceLine of lines) {
+      const line = sourceLine.trim();
+      if (!/^["'][^"'\r\n]{3,}["']\s*:/.test(line)) {
+        property = null; propertyRepeats = 0; continue;
+      }
+      propertyRepeats = line === property ? propertyRepeats + 1 : 1;
+      property = line;
+      if (propertyRepeats >= 6 && property.length * propertyRepeats >= 180) return property;
+    }
+    // Repeated records in a JSON array can be intentional. Only the adjacent
+    // duplicate-property rule above applies to JSON data fences.
+    if (/^(?:```|~~~)json(?:c|5)?[ \t]*\r?\n/i.test(fence[0])) continue;
     for (const line of lines) {
       if (line.length < 768 || /^\s*(?:#|\/\/|\*|<!--)/.test(line)) continue;
       const repeated = line.match(/(.{24,512}?)\1{5,}/);

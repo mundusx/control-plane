@@ -5188,7 +5188,7 @@ test("automatic continuation waits for the exact anchor before streaming a resta
 test("automatic continuation resumes after an upstream socket terminates mid-response", async () => {
   const encoder = new TextEncoder();
   const writes = [];
-  const first = `package.json\n\`\`\`json\n{\n  "name": "bus-ticketing-api",\n${"  \"dependency\": \"express\",\n".repeat(12)}`;
+  const first = `package.json\n\`\`\`json\n{\n  "name": "bus-ticketing-api",\n${Array.from({length:12}, (_, i) => `  "dependency_${i}": "express",\n`).join("")}`;
   const suffix = `  "scripts": { "start": "node src/app.js" }\n}\n\`\`\``;
   const response = {
     writableEnded: false,
