@@ -1142,8 +1142,7 @@ impl ControlPlaneState {
             let Some(health) = node.worker_health.as_ref() else {
                 continue;
             };
-            let reported_slots = crate::capability_policy::parallel_limit(node, if node.trust.qualification_enforced() { 1 } else { usize::from(health.parallel_slots.max(1))
-                .min(health.capabilities.max_parallel_jobs.max(1) as usize) }) as u32;
+            let reported_slots = Self::node_runtime_parallel_capacity(node) as u32;
             let active = self.active_assignment_count_for_node(&node.node_id) as u32;
             let free_slots = reported_slots.saturating_sub(active);
             eligible_nodes += 1;
@@ -1326,14 +1325,19 @@ impl ControlPlaneState {
     }
 
     fn node_total_slots(&self, node_id: &str) -> usize {
-        self.nodes
-            .get(node_id)
-            .and_then(|node| node.worker_health.as_ref())
-            .map(|health| {
-                usize::from(health.parallel_slots.max(1))
-                    .min(health.capabilities.max_parallel_jobs.max(1) as usize)
-            })
-            .unwrap_or(1)
+        self.nodes.get(node_id).map(Self::node_runtime_parallel_capacity).unwrap_or(1)
+    }
+
+    /// One source for advertised capacity, operator limits, and runtime ceilings.
+    fn node_runtime_parallel_capacity(node: &NodeRecord) -> usize {
+        if node.trust.qualification_enforced() { return 1; }
+        let Some(health)=node.worker_health.as_ref() else {return 1;};
+        if health.runtime_mode=="media" || !health.healthy || !health.runtime_ready
+            || (node.backend==Backend::M && health.runtime_mode.to_ascii_lowercase().contains("batch")) {return 1;}
+        let mut reported=usize::from(health.parallel_slots.max(1))
+            .min(health.capabilities.max_parallel_jobs.max(1) as usize);
+        if let Some(seqs)=health.capabilities.max_num_seqs {reported=reported.min(seqs.max(1) as usize);}
+        crate::capability_policy::parallel_limit(node,reported).max(1)
     }
 
     fn local_slot_lease_response(
@@ -1473,15 +1477,7 @@ impl ControlPlaneState {
         let Some(node) = self.nodes.get(node_id) else {
             return (0, 0, 0, 0);
         };
-        let reported_total = node
-            .worker_health
-            .as_ref()
-            .map(|health| {
-                usize::from(health.parallel_slots.max(1))
-                    .min(health.capabilities.max_parallel_jobs.max(1) as usize)
-            })
-            .unwrap_or(1);
-        let total=crate::capability_policy::parallel_limit(node, if node.trust.qualification_enforced() {1}else{reported_total});
+        let total=Self::node_runtime_parallel_capacity(node);
         let network_active = self.active_network_assignment_count_for_node(node_id);
         let local_active =
             self.active_local_slot_count_for_node_at(node_id, current_unix_seconds())
@@ -1496,6 +1492,10 @@ impl ControlPlaneState {
     }
 
     fn node_parallel_capacity_for_job(node: &NodeRecord, job: &JobRecord) -> usize {
+        Self::node_job_capacity_estimate(node,job).min(Self::node_runtime_parallel_capacity(node))
+    }
+
+    fn node_job_capacity_estimate(node: &NodeRecord, job: &JobRecord) -> usize {
         if node.trust.qualification_enforced() {
             return 1;
         }
@@ -10202,6 +10202,7 @@ mod tests {
         worker_health.cuda_memory_mb = Some(121_000);
         worker_health.runtime_mode = "vllm".to_string();
         worker_health.parallel_slots = 4;
+        worker_health.capabilities.max_parallel_jobs = 4;
 
         Heartbeat {
             node_id: node_id.to_string(),
@@ -16547,6 +16548,7 @@ mod tests {
         state.register(m_series_registration("node-2"));
         let mut second_health = ready_heartbeat("node-2", "4");
         second_health.worker_health.parallel_slots = 1;
+        second_health.worker_health.capabilities.max_parallel_jobs = 1;
         state.heartbeat(second_health, "4".to_string());
         state.submit_job(
             JobRequest {
@@ -17711,6 +17713,7 @@ mod tests {
         health.cuda_memory_mb = Some(32_768);
         health.runtime_mode = "persistent-warm-cuda".to_string();
         health.parallel_slots = 4;
+        health.capabilities.max_parallel_jobs = 4;
 
         let job = state.submit_job(
             classification_request("Summarize the history of Warsaw."),
@@ -17814,6 +17817,7 @@ mod tests {
         health.cuda_memory_mb = Some(4_096);
         health.runtime_mode = "persistent-warm-cuda".to_string();
         health.parallel_slots = 4;
+        health.capabilities.max_parallel_jobs = 4;
 
         let job = state.submit_job(
             classification_request("Write a complete Rust program with tests."),
@@ -17846,6 +17850,7 @@ mod tests {
         let health = node.worker_health.as_mut().expect("worker health");
         health.runtime_mode = "mlx".to_string();
         health.parallel_slots = 3;
+        health.capabilities.max_parallel_jobs = 3;
 
         let job = state.submit_job(
             classification_request("Summarize the history of Warsaw."),
@@ -17859,6 +17864,58 @@ mod tests {
     }
 
     #[test]
+    fn mlx_two_slots_claim_two_jobs_and_queue_the_third() {
+        let mut state=ready_state();
+        let node=state.nodes.get_mut("node-1").unwrap();
+        node.backend=Backend::M;
+        node.available_memory_mb=65_536;
+        node.contribution_percent=80;
+        let health=node.worker_health.as_mut().unwrap();
+        health.runtime_mode="mlx".into();
+        health.parallel_slots=2;
+        health.capabilities.max_parallel_jobs=2;
+        for id in ["mlx-first","mlx-second","mlx-third"] {
+            let mut request=classification_request("Give a short answer.");
+            request.request_id=id.into();
+            request.execution_mode=JobExecutionMode::Single;
+            state.submit_job(request,"3".into());
+        }
+        assert!(state.claim_job("node-1","4".into()).job.is_some());
+        assert!(state.claim_job("node-1","5".into()).job.is_some());
+        assert_eq!(state.node_slot_occupancy_breakdown("node-1"),(2,0,2,0));
+        assert!(state.claim_job("node-1","6".into()).job.is_none());
+    }
+
+    #[test]
+    fn mlx_scheduler_and_dashboard_share_runtime_limits() {
+        let mut state=ready_state();
+        let job=state.submit_job(classification_request("Summarize Warsaw history."),"3".into());
+        let node=state.nodes.get_mut("node-1").unwrap();
+        node.backend=Backend::M;
+        node.available_memory_mb=65_536;
+        node.contribution_percent=80;
+        let health=node.worker_health.as_mut().unwrap();
+        health.runtime_mode="mlx".into();
+        health.parallel_slots=3;
+        health.capabilities.max_parallel_jobs=2;
+        assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),2);
+        assert_eq!(ControlPlaneState::node_runtime_parallel_capacity(node),2);
+        node.worker_health.as_mut().unwrap().capabilities.max_num_seqs=Some(1);
+        assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),1);
+        node.worker_health.as_mut().unwrap().capabilities.max_num_seqs=None;
+        node.trust.capability_policy_enabled=true;
+        node.trust.capability_policy=Some(crate::capability_policy::Override {
+            settings:crate::capability_policy::Settings {max_parallel_jobs:Some(1),reason:"Operator limit".into(),..Default::default()},
+            actor:"admin".into(),updated_at:"3".into(),
+        });
+        assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),1);
+        assert_eq!(ControlPlaneState::node_runtime_parallel_capacity(node),1);
+        node.trust.capability_policy_enabled=false;
+        node.worker_health.as_mut().unwrap().runtime_mode="batch".into();
+        assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),1);
+    }
+
+    #[test]
     fn mlx_coding_parallelism_is_conservative() {
         let mut state = ready_state();
         let node = state.nodes.get_mut("node-1").expect("node exists");
@@ -17868,6 +17925,7 @@ mod tests {
         let health = node.worker_health.as_mut().expect("worker health");
         health.runtime_mode = "mlx".to_string();
         health.parallel_slots = 3;
+        health.capabilities.max_parallel_jobs = 3;
 
         let job = state.submit_job(
             classification_request("Write a complete Rust program with tests."),
@@ -17889,6 +17947,7 @@ mod tests {
         warm_health.cuda_device_available = true;
         warm_health.cuda_memory_mb = Some(32_768);
         warm_health.parallel_slots = 4;
+        warm_health.capabilities.max_parallel_jobs = 4;
         warm_health.streaming_supported = true;
 
         state.heartbeat(
@@ -18387,6 +18446,7 @@ mod tests {
         health.media_profiles = vec!["qwen-image-fp8-832x480-v1".into()];
         assert!(!evaluate_policy(AgentState::Paused, "ac", false, None, &health).0);
         health.parallel_slots = 2;
+        health.capabilities.max_parallel_jobs = 2;
         assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
     }
 
