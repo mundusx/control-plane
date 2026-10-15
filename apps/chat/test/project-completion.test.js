@@ -111,11 +111,12 @@ test("code-only requests do not acquire a closing summary", async () => {
   assert.equal(result.content, readme);
 });
 
-test("documentation recovery stops after two attempts and reports incomplete", async () => {
+test("documentation-only recovery stops after two attempts with a visible documentation warning", async () => {
   const { result, requests, writes } = await runReply(prompt, [readme, "\n## More details\n", "\n## Other details\n"]);
   assert.equal(requests.length, 3);
-  assert.equal(result.finishReason, "length");
-  assert.doesNotMatch(writes, /"finish_reason":"stop"/);
+  assert.equal(result.finishReason, "stop");
+  assert.match(result.content, /Documentation could not be completed/);
+  assert.doesNotMatch(writes, /"finish_reason":"length"/);
 });
 
 test("nested README command fences do not trigger duplicate project generation", async () => {
@@ -162,4 +163,14 @@ test("filename-labelled README fences do not request duplicate documentation", a
     assert.equal(requests.length,1);
     assert.equal(result.finishReason,"stop");
   }
+});
+
+test("documentation-only follow-ups cannot graft restarted source onto a completed response", async () => {
+  const source='## Project Structure\n```text\nstudent-api/\n  README.md\n```\n```rust\nuse diesel::prelude::*;\nuse diesel::sqlite::SqliteConnection;\npub fn delete_student() {}\n```';
+  const {result,requests}=await runReply(prompt,[source,{raw:true,text:source},{raw:true,text:source}]);
+  assert.equal(requests.length,3);
+  assert.equal(result.finishReason,'stop');
+  assert.equal(result.content.split('pub fn delete_student').length-1,1);
+  assert.match(result.content,/Documentation could not be completed/);
+  assert.match(requests[1].messages.find(m=>m.role==='system').content,/documentation-only/);
 });
