@@ -9604,6 +9604,9 @@ fn handle_connection_with_streams(
                     if let Err(error) = save_state(&guard) {
                         eprintln!("failed to save control-plane state: {error}");
                     }
+                    // The admission hold keeps this job unclaimable until persistence
+                    // finishes; other nodes must not wait on this database I/O.
+                    drop(guard);
                     if let Some(db) = supabase.as_ref() {
                         if let Err(error) = db.record_job(&record) {
                             eprintln!("database chat completion sync skipped: {error}");
@@ -9614,8 +9617,6 @@ fn handle_connection_with_streams(
                             note_supabase_failure(&sync_status, error);
                         }
                     }
-                    drop(guard);
-
                     let admission_weight = chat_gateway::graph_admission_weight(&record);
                     if wants_stream {
                         if let Err(error) = stream.write_all(
