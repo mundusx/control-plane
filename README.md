@@ -144,3 +144,7 @@ These unauthenticated routes are the stable client boundary for Open WebUI, Herm
 - **`operatorAuth: disabled (MUNDUSX_AUTH_DISABLED=true)`** in logs means operator endpoints are deliberately open for local/UAT smoke tests. Startup rejects this setting when `MUNDUSX_ENVIRONMENT` is `production` or another non-local environment.
 - **`operatorAuth: disabled (MUNDUSX_OPERATOR_TOKEN missing)`** in logs means operator endpoints are open because no token was configured.
 - **`operatorAuth warning: OPENGPU_OPERATOR_TOKEN is deprecated`** in logs means the process is using the old token alias and should be renamed to `MUNDUSX_OPERATOR_TOKEN`.
+
+### Automatic contributor concurrency
+
+Without an explicit operator parallel-job override, the control plane uses the smaller of the contributor's reported `parallel_slots`, `max_parallel_jobs`, and optional `max_num_seqs`. Capability-policy admission alone does not impose a one-slot default. Explicit operator limits take precedence; qualification, runtime readiness, MLX batch fallback, media, per-request context checks, and workload-specific limits can lower usable capacity. Dashboard occupancy and raw/effective node APIs use the same runtime ceiling. The contributor must calculate its memory budget for all advertised slots; the control plane does not infer that two arbitrary long contexts fit from a short concurrency benchmark.

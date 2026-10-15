@@ -266,7 +266,8 @@ pub fn parallel_limit(node: &NodeRecord, reported: usize) -> usize {
             .capability_policy
             .as_ref()
             .and_then(|p| p.settings.max_parallel_jobs)
-            .unwrap_or(1) as usize,
+            .map(|limit| limit as usize)
+            .unwrap_or(reported),
     )
 }
 pub fn allows(model: &ModelCapability, capability: &str) -> bool {
@@ -330,17 +331,7 @@ pub fn public_node(node: &NodeRecord) -> serde_json::Value {
         .unwrap_or_default();
     value["reported_worker_health"] = value["worker_health"].clone();
     value["reported_capabilities"] = value["capabilities"].clone();
-    let slots = node
-        .worker_health
-        .as_ref()
-        .map(|h| {
-            parallel_limit(
-                node,
-                usize::from(h.parallel_slots.max(1))
-                    .min(h.capabilities.max_parallel_jobs.max(1) as usize),
-            )
-        })
-        .unwrap_or(1);
+    let slots = crate::state::ControlPlaneState::node_runtime_parallel_capacity(node);
     if let Some(health) = value["worker_health"].as_object_mut() {
         health.insert(
             "streaming_supported".into(),
