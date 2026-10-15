@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { splitMarkdownCode } from "../src/markdown-code.js";
+import { splitMarkdownCode, markdownFenceState } from "../src/markdown-code.js";
 
 const readme = "# CarWash API\n\n## Installation\n1. Install dependencies:\n```bash\nnpm install\n```\n2. Create .env:\n```env\nPORT=3000\nMONGODB_URI=mongodb://localhost:27017/carwash\n```\n3. Start:\n```bash\nnpm start\n```\n## API Endpoints\n- GET /api/carwashes\n";
 
@@ -37,4 +37,11 @@ test("browser-embedded parser behaves identically", () => {
   const browserParser = new Function(`return (${splitMarkdownCode.toString()});`)();
   const input = '```markdown\n' + readme + '```';
   assert.deepEqual(browserParser(input), splitMarkdownCode(input));
+});
+
+test('fence state retains outer delimiter and unfinished nested Markdown command',()=>{
+ const value='````markdown\n# README\n```bash\nnpm install';
+ assert.deepEqual(markdownFenceState(value),{marker:'````',language:'markdown',inner:'```'});
+ assert.equal(markdownFenceState(value+'\n```\n````'),null);
+ assert.equal(markdownFenceState('~~~rust\nfn main() {}').marker,'~~~');
 });

@@ -1,5 +1,5 @@
 // Self-contained so the same parser can be embedded in the browser bundle.
-export function splitMarkdownCode(value) {
+export function splitMarkdownCode(value, includeFenceState = false) {
   const text = String(value ?? "");
   const parts = [];
   const markers = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)(?:\r?\n|$)/gm;
@@ -34,5 +34,12 @@ export function splitMarkdownCode(value) {
   }
   if (outer) parts.push({ type: "code", language: outer.language, value: text.slice(outer.start) });
   else if (cursor < text.length) parts.push({ type: "text", value: text.slice(cursor) });
-  return parts.length ? parts : [{ type: "text", value: text }];
+  const result = parts.length ? parts : [{ type: "text", value: text }];
+  return includeFenceState
+    ? { parts: result, openFence: outer ? { marker: outer.marker, language: outer.language, inner } : null }
+    : result;
+}
+
+export function markdownFenceState(value) {
+  return splitMarkdownCode(value, true).openFence;
 }
