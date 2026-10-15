@@ -249,3 +249,12 @@ test('failed cancellation prevents starting a replacement job',async()=>{
  },{continueOnLength:true,recoverCodeQuality:true});
  assert.equal(calls,1);assert.equal(result.finishReason,'error');
 });
+
+test('a prose-only refusal is preserved as incomplete rather than a successful coding result',async()=>{
+ const r=output();let calls=0;
+ const content='I cannot generate Windows x64 assembly. Instead, here is a high-level description.';
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'write assembly'}]},config,async()=>{
+  calls++;return new Response(frame({content})+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n');
+ },{continueOnLength:true,recoverCodeQuality:true});
+ assert.equal(calls,1);assert.equal(result.finishReason,'error');assert.equal(result.content,content);assert.match(result.error,/implementation is incomplete/);
+});

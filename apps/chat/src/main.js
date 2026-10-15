@@ -8822,6 +8822,9 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         );
         hooks.onProgress?.({ content, completionId, finishReason });
       }
+      if (attemptFinishReason === "stop" && hooks.recoverCodeQuality && !splitMarkdownCode(content).some(part => part.type === "code" && part.value.trim()) && /\b(?:cannot (?:generate|provide)|instead.{0,80}(?:description|conceptual)|would you like.{0,80}(?:code|examples))\b/is.test(content)) {
+        throw new Error("The model did not provide the requested source code. Its explanation is preserved; the implementation is incomplete.");
+      }
       if (attemptFinishReason === "stop" && isPlaceholderOnlyCodeAnswer(content)) {
         if (await restartCodeAnswer("placeholder-only answer")) { attempt = -1; continue; }
         if (hooks.recoverCodeQuality) throw new Error("The model returned an incomplete code placeholder after one retry.");
