@@ -6,6 +6,7 @@ description = "MundusX control plane"
 license = "UNLICENSED"
 
 [dependencies]
+argon2 = "0.5"
 dirs = "5.0"
 ed25519-dalek = "2.1"
 hex = "0.4"

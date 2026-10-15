@@ -6662,14 +6662,14 @@ fn authorize_operator_request(
     if admin_login::enabled() && admin_login::public_request(method, route_path) {
         return Ok(());
     }
-    if !requires_operator_auth(method, route_path) && !admin_login::admin_mutation(method, route_path) {
+    if !requires_operator_auth(method, route_path) && !admin_login::admin_mutation(method, route_path) && !admin_login::log_read(method, route_path) {
         return Ok(());
     }
 
     if admin_login::session_authorized(method, headers) {
         return Ok(());
     }
-    if !operator_auth_mode().enforced() && !admin_login::enabled() {
+    if !operator_auth_mode().enforced() && !admin_login::enabled() && !admin_login::log_read(method, route_path) {
         return Ok(());
     }
     // Device signatures were already verified by the request handler. Preserve
@@ -7286,7 +7286,7 @@ fn handle_connection_with_streams(
         }
     }
 
-    if let Some(response) = admin_login::handle(&request.method, clean_path, query, &request.headers) {
+    if let Some(response) = admin_login::handle_with_body(&request.method, clean_path, query, &request.headers, &request.body) {
         let _ = stream.write_all(response.as_bytes());
         return;
     }
@@ -7314,7 +7314,12 @@ fn handle_connection_with_streams(
         return;
     }
 
-    if let Err(error) = authorize_operator_request(&request.method, clean_path, &request.headers) {
+    let authorization_path=if clean_path=="/health" && wants_full_snapshot(query) {"/v1/status"}else{clean_path};
+    if let Err(error) = authorize_operator_request(&request.method, authorization_path, &request.headers) {
+        if admin_login::log_read(&request.method,clean_path) && admin_login::browser_page(&request.method,clean_path) {
+            let _=stream.write_all(html_response("401 Unauthorized","<h1>Administrator sign-in required</h1><a href='/auth/login'>Sign in</a>").as_bytes());
+            return;
+        }
         let _ = stream.write_all(
             json_response("401 Unauthorized", serde_json::json!({ "error": error })).as_bytes(),
         );
@@ -11819,6 +11824,15 @@ mod tests {
 
     #[test]
     fn job_detail_route_renders_single_job_summary() {
+        if std::env::var("MUNDUSX_JOB_DETAIL_TEST_CHILD").is_err() {
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","tests::job_detail_route_renders_single_job_summary"])
+                .env("MUNDUSX_JOB_DETAIL_TEST_CHILD","1")
+                .env("MUNDUSX_OPERATOR_TOKEN","job-detail-test-token")
+                .status().unwrap().success());
+            return;
+        }
+
         let mut initial_state = ControlPlaneState::default();
         register_ready_node(&mut initial_state, "node-1", "DAVE", "1");
         initial_state.submit_job(
@@ -11879,7 +11893,7 @@ mod tests {
             );
         });
 
-        let request = "GET /jobs/job-single HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let request = "GET /jobs/job-single HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer job-detail-test-token\r\n\r\n";
         let mut client = TcpStream::connect(address).expect("connect to test listener");
         client.write_all(request.as_bytes()).expect("write request");
 
