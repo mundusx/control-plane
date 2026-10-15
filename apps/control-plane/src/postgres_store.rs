@@ -15,12 +15,21 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::ops::{Deref, DerefMut};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PostgresStore {
     database_url: String,
     restore_database_url: String,
+    idle_clients: Arc<Mutex<Vec<Client>>>,
+}
+
+impl std::fmt::Debug for PostgresStore {
+    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("PostgresStore").finish_non_exhaustive()
+    }
 }
 
 impl PostgresStore {
@@ -85,7 +94,7 @@ impl PostgresStore {
         let restore_database_url = direct_url
             .and_then(trimmed)
             .unwrap_or_else(|| database_url.clone());
-        Some(Self { database_url, restore_database_url })
+        Some(Self { database_url, restore_database_url, idle_clients: Arc::new(Mutex::new(Vec::new())) })
     }
 
     pub fn restore_state(&self) -> Result<ControlPlaneState, String> {
@@ -944,8 +953,44 @@ returning user_id::text"#,
             .map_err(|error| format!("postgres harness transaction commit failed: {error}"))
     }
 
-    fn connect(&self) -> Result<Client, String> {
-        connect_client(&self.database_url)
+    fn connect(&self) -> Result<ReusedClient, String> {
+        // PgBouncer pools database sessions; retain the application's connection
+        // to it too, rather than repeating TLS/authentication for every query.
+        let client = {
+            let mut idle = self.idle_clients.lock().map_err(|_| "database connection cache poisoned")?;
+            loop {
+                match idle.pop() {
+                    Some(client) if !client.is_closed() => break Some(client),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        };
+        let client = match client { Some(client) => client, None => connect_client(&self.database_url)? };
+        Ok(ReusedClient { client: Some(client), idle: Arc::clone(&self.idle_clients) })
+    }
+}
+
+// Active queries retain their existing concurrency. Cache at most eight idle
+// clients across clones, and discard disconnected clients without replaying SQL.
+struct ReusedClient {
+    client: Option<Client>,
+    idle: Arc<Mutex<Vec<Client>>>,
+}
+impl Deref for ReusedClient {
+    type Target = Client;
+    fn deref(&self) -> &Client { self.client.as_ref().expect("leased database client") }
+}
+impl DerefMut for ReusedClient {
+    fn deref_mut(&mut self) -> &mut Client { self.client.as_mut().expect("leased database client") }
+}
+impl Drop for ReusedClient {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take().filter(|client| !client.is_closed()) {
+            if let Ok(mut idle) = self.idle.lock() {
+                if idle.len() < 8 { idle.push(client); }
+            }
+        }
     }
 }
 
@@ -1829,5 +1874,21 @@ mod tests {
         assert!(CREDITS_RESTORE_SQL.contains("limit 4096"));
         assert!(HARNESS_TASKS_RESTORE_SQL.contains("limit 512"));
         assert!(HARNESS_ARTIFACTS_RESTORE_SQL.contains("limit 2048"));
+    }
+}
+#[cfg(test)]
+mod connection_reuse_regression {
+    use super::*;
+    #[test]
+    #[ignore = "requires an explicitly supplied read-only test connection"]
+    fn cloned_store_reuses_connection_for_read_only_queries() {
+        let url=std::env::var("MUNDUSX_TEST_DATABASE_URL").expect("test database URL");
+        let store=PostgresStore::from_values(Some(&url),None).unwrap();
+        let first:i32={let mut client=store.connect().unwrap();client.query_one("SELECT pg_backend_pid()",&[]).unwrap().get(0)};
+        assert_eq!(store.idle_clients.lock().unwrap().len(),1);
+        let clone=store.clone();
+        let second:i32={let mut client=clone.connect().unwrap();client.query_one("SELECT pg_backend_pid()",&[]).unwrap().get(0)};
+        assert_eq!(first,second);
+        assert_eq!(store.idle_clients.lock().unwrap().len(),1);
     }
 }
