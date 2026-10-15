@@ -169,3 +169,34 @@ test('restarted controller is discarded before a valid continuation is attached'
  assert.equal(result.content.split("const Student = require").length-1,1);
  assert.match(result.content,/dependencies\n\n```bash/);
 });
+
+test('presentation repair closes the actual outer and nested delimiters',async()=>{
+ for(const [first,closing] of [['````rust\nfn main() {}','\n````\n'],['~~~rust\nfn main() {}','\n~~~\n'],['````markdown\n# README\n```bash\nnpm install','\n```\n````\n']]){
+  const r=output();const result=await relayControlPlaneOpenAiStream(r,{messages:[]},config,async()=>segment(first,'stop'),{continueOnLength:true});
+  assert.equal(result.content,first+closing);assert.equal(result.finishReason,'stop');
+ }
+});
+test('an echoed anchor cannot unlock streaming of a restarted controller',async()=>{
+ const r=output();let requests=0;
+ const controller="```javascript\nconst Student = require('../models/Student');\n// Get all students\nexports.getAllStudents = async (req, res) => {};\n```";
+ const first=controller+'\n\n3. Install dependencies';
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Create the API'}]},config,async()=>{
+  requests++;
+  if(requests===1)return segment(first,'length');
+  if(requests===3)return segment(first.slice(-256)+'\n\n```bash\nnpm install\n```','stop');
+  const head=first.slice(-256)+"\n\n```javascript\nconst Student = require('../models/Student');\n";
+  const tail='// Get all students\nexports.getAllStudents = async (req, res) => {};\n```';
+  return new Response(frame({content:head})+frame({content:tail})+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n');
+ },{continueOnLength:true});
+ assert.equal(requests,3);assert.equal(result.content.split('const Student = require').length-1,1);
+ assert.equal(r.chunks.join('').split('const Student = require').length-1,1);
+ assert.equal(result.finishReason,'stop');
+});
+test('a new declared file may share its header with an earlier file',async()=>{
+ const r=output();let n=0;
+ const source='import express from "express";\nimport cors from "cors";\nconst app = express();\n';
+ const first='## src/one.js\n```js\n'+source+'export default app;\n```';
+ const second='\n\n## src/two.js\n```js\n'+source+'export const second = app;\n```';
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[]},config,async()=>++n===1?segment(first,'length'):segment(first.slice(-256)+second,'stop'),{continueOnLength:true});
+ assert.equal(n,2);assert.equal(result.content,first+second);assert.equal(result.finishReason,'stop');
+});
