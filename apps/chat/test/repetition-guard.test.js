@@ -29,3 +29,11 @@ test('allows similar CRUD methods and repeated comment blocks', () => {
   assert.doesNotThrow(() => assertNoRepetition('```rust\n' + methods + '\n```'));
   assert.doesNotThrow(() => assertNoRepetition('```js\n' + '// long explanatory comment about the handler and its behavior\n'.repeat(100) + '```'));
 });
+
+test('stops runaway source expressions repeated on one line', () => {
+  const chain = '.configure(web::scope("/")';
+  assert.throws(() => assertNoRepetition('```rust\nApp::new()' + chain.repeat(100)), {code:'mundusx_repetition_detected'});
+  assert.doesNotThrow(() => assertNoRepetition('```rust\nApp::new()' + chain.repeat(3)));
+  assert.doesNotThrow(() => assertNoRepetition('```rust\n// ' + chain.repeat(100)));
+  assert.doesNotThrow(() => assertNoRepetition('```rust\nlet values = [' + '1, 2, 3, '.repeat(200) + '];'));
+});

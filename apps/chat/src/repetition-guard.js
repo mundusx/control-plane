@@ -2,6 +2,13 @@
 function repeatedCodeBlock(content) {
   for (const fence of content.matchAll(/```[^\n]*\n([\s\S]*?)(?:```|$)|~~~[^\n]*\n([\s\S]*?)(?:~~~|$)/g)) {
     const lines = (fence[1] ?? fence[2]).slice(-12288).split('\n');
+    for (const line of lines) {
+      if (line.length < 768 || /^\s*(?:#|\/\/|\*|<!--)/.test(line)) continue;
+      const repeated = line.match(/(.{24,512}?)\1{5,}/);
+      if (!repeated || repeated[0].length < 768) continue;
+      const names = repeated[1].match(/[A-Za-z_]\w{2,}/g) ?? [];
+      if (new Set(names).size >= 3 && /[=;{}]|\.\w+\(/.test(repeated[1])) return repeated[1];
+    }
     // Require six identical multi-line blocks, including real source syntax.
     // Ordinary repeated labels, prose, comments, and short boilerplate pass.
     for (let period = 3; period <= 32; period++) {
