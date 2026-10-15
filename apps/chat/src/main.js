@@ -8579,6 +8579,8 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let stalledContinuationAttempts = 0;
   let documentationRepairs = 0;
   let transientStreamRecoveries = 0;
+  let activeCompletionId = null;
+  let activeResumeToken = null;
 
   try {
     for (let attempt = 0; ; attempt += 1) {
@@ -8594,6 +8596,8 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         throw httpError(upstream.status, text.trim().slice(0, 240) || `control plane returned ${upstream.status}`);
       }
       if (!upstream.body?.getReader) throw httpError(502, "control plane did not return a readable event stream");
+      activeCompletionId = upstream.headers?.get?.("x-mundusx-completion-id") || null;
+      activeResumeToken = upstream.headers?.get?.("x-mundusx-resume-token") || null;
       if (!responseStarted) {
         startOpenAiStream(
           response,
@@ -8664,7 +8668,11 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           }
           if (delta) {
             attemptContent += delta;
-            assertNoRepetition(attemptContent);
+            // Continuations can start inside a code fence whose opening is in
+            // an earlier segment. Inspect the joined answer after its anchor
+            // is recognized, preserving that Markdown context.
+            const guardedSuffix = attempt === 0 ? null : anchoredContinuationSuffix(content, attemptContent);
+            assertNoRepetition(guardedSuffix === null ? attemptContent : content + guardedSuffix);
             if (attempt === 0) content += delta;
             else streamContinuationProgress();
           }
@@ -8876,6 +8884,17 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
     return { content, completionId, finishReason };
   } catch (error) {
     if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
+    // Disconnecting a resumable stream only detaches its reader. Explicitly
+    // cancel the affected segment after terminal repetition to release its job.
+    if (error.code === "mundusx_repetition_detected" && activeCompletionId && activeResumeToken) {
+      try {
+        const cancelled = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions/${encodeURIComponent(activeCompletionId)}/cancel`, {
+          method: "POST", headers: {...headers, "X-MundusX-Resume-Token": activeResumeToken},
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!cancelled.ok) console.warn("[openai-repetition-cancel]", JSON.stringify({completionId:activeCompletionId,status:cancelled.status}));
+      } catch { console.warn("[openai-repetition-cancel] cancellation unavailable"); }
+    }
     const markdownRepair = closeDanglingMarkdownFence(content);
     if (markdownRepair) {
       content += markdownRepair;
@@ -8990,6 +9009,7 @@ function anchoredContinuationSuffix(existingContent, candidateContent) {
   return normalizeContinuationBoundary(
     existing,
     candidate.slice(anchorIndex + anchor.length),
+    true,
   );
 }
 
@@ -9000,13 +9020,16 @@ function finalContinuationSuffix(existingContent, candidateContent) {
   return uniqueContinuationSuffix(existingContent, boundary);
 }
 
-function normalizeContinuationBoundary(existingContent, candidateContent) {
+function normalizeContinuationBoundary(existingContent, candidateContent, anchored = false) {
   const existing = String(existingContent ?? "");
   const candidate = String(candidateContent ?? "");
   if (!existing || !candidate) return candidate;
 
   const fenceCount = (existing.match(/(?:^|\n)[ \t]{0,3}```/g) || []).length;
   const insideFence = fenceCount % 2 === 1;
+  // After an exact tail anchor, a bare fence closes the existing block.
+  // Removing it would turn subsequent prose into code and hide real loops.
+  if (anchored && insideFence && /^[ \t]*```[ \t]*\r?\n/.test(candidate)) return candidate;
   const openingFence = candidate.match(/^[ \t]*```[^\r\n`]*\r?\n/);
   if (!insideFence || !openingFence) return candidate;
 
@@ -9070,7 +9093,7 @@ function buildContinuationRequestBody(currentBody, originalMessages, content, st
     : "";
   return {
     ...currentBody,
-    temperature: 0,
+    // Preserve explicit client sampling or the managed model profile.
     // Keep enough room for the prompt and a recent code tail inside the
     // worker context window. Increasing this budget while also resending the
     // entire growing answer caused every retry to terminate at length.

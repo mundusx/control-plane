@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {streamOpenAiChatCompletion, configFromEnv} from '../src/main.js';
+import {streamOpenAiChatCompletion, relayControlPlaneOpenAiStream, configFromEnv} from '../src/main.js';
 const config=configFromEnv({MUNDUSX_CONTROL_PLANE_URL:'https://gateway.test'});
 function output(){const r=new EventEmitter();r.writableEnded=false;r.chunks=[];r.writeHead=()=>{};r.flushHeaders=()=>{};r.write=v=>r.chunks.push(v);r.end=v=>{if(v)r.chunks.push(v);r.writableEnded=true;};return r;}
 const frame=delta=>'data: '+JSON.stringify({id:'chatcmpl-test',choices:[{delta,finish_reason:null}]})+'\n\n';
@@ -70,4 +70,52 @@ test('Continue file protocol streams arguments before completion through public 
  const calls=events.flatMap(e=>e.choices?.[0]?.delta?.tool_calls || []);
  assert.deepEqual(JSON.parse(calls.map(c=>c.function.arguments).join('')),{filepath:'hello.js',contents:'// live code'});
  assert.equal(events.at(-1).choices[0].finish_reason,'tool_calls');
+});
+
+function segment(content,reason){return new Response(frame({content})+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:reason}]})+'\n\ndata: [DONE]\n\n');}
+
+test('anchored code continuations preserve fence context and caller sampling',async()=>{
+ const repeated='// This implementation provides create read update delete endpoints for student records. It validates request data and returns the appropriate HTTP response.\n';
+ const first='```rust\n'+('// initial context\n'.repeat(25));
+ for(const temperature of [undefined,0,0.7]) {
+  const r=output();const requests=[];
+  const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Provide a Rust CRUD API'}],...(temperature===undefined?{}:{temperature})},config,async(_url,init)=>{
+   const body=JSON.parse(init.body);requests.push(body);
+   return requests.length===1?segment(first,'length'):segment(first.slice(-256)+repeated.repeat(4)+'```\nDone.','stop');
+  },{continueOnLength:true});
+  assert.equal(requests.length,2);
+  assert.equal(requests[1].temperature,temperature);
+  assert.equal(Object.hasOwn(requests[1],'temperature'),temperature!==undefined);
+  assert.equal(result.finishReason,'stop');
+  assert.doesNotMatch(r.chunks.join(''),/mundusx_repetition_detected/);
+ }
+});
+
+test('real prose loops still fail after a code continuation closes its fence',async()=>{
+ const r=output();let requests=0;
+ const first='```rust\n'+('// initial context\n'.repeat(25));
+ const prose='This demonstration implements the student API with validation and structured responses. The server stores records in memory and supports the expected create read update and delete operations.\n';
+ await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Provide a Rust CRUD API'}]},config,async()=>++requests===1?segment(first,'length'):segment(first.slice(-256)+'```\n'+prose.repeat(4),'stop'),{continueOnLength:true});
+ assert.equal(requests,2);
+ assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
+});
+
+test('repetition cancels only the current resumable continuation segment',async()=>{
+ const r=output();const calls=[];
+ const first='Initial answer '+('unique context '.repeat(30));
+ const prose='This demonstration implements the student API with validation and structured responses. The server stores records in memory and supports the expected create read update and delete operations.\n';
+ await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Provide a Rust CRUD API'}]},config,async(url,init)=>{
+  calls.push({url,init});
+  if(url.endsWith('/cancel'))return new Response('{}');
+  const n=calls.length;
+  const response=segment(n===1?first:first.slice(-256)+prose.repeat(4),n===1?'length':'stop');
+  response.headers.set('x-mundusx-completion-id','segment-'+n);
+  response.headers.set('x-mundusx-resume-token','test-resume-'+n);
+  return response;
+ },{continueOnLength:true});
+ assert.equal(calls.length,3);
+ assert.equal(calls[2].url,'https://gateway.test/v1/chat/completions/segment-2/cancel');
+ assert.equal(calls[2].init.headers['X-MundusX-Resume-Token'],'test-resume-2');
+ assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
+ assert.doesNotMatch(r.chunks.join(''),/test-resume/);
 });

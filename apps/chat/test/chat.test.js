@@ -5128,7 +5128,7 @@ test("automatic continuation removes a restarted code prefix and keeps only new 
   assert.equal((writes.join("").match(/contract DEX/g) || []).length, 1);
   assert.match(requests[1].messages[0].content, /Continuation override/);
   assert.match(requests[2].messages.at(-1).content, /previous continuation could not be joined safely/);
-  assert.equal(requests[1].temperature, 0);
+  assert.equal(requests[1].temperature, requests[0].temperature);
   assert.equal(result.finishReason, "stop");
   assert.equal(writes.join("").match(/data: \[DONE\]/g)?.length, 1);
 });
