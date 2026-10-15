@@ -200,3 +200,52 @@ test('a new declared file may share its header with an earlier file',async()=>{
  const result=await relayControlPlaneOpenAiStream(r,{messages:[]},config,async()=>++n===1?segment(first,'length'):segment(first.slice(-256)+second,'stop'),{continueOnLength:true});
  assert.equal(n,2);assert.equal(result.content,first+second);assert.equal(result.finishReason,'stop');
 });
+
+test('placeholder detection covers assembly without rejecting real code or documentation', async()=>{
+ const {isPlaceholderOnlyCodeAnswer}=await import('../src/main.js');
+ assert.equal(isPlaceholderOnlyCodeAnswer('```assembly\n;\nWindows console program using WinAPI\n```\nThis is intentionally simplified and incomplete since implementations depend on the platform.\n```\n```'),true);
+ assert.equal(isPlaceholderOnlyCodeAnswer('```python\n# implementation goes here\n```'),true);
+ assert.equal(isPlaceholderOnlyCodeAnswer('```python\nprint("hello")\n```'),false);
+ assert.equal(isPlaceholderOnlyCodeAnswer('```markdown\n# Usage\n```'),false);
+ assert.equal(isPlaceholderOnlyCodeAnswer('```rust\nfn main() {}\n```'),false);
+ assert.equal(isPlaceholderOnlyCodeAnswer('```assembly\n   \n```'),true);
+});
+
+test('coding repetition cancels the failed job and replaces the answer once',async()=>{
+ const r=output();let calls=0,cancels=0;const bodies=[];
+ const loop='```rust\nfn main() {\n'+'.configure(web::scope("")'.repeat(100);
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'write Rust code'}]},config,async(url,init)=>{
+  if(url.endsWith('/cancel')){cancels++;return new Response('{}');}
+  bodies.push(JSON.parse(init.body));calls++;
+  const content=calls===1?loop:'```rust\nfn main() { println!("Hello"); }\n```';
+  return new Response(frame({content})+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n',{headers:{'x-mundusx-completion-id':'chatcmpl-'+calls,'x-mundusx-resume-token':'test-secret'}});
+ },{continueOnLength:true,recoverCodeQuality:true});
+ assert.equal(cancels,1);assert.equal(calls,2);assert.equal(result.finishReason,'stop');assert.match(result.content,/println!/);assert.doesNotMatch(result.content,/configure/);
+ assert.match(r.chunks.join(''),/replace_content/);assert.equal(bodies[1].temperature,0.6);
+});
+
+test('placeholder regeneration is bounded and does not publish a successful placeholder',async()=>{
+ const r=output();let calls=0;
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'write assembly'}]},config,async()=>{
+  calls++;return new Response(frame({content:'```assembly\n; TODO implementation\n```'})+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n');
+ },{continueOnLength:true,recoverCodeQuality:true});
+ assert.equal(calls,2);assert.equal(result.finishReason,'error');assert.match(result.error,/placeholder after one retry/);
+});
+
+test('a second repeating answer fails without an unbounded retry loop',async()=>{
+ const r=output();let calls=0,cancels=0;
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'write Rust'}]},config,async(url)=>{
+  if(url.endsWith('/cancel')){cancels++;return new Response('{}');}
+  calls++;return new Response(frame({content:'```rust\n'+'.configure(web::scope("")'.repeat(100)}),{headers:{'x-mundusx-completion-id':'chatcmpl-'+calls,'x-mundusx-resume-token':'test-secret'}});
+ },{continueOnLength:true,recoverCodeQuality:true});
+ assert.equal(calls,2);assert.equal(cancels,2);assert.equal(result.finishReason,'error');
+});
+
+test('failed cancellation prevents starting a replacement job',async()=>{
+ const r=output();let calls=0;
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'write Rust'}]},config,async(url)=>{
+  if(url.endsWith('/cancel'))return new Response('{}',{status:503});
+  calls++;return new Response(frame({content:'```rust\n'+'.configure(web::scope("")'.repeat(100)}),{headers:{'x-mundusx-completion-id':'chatcmpl-1','x-mundusx-resume-token':'test-secret'}});
+ },{continueOnLength:true,recoverCodeQuality:true});
+ assert.equal(calls,1);assert.equal(result.finishReason,'error');
+});

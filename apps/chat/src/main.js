@@ -5669,6 +5669,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       }
       for (const part of parts) {
         if (part.type === "code") {
+          if (!part.value.trim()) continue;
           const displayName = codeBlockDisplayName(container);
           container.appendChild(createCodeBlock(part.language, formatCodeForDisplay(part.value), displayName));
         } else {
@@ -8318,6 +8319,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     // first segment finishes normally, while preventing any unrecognized
     // code phrasing from surfacing a truncated answer to the browser.
     continueOnLength: true,
+    recoverCodeQuality: codeGenerationResponse,
     validateCompleteAnswer: codeGenerationResponse && /\b(?:node(?:\.?js)?|express)\b/i.test(codeLanguageContext) && !/\b(?:react|jsx|tsx|next\.?js)\b/i.test(codeLanguageContext)
       ? (content, { signal }) => repairJavascriptCodeBlocks(content, (code, error) =>
           requestJavascriptSyntaxRepair(code, error, config, fetchImpl, requestBody.model || PUBLIC_MODEL_ID, signal)) : undefined,
@@ -8574,6 +8576,27 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let transientStreamRecoveries = 0;
   let activeCompletionId = null;
   let activeResumeToken = null;
+  let codeQualityRetries = 0;
+  const restartCodeAnswer = async (reason) => {
+    if (!hooks.recoverCodeQuality || codeQualityRetries >= 1 || clientDisconnected || controller.signal.aborted) return false;
+    if (reason === "repetition" && activeCompletionId && activeResumeToken) {
+      const cancelled = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions/${encodeURIComponent(activeCompletionId)}/cancel`, {
+        method: "POST", headers: { ...headers, "X-MundusX-Resume-Token": activeResumeToken }, signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+      // Never start a replacement while the failed job may still hold its slot.
+      if (!cancelled?.ok) return false;
+    }
+    codeQualityRetries += 1;
+    content = ""; finishReason = null;
+    stalledContinuationAttempts = 0; documentationRepairs = 0; documentationRecovery = false;
+    requestBody = { ...body, stream: true, temperature: 0.6, top_p: 0.9, messages: [
+      ...body.messages,
+      { role: "system", content: "Regenerate the requested implementation from scratch. The previous attempt failed quality checks: " + reason + ". Use a compact implementation with minimal dependencies. Include actual requested source code; do not substitute comments, placeholders, or repeated configuration. Do not repeat file contents. Close every code fence." },
+    ] };
+    writeResponse(`data: ${JSON.stringify({ id: completionId, choices: [], mundusx: { replace_content: "", message: "Regenerating an invalid code response (one retry)." } })}\n\n`);
+    await hooks.onProgress?.({ content, completionId, finishReason });
+    return true;
+  };
 
   try {
     for (let attempt = 0; ; attempt += 1) {
@@ -8725,6 +8748,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
 
       if (streamError) {
+        if (streamError.code === "mundusx_repetition_detected" && await restartCodeAnswer("repetition")) { attempt = -1; continue; }
         if (["mundusx_repetition_detected", "mundusx_upstream_terminal_error"].includes(streamError.code)) throw streamError;
         if (controller.signal.aborted) return { content, completionId, finishReason: "cancelled" };
 
@@ -8797,6 +8821,10 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
           completionId,
         );
         hooks.onProgress?.({ content, completionId, finishReason });
+      }
+      if (attemptFinishReason === "stop" && isPlaceholderOnlyCodeAnswer(content)) {
+        if (await restartCodeAnswer("placeholder-only answer")) { attempt = -1; continue; }
+        if (hooks.recoverCodeQuality) throw new Error("The model returned an incomplete code placeholder after one retry.");
       }
       const segmentMadeProgress = content.length > segmentStartLength;
       let reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
@@ -15125,6 +15153,17 @@ function stripUnaskedWhoExpansion(value) {
     /\s+(?:What\s+is\s+(?:his|her|their)\s+role\s+in\s+(?:the\s+)?MundusX\s+(?:project|community|ecosystem)\??)[\s\S]*$/i,
     "",
   ).trim();
+}
+
+export function isPlaceholderOnlyCodeAnswer(value) {
+  const text = String(value ?? "");
+  const blocks = splitMarkdownCode(text).filter(part => part.type === "code" && !/^(?:md|markdown|text|json|ya?ml|toml|env|ini|conf|cfg)$/i.test(part.language));
+  const source = blocks.map(part => part.value.trim()).filter(Boolean);
+  if (!blocks.length || source.join("\n").length > 400) return false;
+  if (!source.length) return true;
+  const prose = splitMarkdownCode(text).filter(part => part.type === "text").map(part => part.value).join("\n");
+  return /\b(?:intentionally (?:simplified and )?incomplete|implementation (?:is )?omitted|placeholder only|not (?:a )?(?:complete|working) implementation)\b/i.test(prose) ||
+    (source.length > 0 && /\b(?:TODO|TBD|placeholder|implementation goes here)\b/i.test(source.join("\n")) && source.every(code => code.split("\n").filter(line => line.trim()).every(line => /^\s*(?:;|\/\/|#|\/\*|\*|--)/.test(line))));
 }
 
 function isIncompletePlaceholderCode(value) {
