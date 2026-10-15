@@ -228,6 +228,7 @@ test("renders a usable chat page", () => {
   assert.match(html, /\.code-block/);
   assert.match(html, /function stripEchoedPrompt/);
   assert.match(html, /function appendRichMessage/);
+  assert.ok(html.includes("if (!part.value.trim()) continue;"), "empty fences must not render code cards");
   assert.match(html, /function codeBlockDisplayName/);
   assert.match(html, /function appendHighlightedCode/);
   assert.match(html, /function appendHighlightedLine/);
