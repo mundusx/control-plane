@@ -54,6 +54,6 @@ impl AdmissionProfile {
         }
         Self { source:if runtime_context.is_some() {"runtime_metadata"} else {"predefined_estimate"}.into(), node_class:node_class.into(),
             model_class:if expert {"coding_expert"} else if family {"coding_family"} else if standard {"coding_standard"} else if basic {"coding_basic"} else {"general_chat"}.into(),
-            context_tokens:limit, estimated_model_memory_mb:weight, max_parallel_jobs:1, capabilities }
+            context_tokens:limit, estimated_model_memory_mb:weight, max_parallel_jobs:crate::state::ControlPlaneState::node_runtime_parallel_capacity(node) as u32, capabilities }
     }
 }

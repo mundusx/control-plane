@@ -1329,7 +1329,7 @@ impl ControlPlaneState {
     }
 
     /// One source for advertised capacity, operator limits, and runtime ceilings.
-    fn node_runtime_parallel_capacity(node: &NodeRecord) -> usize {
+    pub(crate) fn node_runtime_parallel_capacity(node: &NodeRecord) -> usize {
         if node.trust.qualification_enforced() { return 1; }
         let Some(health)=node.worker_health.as_ref() else {return 1;};
         if health.runtime_mode=="media" || !health.healthy || !health.runtime_ready
@@ -17904,13 +17904,18 @@ mod tests {
         assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),1);
         node.worker_health.as_mut().unwrap().capabilities.max_num_seqs=None;
         node.trust.capability_policy_enabled=true;
+        assert_eq!(ControlPlaneState::node_runtime_parallel_capacity(node),2);
+        let public=crate::capability_policy::public_node(node);
+        assert_eq!(public["worker_health"]["parallel_slots"],2);
+        assert_eq!(public["reported_worker_health"]["parallel_slots"],3);
         node.trust.capability_policy=Some(crate::capability_policy::Override {
             settings:crate::capability_policy::Settings {max_parallel_jobs:Some(1),reason:"Operator limit".into(),..Default::default()},
             actor:"admin".into(),updated_at:"3".into(),
         });
         assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),1);
         assert_eq!(ControlPlaneState::node_runtime_parallel_capacity(node),1);
-        node.trust.capability_policy_enabled=false;
+        node.trust.capability_policy=None;
+        assert_eq!(ControlPlaneState::node_runtime_parallel_capacity(node),2);
         node.worker_health.as_mut().unwrap().runtime_mode="batch".into();
         assert_eq!(ControlPlaneState::node_parallel_capacity_for_job(node,&job),1);
     }
