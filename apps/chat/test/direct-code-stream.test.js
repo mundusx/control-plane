@@ -119,3 +119,20 @@ test('repetition cancels only the current resumable continuation segment',async(
  assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
  assert.doesNotMatch(r.chunks.join(''),/test-resume/);
 });
+
+test('code loops cancel the first segment without starting continuations',async()=>{
+ const r=output();const calls=[];
+ const block='axum = "0.6.1"\nserde_json = "1.0"\ntokio = { version = "1.0", features = ["full"] }\ntokio_postgres = { version = "0.7", features = ["tls"] }\ntokio_rds = "0.1"\n';
+ await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Provide a Rust CRUD API'}]},config,async(url,init)=>{
+  calls.push({url,init});
+  if(url.endsWith('/cancel'))return new Response('{}');
+  const response=segment('```toml\n'+block.repeat(8),'length');
+  response.headers.set('x-mundusx-completion-id','looping-code');
+  response.headers.set('x-mundusx-resume-token','test-loop-resume');
+  return response;
+ },{continueOnLength:true});
+ assert.equal(calls.length,2);
+ assert.equal(calls[1].url,'https://gateway.test/v1/chat/completions/looping-code/cancel');
+ assert.equal(calls[1].init.headers['X-MundusX-Resume-Token'],'test-loop-resume');
+ assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
+});
