@@ -37,3 +37,10 @@ test('stops runaway source expressions repeated on one line', () => {
   assert.doesNotThrow(() => assertNoRepetition('```rust\n// ' + chain.repeat(100)));
   assert.doesNotThrow(() => assertNoRepetition('```rust\nlet values = [' + '1, 2, 3, '.repeat(200) + '];'));
 });
+
+test('stops sustained duplicate JSON properties while allowing separate objects and comments', () => {
+  const property='    "strictPropertyInitialization": true,\n';
+  assert.throws(() => assertNoRepetition('```json\n{\n'+property.repeat(30)), {code:'mundusx_repetition_detected'});
+  assert.doesNotThrow(() => assertNoRepetition('```json\n[\n'+('{\n'+property+'},\n').repeat(30)+']\n```'));
+  assert.doesNotThrow(() => assertNoRepetition('```ts\n'+('// '+property).repeat(30)+'```'));
+});

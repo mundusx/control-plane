@@ -136,3 +136,18 @@ test('code loops cancel the first segment without starting continuations',async(
  assert.equal(calls[1].init.headers['X-MundusX-Resume-Token'],'test-loop-resume');
  assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
 });
+
+test('duplicate JSON property loops cancel before any continuation',async()=>{
+ const r=output();const calls=[];
+ await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Provide a TypeScript CRUD API'}]},config,async(url,init)=>{
+  calls.push({url,init});
+  if(url.endsWith('/cancel'))return new Response('{}');
+  const response=segment('```json\n{\n'+('    "strictPropertyInitialization": true,\n'.repeat(30)),'length');
+  response.headers.set('x-mundusx-completion-id','looping-json');
+  response.headers.set('x-mundusx-resume-token','test-json-resume');
+  return response;
+ },{continueOnLength:true});
+ assert.equal(calls.length,2);
+ assert.equal(calls[1].url,'https://gateway.test/v1/chat/completions/looping-json/cancel');
+ assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
+});
