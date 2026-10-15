@@ -8578,6 +8578,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let requestBody = { ...body, stream: true };
   let stalledContinuationAttempts = 0;
   let documentationRepairs = 0;
+  let documentationRecovery = false;
   let transientStreamRecoveries = 0;
   let activeCompletionId = null;
   let activeResumeToken = null;
@@ -8623,6 +8624,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         // when a model restarts a controller and reaches the true boundary
         // later).  Streaming that provisional suffix made already-visible
         // text impossible to reconcile at the end of the segment.
+        if (documentationRecovery) return;
         const candidate = anchoredContinuationSuffix(content, attemptContent);
         if (candidate === null) return;
         if (!candidate || !candidate.startsWith(streamedContinuationContent)) return;
@@ -8778,7 +8780,9 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       const boundarySegment = attempt === 0 ? attemptContent : null;
       const joinedSegment = attempt === 0
         ? boundarySegment
-        : finalContinuationSuffix(content, attemptContent);
+        : documentationRecovery
+          ? documentationContinuationSuffix(content, attemptContent)
+          : finalContinuationSuffix(content, attemptContent);
       if (attempt > 0 && joinedSegment) {
         streamContinuationProgress(true);
         if (
@@ -8806,18 +8810,28 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         if (gaps.length && segmentMadeProgress && !reachedContinuationLimit && documentationRepairs < 2) {
           documentationRepairs += 1;
           writeResponse(": completing project documentation\n\n");
-          requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
-          requestBody.messages.at(-1).content += `\nComplete these missing deliverables only:\n${gaps.join("\n")}\nIf the assistant tail is inside a Markdown file fence, finish and close it before the Delivery summary. Do not add new features or repeat earlier files.`;
+          documentationRecovery = true;
+          requestBody = buildDocumentationRequestBody(requestBody, body.messages, content, gaps);
           continue;
         }
         if (gaps.length) {
-          attemptFinishReason = "length";
-          finishReason = "length";
-          reachedContinuationLimit = true;
+          const note = closeDanglingMarkdownFence(content) + "\n\nDocumentation could not be completed. Review the generated project before using it.\n";
+          content += note; writeContinuationContent(response, note, completionId);
         }
       }
+      if (documentationRecovery && !segmentMadeProgress) {
+        const gaps = projectCompletionGaps(content);
+        if (documentationRepairs < 2 && !reachedContinuationLimit) {
+          documentationRepairs += 1;
+          requestBody = buildDocumentationRequestBody(requestBody, body.messages, content, gaps);
+          continue;
+        }
+        const note = closeDanglingMarkdownFence(content) + "\n\nDocumentation could not be completed. Review the generated project before using it.\n";
+        content += note; writeContinuationContent(response, note, completionId);
+        attemptFinishReason = "stop"; finishReason = "stop";
+      }
       if (
-        attempt > 0 &&
+        !documentationRecovery && attempt > 0 &&
         !segmentMadeProgress &&
         !reachedContinuationLimit &&
         stalledContinuationAttempts < 2
@@ -8832,7 +8846,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
         );
         continue;
       }
-      if (attempt > 0 && !segmentMadeProgress) {
+      if (!documentationRecovery && attempt > 0 && !segmentMadeProgress) {
         // A stopped response that only restarted the file is not a successful
         // continuation. Surface it as incomplete after bounded recovery.
         attemptFinishReason = "length";
@@ -9013,9 +9027,34 @@ function anchoredContinuationSuffix(existingContent, candidateContent) {
   );
 }
 
+function documentationContinuationSuffix(existing, candidate) {
+  const suffix = anchoredContinuationSuffix(existing, candidate) ?? candidate;
+  const joined = `${existing}\n\n${suffix}`;
+  // A documentation follow-up must reduce missing documentation; restarted
+  // source code is not progress and must never be attached to the project.
+  if (projectCompletionGaps(joined).length >= projectCompletionGaps(existing).length) return "";
+  if (splitMarkdownCode(suffix).some(part => part.type === "code" && !/^(?:md|markdown|[^\s]+\.md|bash|sh|shell|text|env|code)$/i.test(part.language))) return "";
+  return /^\s/.test(suffix) ? suffix : `\n\n${suffix}`;
+}
+
+function buildDocumentationRequestBody(currentBody, messages, content, gaps) {
+  const request = buildContinuationRequestBody(currentBody, messages, content);
+  for (const message of request.messages) {
+    if (message.role === "system") message.content += " This turn is documentation-only. Application source files have already been emitted. Never repeat or modify application source code.";
+  }
+  request.messages.at(-1).content += `\nComplete these missing deliverables only:\n${gaps.join("\n")}\nReturn only the missing README Markdown and/or final wrap-up after the exact anchor. Never restart application source files. Close any open Markdown file fence before the wrap-up.`;
+  return request;
+}
+
 function finalContinuationSuffix(existingContent, candidateContent) {
   const anchored = anchoredContinuationSuffix(existingContent, candidateContent);
   if (anchored !== null) return anchored;
+  const source = String(candidateContent ?? "").match(/(?:^|\n)[ \t]{0,3}```[^\r\n`]*\r?\n([\s\S]*)/);
+  if (source) {
+    const probe = source[1].split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(0, 3);
+    const existing = String(existingContent).split(/\r?\n/).map(line => line.trim()).join("\n");
+    if (probe.length >= 2 && probe.join("\n").length >= 60 && existing.includes(probe.join("\n"))) return "";
+  }
   const boundary = normalizeContinuationBoundary(existingContent, candidateContent);
   return uniqueContinuationSuffix(existingContent, boundary);
 }
@@ -9031,7 +9070,8 @@ function normalizeContinuationBoundary(existingContent, candidateContent, anchor
   // Removing it would turn subsequent prose into code and hide real loops.
   if (anchored && insideFence && /^[ \t]*```[ \t]*\r?\n/.test(candidate)) return candidate;
   const openingFence = candidate.match(/^[ \t]*```[^\r\n`]*\r?\n/);
-  if (!insideFence || !openingFence) return candidate;
+  if (!insideFence && openingFence) return `${existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n"}${candidate}`;
+  if (!openingFence) return candidate;
 
   const suffix = candidate.slice(openingFence[0].length);
   const firstLine = suffix

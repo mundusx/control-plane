@@ -151,3 +151,21 @@ test('duplicate JSON property loops cancel before any continuation',async()=>{
  assert.equal(calls[1].url,'https://gateway.test/v1/chat/completions/looping-json/cancel');
  assert.match(r.chunks.join(''),/Response stopped because it began repeating/);
 });
+
+test('new fenced continuation after prose starts on its own line',async()=>{
+ const r=output();let requests=0;const first='Setup instructions for the student API.\n3. Install dependencies';
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Create the API'}]},config,async()=>++requests===1?segment(first,'length'):segment('```bash\nnpm install\n```','stop'),{continueOnLength:true});
+ assert.equal(result.content,first+'\n\n```bash\nnpm install\n```');
+ assert.equal(result.finishReason,'stop');
+});
+test('restarted controller is discarded before a valid continuation is attached',async()=>{
+ const r=output();let requests=0;
+ const controller="```javascript\nconst Student = require('../models/Student');\n// Get all students\nexports.getAllStudents = async (req, res) => {};\n```";
+ const first=controller+'\n\n3. Install dependencies';
+ const result=await relayControlPlaneOpenAiStream(r,{messages:[{role:'user',content:'Create the API'}]},config,async()=>{
+  requests++;return requests===1?segment(first,'length'):requests===2?segment(controller,'stop'):segment(first.slice(-256)+'\n\n```bash\nnpm install\n```','stop');
+ },{continueOnLength:true});
+ assert.equal(requests,3);assert.equal(result.finishReason,'stop');
+ assert.equal(result.content.split("const Student = require").length-1,1);
+ assert.match(result.content,/dependencies\n\n```bash/);
+});
