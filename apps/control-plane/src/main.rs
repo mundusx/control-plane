@@ -6194,6 +6194,7 @@ fn requires_device_signature(method: &str, path: &str) -> bool {
             | ("POST", "/v1/heartbeat")
             | ("GET", "/v1/jobs/next")
             | ("POST", "/v1/jobs/delta")
+            | ("POST", "/v1/jobs/assignment")
             | ("POST", "/v1/jobs/complete")
             | ("POST", "/v1/local-leases")
             | ("POST", "/v1/local-leases/renew")
@@ -9912,6 +9913,24 @@ fn handle_connection_with_streams(
                 Err(error) => json_response("400 Bad Request", openai_error(&error.to_string())),
             }
         }
+        ("POST", "/v1/jobs/assignment") => {
+            match serde_json::from_str::<serde_json::Value>(&request.body) {
+                Ok(body) => {
+                    let node = header_value(&request.headers,"x-mundusx-node-id").unwrap_or_default();
+                    match (body["job_id"].as_str(),body["node_id"].as_str(),body["assignment_id"].as_str()) {
+                        (Some(job_id),Some(body_node),Some(assignment)) if !job_id.is_empty() && !assignment.is_empty() && node == body_node => {
+                            let guard=state.lock().expect("state lock");
+                            let active=guard.jobs.get(job_id).is_some_and(|job| job.status==JobStatus::Assigned
+                                && job.assigned_node_id.as_deref()==Some(node)
+                                && job.assigned_at.as_deref()==Some(assignment));
+                            json_response("200 OK",serde_json::json!({"active":active}))
+                        }
+                        _ => json_response("400 Bad Request",openai_error("Valid job, signed node and assignment IDs are required")),
+                    }
+                }
+                Err(_) => json_response("400 Bad Request",openai_error("Invalid assignment check JSON")),
+            }
+        }
         ("POST", "/v1/jobs/delta") => match serde_json::from_str::<JobStreamDelta>(&request.body) {
             Ok(delta) => {
                 let header_node_id =
@@ -11282,6 +11301,49 @@ mod tests {
             guard.nodes["node-heartbeat"].reported_state,
             AgentState::Ready
         );
+    }
+
+    #[test]
+    fn signed_assignment_checks_reject_stale_cancelled_and_other_node_assignments() {
+        assert!(requires_device_signature("POST","/v1/jobs/assignment"));
+        assert!(!requires_operator_auth("POST","/v1/jobs/assignment"));
+        let key=SigningKey::from_bytes(&[17_u8;32]);
+        let other_key=SigningKey::from_bytes(&[18_u8;32]);
+        let mut initial=ControlPlaneState::default();
+        for (node,k) in [("node-a",&key),("node-b",&other_key)] {
+            register_ready_node(&mut initial,node,"test","1");
+            initial.nodes.get_mut(node).unwrap().public_key_hex=hex::encode(k.verifying_key().to_bytes());
+        }
+        let request:JobRequest=serde_json::from_value(serde_json::json!({"request_id":"assignment-test","prompt":"private prompt must not be returned","preferred_backend":"m","execution_mode":"single","max_tokens":128})).unwrap();
+        initial.submit_job(request,"1".into());
+        let job=initial.jobs.get_mut("assignment-test").unwrap();
+        job.status=JobStatus::Assigned;job.assigned_node_id=Some("node-a".into());job.assigned_at=Some("lease-1".into());
+        let state=Arc::new(Mutex::new(initial));let handler_state=state.clone();
+        let sync=Arc::new(Mutex::new(SupabaseSyncStatus::disabled(StorageSource::LocalJsonOnly)));
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+        let handler=thread::spawn(move||{for _ in 0..7 {let(stream,_)=listener.accept().unwrap();handle_connection(stream,handler_state.clone(),sync.clone(),None,StorageSource::LocalJsonOnly);}});
+        for (index,(signed,node,body_node,job_id,assignment,status,active)) in [
+            (false,"node-a","node-a","assignment-test","lease-1",401,None),
+            (true,"node-a","node-a","assignment-test","lease-1",200,Some(true)),
+            (true,"node-a","node-a","assignment-test","stale",200,Some(false)),
+            (true,"node-b","node-b","assignment-test","lease-1",200,Some(false)),
+            (true,"node-a","node-b","assignment-test","lease-1",400,None),
+            (true,"node-a","node-a","assignment-test","lease-1",200,Some(false)),
+            (true,"node-a","node-a","missing","lease-1",200,Some(false)),
+        ].into_iter().enumerate() {
+            if index==5 {let mut guard=state.lock().unwrap();let job=guard.jobs.get_mut("assignment-test").unwrap();job.status=JobStatus::Failed;job.assigned_node_id=None;}
+            let body=serde_json::json!({"job_id":job_id,"node_id":body_node,"assignment_id":assignment}).to_string();
+            let timestamp=now_unix_seconds().parse::<u64>().unwrap()+index as u64;
+            let signature=hex::encode(if node=="node-b" {&other_key}else{&key}.sign(format!("POST\n/v1/jobs/assignment\n{timestamp}\n{body}").as_bytes()).to_bytes());
+            let auth=if signed {format!("X-MundusX-Node-Id: {node}\r\nX-MundusX-Timestamp: {timestamp}\r\nX-MundusX-Signature: {signature}\r\n")}else{String::new()};
+            let wire=format!("POST /v1/jobs/assignment HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\n\r\n{body}",body.len());
+            let mut client=TcpStream::connect(address).unwrap();client.write_all(wire.as_bytes()).unwrap();client.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response=String::new();client.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {status} ")),"case {index}: {response}");
+            assert!(!response.contains("private prompt"));
+            if let Some(active)=active {let payload:serde_json::Value=serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();assert_eq!(payload,serde_json::json!({"active":active}));}
+        }
+        handler.join().unwrap();
     }
 
     #[test]
