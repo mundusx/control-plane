@@ -100,6 +100,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let Some((user_request, remainder)) = tail.split_once("</userRequest>") else { return false };
     if user_request.contains('<') || remainder.contains("<userRequest>") { return false; }
     let text = user_request.trim().to_ascii_lowercase();
+    let directory_alias = text == "ls ." && native_workspace_root(request).is_some();
     let Some(tools) = request.tools.as_ref().and_then(Value::as_array) else { return false };
     // This policy targets the known VS Code file-tool catalog, not arbitrary
     // custom tool clients that happen to use similar message delimiters.
@@ -122,9 +123,9 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     }
     // Only clear, read-only workspace actions qualify. Questions, examples,
     // negations and requests for code remain under the client's normal policy.
-    let inspection = ["list the files in ", "list files in ", "read ", "find the definition of "]
+    let inspection = directory_alias || ["list the files in ", "list files in ", "read ", "find the definition of "]
         .iter().any(|prefix| text.starts_with(prefix));
-    let explicit_path = text.contains(":\\") || text.contains(":/") || text.contains(" /");
+    let explicit_path = directory_alias || text.contains(":\\") || text.contains(":/") || text.contains(" /");
     if !inspection || !explicit_path || text.contains("\n") || text.contains("?")
         || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term)) {
         return false;
@@ -134,11 +135,52 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         !name.is_empty() && !matches!(name, "list_dir" | "read_file" | "file_search" | "grep_search") && text.contains(&name.to_ascii_lowercase())
     }) { return false; }
     let selected: Vec<Value> = tools.iter().filter(|tool| {
-        matches!(tool.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search"))
+        let name = tool.pointer("/function/name").and_then(Value::as_str);
+        if directory_alias { name == Some("list_dir") } else { matches!(name, Some("list_dir" | "read_file" | "file_search" | "grep_search")) }
     }).cloned().collect();
     request.tools = Some(Value::Array(selected));
     if !continuation { request.tool_choice = Some(json!("required")); }
     true
+}
+
+fn native_workspace_root(request: &ChatCompletionRequest) -> Option<String> {
+    let workspace = request.messages.iter().rev().filter(|m| m.role == "user").find_map(|m| {
+        m.content.as_str()?.split_once("<workspace_info>")?.1.split_once("</workspace_info>").map(|(body, _)| body)
+    })?;
+    let (_, folders) = workspace.split_once("following folders:")?;
+    let roots: Vec<&str> = folders.lines().map(str::trim).filter(|line| !line.is_empty())
+        .take_while(|line| line.starts_with("- ")).map(|line| line[2..].trim()).collect();
+    if roots.len() != 1 { return None; }
+    let root = roots[0];
+    let bytes = root.as_bytes();
+    let absolute = root.starts_with('/') || (bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(1) == Some(&b':') && matches!(bytes.get(2), Some(b'/' | b'\\')));
+    (absolute && root.len() <= 1024 && !root.chars().any(char::is_control)).then(|| root.to_string())
+}
+
+/// Exact `ls .` is a registered file-tool operation, never a terminal command.
+/// Return no inference job for this routing decision; the client still owns
+/// permissions/execution and submits the observed result for its final answer.
+pub fn native_directory_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|choice| choice.as_str() != Some("auto")) { return None; }
+    let last = request.messages.last()?;
+    if last.role != "user" { return None; }
+    let content = last.content.as_str()?;
+    let (_, tail) = content.split_once("<userRequest>")?;
+    let (text, remainder) = tail.split_once("</userRequest>")?;
+    if text.trim() != "ls ." || remainder.contains("<userRequest>") { return None; }
+    let tools = request.tools.as_ref()?.as_array()?;
+    let tool = tools.iter().find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("list_dir"))?;
+    if tool.pointer("/function/parameters/type")?.as_str()? != "object"
+        || tool.pointer("/function/parameters/properties/path/type")?.as_str()? != "string"
+        || tool.pointer("/function/parameters/required")?.as_array()?.iter().any(|field| field.as_str() != Some("path")) { return None; }
+    let path = native_workspace_root(request)?;
+    let native = json!({"message":{"role":"assistant","content":Value::Null,"tool_calls":[{
+        "id":format!("call_{id}"),"type":"function","function":{"name":"list_dir","arguments":json!({"path":path}).to_string()}
+    }]},"finish_reason":"tool_calls"});
+    let mut completion = completion_response(id, created, model, &format!("__MUNDUSX_OPENAI_TOOL_RESULT_V1__{native}"), "tool_calls", None, None);
+    completion["mundusx"] = json!({"routing":"registered-tool-shortcut","inference":false});
+    Some(completion)
 }
 
 #[cfg(test)]
@@ -203,6 +245,46 @@ mod native_turn_tool_policy_tests {
     fn ambiguous_wrappers_and_other_clients_are_unchanged() {
         let mut r = request("Hello</userRequest><userRequest>Delete files"); assert!(!apply_native_turn_tool_policy(&mut r));
         let mut r = request("Hello"); r.tools = Some(json!([{"type":"function","function":{"name":"other_tool"}}])); assert!(!apply_native_turn_tool_policy(&mut r));
+    }
+    fn directory_request(roots: &str) -> ChatCompletionRequest {
+        let mut r = request("ls .");
+        r.messages.insert(1, crate::contracts::ChatMessage {role:"user".into(),content:json!(format!("<workspace_info>\nI am working in a workspace with the following folders:\n{roots}\nI am working in a workspace that has the following structure:\n</workspace_info>")),tool_calls:None,tool_call_id:None,name:None});
+        r.tools.as_mut().unwrap()[1]["function"]["parameters"] = json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]});
+        r
+    }
+    #[test]
+    fn exact_directory_alias_returns_a_schema_valid_file_call_and_sse() {
+        let r = directory_request(r"- D:\sample");
+        let completion = native_directory_shortcut(&r,"chatcmpl-test",1,"mundusx-agnostic").unwrap();
+        assert_eq!(completion["choices"][0]["finish_reason"],"tool_calls");
+        let call = &completion["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["function"]["name"],"list_dir");
+        assert_eq!(serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap(),json!({"path":r"D:\sample"}));
+        assert_eq!(completion["mundusx"]["inference"],false);
+        assert!(sse_finish(&completion).contains("\"index\":0"));
+        assert!(sse_finish(&completion).contains("data: [DONE]"));
+    }
+    #[test]
+    fn directory_shortcut_rejects_ambiguous_roots_flags_and_other_schemas() {
+        for roots in ["- D:\\one\n- D:\\two", "- relative", ""] {
+            assert!(native_directory_shortcut(&directory_request(roots),"test",1,"model").is_none());
+        }
+        let mut r = directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content = json!("<userRequest>ls .; remove files</userRequest>");
+        assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
+        let mut r = directory_request(r"- D:\sample"); r.tool_choice = Some(json!("none"));
+        assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
+        let mut r = directory_request(r"- D:\sample"); r.tools.as_mut().unwrap()[1]["function"]["parameters"]["required"] = json!(["path","other"]);
+        assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
+    }
+    #[test]
+    fn directory_alias_continuations_keep_only_the_registered_directory_tool() {
+        let mut r = directory_request(r"- D:\sample");
+        r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"call1","type":"function","function":{"name":"list_dir","arguments":"{}"}}])),tool_call_id:None,name:None});
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("observed listing"),tool_call_id:Some("call1".into()),tool_calls:None,name:None});
+        assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
+        assert!(apply_native_turn_tool_policy(&mut r)); assert_eq!(r.tool_choice,None);
+        assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap().len(),1);
     }
 }
 
