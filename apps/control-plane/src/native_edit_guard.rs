@@ -189,7 +189,9 @@ pub fn verification_loop_stop(request:&crate::contracts::ChatCompletionRequest,i
 
 pub fn diagnostics_refresh(request:&crate::contracts::ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<serde_json::Value> {
     if request.tool_choice.as_ref().is_some_and(|c|c.as_str()!=Some("auto")) {return None;}
-    let last=request.messages.last()?;if last.role!="tool" || !last.content.as_str()?.contains("<compileError>") {return None;}
+    // get_errors may read the diagnostic cache before opening a new document.
+    // An empty first result is just as stale as an obsolete compile error.
+    let last=request.messages.last()?;if last.role!="tool" || last.content.as_str().is_none() {return None;}
     let call_id=last.tool_call_id.as_deref()?;
     if !call_id.starts_with("call_verify_chatcmpl-") {return None;}
     let calls=request.messages.iter().rev().find(|m|m.role=="assistant")?.tool_calls.as_ref()?.as_array()?;
@@ -295,6 +297,8 @@ mod tests {
         p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"tool","tool_call_id":"call_verify_chatcmpl-first","content":"<compileError>possibly cached</compileError>"}));
         let answer=diagnostics_refresh(&serde_json::from_value(p.clone()).unwrap(),"chatcmpl-next",1,"model").unwrap();
         assert_eq!(answer["mundusx"]["inference"],false);
+        let mut empty=p.clone();empty["messages"].as_array_mut().unwrap().last_mut().unwrap()["content"]=serde_json::json!("No errors found");
+        assert!(diagnostics_refresh(&serde_json::from_value(empty).unwrap(),"fresh",1,"model").is_some());
         p["messages"].as_array_mut().unwrap().push(answer["choices"][0]["message"].clone());
         p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"tool","tool_call_id":"call_verify_refresh_chatcmpl-next","content":"<compileError>still present</compileError>"}));
         assert!(diagnostics_refresh(&serde_json::from_value(p).unwrap(),"third",1,"model").is_none());
