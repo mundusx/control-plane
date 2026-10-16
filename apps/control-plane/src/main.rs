@@ -9493,6 +9493,7 @@ fn handle_connection_with_streams(
                         .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model))
                         .or_else(||native_edit_guard::diagnostics_refresh(&request_body,&completion_id,created,public_model))
+                        .or_else(||native_edit_guard::diagnostics_read(&request_body,&completion_id,created,public_model))
                         .or_else(||native_edit_guard::verification_loop_stop(&request_body,&completion_id,created,public_model)) {
                         // Native get_errors samples cached diagnostics before
                         // opening a fresh document snapshot. Refresh once after

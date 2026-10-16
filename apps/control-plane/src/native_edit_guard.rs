@@ -208,6 +208,32 @@ pub fn diagnostics_refresh(request:&crate::contracts::ChatCompletionRequest,id:&
         "mundusx":{"routing":"registered-diagnostics-refresh","inference":false}}))
 }
 
+/// A diagnostic snippet is context, not a registered read result. Supply the
+/// exact freshly mutated file before asking the model for its next repair.
+pub fn diagnostics_read(request:&crate::contracts::ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<serde_json::Value> {
+    if request.tool_choice.as_ref().is_some_and(|c|c.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;
+    if last.role!="tool" || !last.content.as_str()?.contains("<compileError>") {return None;}
+    let call_id=last.tool_call_id.as_deref()?;
+    if !call_id.starts_with("call_verify_refresh_chatcmpl-") {return None;}
+    let call=request.messages.iter().rev().find(|m|m.role=="assistant")?.tool_calls.as_ref()?.as_array()?.iter()
+        .find(|c|c["id"]==call_id && c["function"]["name"]=="get_errors")?;
+    let args:serde_json::Value=serde_json::from_str(call["function"]["arguments"].as_str()?).ok()?;
+    let paths=args["filePaths"].as_array()?;if paths.len()!=1 {return None;}
+    let path=paths[0].as_str()?;let key=observed_file_key(path)?;
+    let start=request.messages.iter().rposition(|m|m.role=="user").map_or(0,|i|i+1);
+    let mutation=request.messages[start..].iter().rev().filter_map(|m|m.tool_calls.as_ref()?.as_array())
+        .flatten().find(|c|matches!(c["function"]["name"].as_str(),Some("create_file"|"replace_string_in_file")))?;
+    let changed:serde_json::Value=serde_json::from_str(mutation["function"]["arguments"].as_str()?).ok()?;
+    if changed["filePath"].as_str().and_then(observed_file_key)!=Some(key) {return None;}
+    let tool=request.tools.as_ref()?.as_array()?.iter().find(|t|t["function"]["name"]=="read_file")?;
+    let call=serde_json::json!({"id":format!("call_read_diagnostic_{id}"),"type":"function","function":{"name":"read_file","arguments":serde_json::json!({"filePath":path,"startLine":1,"endLine":200}).to_string()}});
+    validate_native_tool_schema(&serde_json::json!({"tools":[tool]}),&serde_json::json!({"tool_calls":[call]})).ok()?;
+    Some(serde_json::json!({"id":id,"created":created,"model":model,"object":"chat.completion",
+        "choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[call]}}],
+        "mundusx":{"routing":"registered-diagnostics-read","inference":false}}))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -326,6 +352,28 @@ mod tests {
         assert_eq!(answer["mundusx"]["verification"],"incomplete");assert_eq!(answer["mundusx"]["inference"],false);
         p["messages"].as_array_mut().unwrap().last_mut().unwrap()["content"]=serde_json::json!("changed current file");
         assert!(verification_loop_stop(&serde_json::from_value(p).unwrap(),"id",1,"model").is_none());
+    }
+    #[test]
+    fn persistent_automatic_diagnostics_read_only_the_last_mutated_file_once() {
+        let mut p=payload();
+        p["tools"][0]["function"]["parameters"]=serde_json::json!({"type":"object","properties":{"filePath":{"type":"string"},"startLine":{"type":"number"},"endLine":{"type":"number"}},"required":["filePath","startLine","endLine"]});
+        p["tools"].as_array_mut().unwrap().push(serde_json::json!({"function":{"name":"get_errors"}}));
+        p["messages"].as_array_mut().unwrap().push(edit("D:/sample/routes/studentRoutes.js"));
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"tool","tool_call_id":"edit1","content":"edited"}));
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"assistant","content":null,"tool_calls":[{"id":"call_verify_refresh_chatcmpl-check","function":{"name":"get_errors","arguments":"{\"filePaths\":[\"D:/sample/routes/studentRoutes.js\"]}"}}]}));
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"tool","tool_call_id":"call_verify_refresh_chatcmpl-check","content":"<compileError>new syntax error</compileError>"}));
+        let answer=diagnostics_read(&serde_json::from_value(p.clone()).unwrap(),"chatcmpl-read",1,"model").unwrap();
+        assert_eq!(answer["mundusx"]["inference"],false);
+        let call=&answer["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["function"]["name"],"read_file");
+        let args:serde_json::Value=serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["filePath"],"D:/sample/routes/studentRoutes.js");
+        let mut other=p.clone();let count=other["messages"].as_array().unwrap().len();
+        other["messages"][count-2]["tool_calls"][0]["function"]["arguments"]=serde_json::json!("{\"filePaths\":[\"D:/sample/models/Student.js\"]}");
+        assert!(diagnostics_read(&serde_json::from_value(other).unwrap(),"bad",1,"model").is_none());
+        p["messages"].as_array_mut().unwrap().push(answer["choices"][0]["message"].clone());
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"tool","tool_call_id":"call_read_diagnostic_chatcmpl-read","content":"fresh source"}));
+        assert!(diagnostics_read(&serde_json::from_value(p).unwrap(),"again",1,"model").is_none());
     }
     #[test]
     fn mutation_gets_one_schema_valid_diagnostics_handoff_without_a_model_job() {
