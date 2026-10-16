@@ -39,6 +39,10 @@ fn syntax_references(code:&str)->(std::collections::BTreeSet<String>,std::collec
 fn observed_file_key(path:&str)->Option<String> {
     let normalized=path.replace('\\',"/");
     if normalized.split('/').any(|part|part=="..") {return None;}
+    // Windows accepts repeated separators; native read tools can return them.
+    // Preserve the UNC prefix while comparing equivalent drive paths equally.
+    let prefix=if normalized.starts_with("//") {"//"} else if normalized.starts_with('/') {"/"} else {""};
+    let normalized=format!("{prefix}{}",normalized.split('/').filter(|part|!part.is_empty()).collect::<Vec<_>>().join("/"));
     if normalized.as_bytes().get(1)==Some(&b':') {Some(normalized.to_ascii_lowercase())}
     else if normalized.starts_with('/') {Some(normalized)} else {None}
 }
@@ -105,10 +109,10 @@ pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(
         } else {
             let old=args["oldString"].as_str().filter(|s|!s.is_empty())
                 .ok_or("native edit precondition failed: oldString must be nonempty")?;
-            if !observed.is_some_and(|text|text.contains(old)) {
+            if !observed.is_some_and(|text|text.replace("\r\n","\n").contains(&old.replace("\r\n","\n"))) {
                 return Err("native edit precondition failed: read the exact target and use its observed oldString before replacing it".into());
             }
-            if observed.is_some_and(|text|text.matches(old).count()>1) {
+            if observed.is_some_and(|text|text.replace("\r\n","\n").matches(&old.replace("\r\n","\n")).count()>1) {
                 return Err("native edit precondition failed: oldString is ambiguous in the observed file; include surrounding lines to identify exactly one occurrence".into());
             }
             if syntax_only {
@@ -272,6 +276,22 @@ mod tests {
             let (old_words,old_members)=syntax_references(old);let (new_words,new_members)=syntax_references(new);
             assert!(old_words.is_subset(&new_words));assert!(old_members.iter().all(|(key,count)|new_members.get(key).copied().unwrap_or(0)>=*count));
         }
+    }
+    #[test]
+    fn windows_read_and_edit_paths_and_line_endings_are_equivalent() {
+        let mut p=payload();
+        p["messages"][1]["tool_calls"][0]["function"]["arguments"]=serde_json::json!(serde_json::json!({"filePath":r"D:\sample\routes\studentRoutes.js"}).to_string());
+        p["messages"][2]["content"]=serde_json::json!("router.delete/:id', controller.delete);\r\nnext();");
+        let mut call=edit("d:/sample/routes/studentRoutes.js");
+        let mut args:serde_json::Value=serde_json::from_str(call["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        args["oldString"]=serde_json::json!("router.delete/:id', controller.delete);\nnext();");
+        args["newString"]=serde_json::json!("router.delete('/:id', controller.delete);\nnext();");
+        call["tool_calls"][0]["function"]["arguments"]=serde_json::json!(args.to_string());
+        assert!(validate(&p,&call).is_ok());
+        assert_eq!(observed_file_key(r"D:\\sample\\routes\\studentRoutes.js"),observed_file_key("d:/sample/routes/studentRoutes.js"));
+        assert!(observed_file_key(r"D:\sample\..\secret.js").is_none());
+        p["messages"][2]["content"]=serde_json::json!("router.delete/:id', controller.delete);\r\nnext();\r\nrouter.delete/:id', controller.delete);\r\nnext();");
+        assert!(validate(&p,&call).unwrap_err().contains("ambiguous"));
     }
     #[test]
     fn unobserved_stale_and_recreated_targets_are_rejected() {
