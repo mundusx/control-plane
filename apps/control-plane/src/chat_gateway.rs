@@ -86,7 +86,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
             .and_then(|message| message.tool_calls.as_ref()).and_then(Value::as_array)
             .is_some_and(|calls| calls.iter().any(|call| {
                 call.get("id").and_then(Value::as_str) == last.tool_call_id.as_deref()
-                    && matches!(call.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search"))
+                    && matches!(call.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search" | "create_file" | "create_directory" | "replace_string_in_file" | "get_errors" | "run_in_terminal"))
             }));
         if !matched { return false; }
         let Some(user) = request.messages.iter().rev().find(|message| message.role == "user") else { return false };
@@ -121,25 +121,41 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         });
         return true;
     }
-    // Only clear, read-only workspace actions qualify. Questions, examples,
-    // negations and requests for code remain under the client's normal policy.
+    // Require a concrete path for coding actions; requests for illustrative
+    // code and ambiguous intent keep the client's original tool policy.
     let inspection = directory_alias || ["list the files in ", "list files in ", "read ", "find the definition of "]
         .iter().any(|prefix| text.starts_with(prefix));
     let explicit_path = directory_alias || text.contains(":\\") || text.contains(":/") || text.contains(" /");
-    if !inspection || !explicit_path || text.contains("\n") || text.contains("?")
-        || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term)) {
+    let coding = explicit_path && native_workspace_root(request).is_some()
+        && ["create ","update ","fix ","edit ","add "].iter().any(|prefix| text.starts_with(prefix))
+        && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
+    if !coding && (!inspection || !explicit_path || text.contains("\n") || text.contains("?")
+        || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term))) {
         return false;
     }
+    let no_commands = ["do not run commands", "don't run commands", "do not use terminal", "no terminal commands"].iter().any(|phrase| text.contains(phrase));
+    let allowed = |name: &str| match name {
+        "list_dir" | "read_file" | "file_search" | "grep_search" => true,
+        "create_file" | "create_directory" | "replace_string_in_file" | "get_errors" => coding,
+        "run_in_terminal" => coding && !no_commands,
+        _ => false,
+    };
     if tools.iter().any(|tool| {
         let name = tool.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
-        !name.is_empty() && !matches!(name, "list_dir" | "read_file" | "file_search" | "grep_search") && text.contains(&name.to_ascii_lowercase())
+        !name.is_empty() && !allowed(name) && text.contains(&name.to_ascii_lowercase())
     }) { return false; }
     let selected: Vec<Value> = tools.iter().filter(|tool| {
         let name = tool.pointer("/function/name").and_then(Value::as_str);
-        if directory_alias { name == Some("list_dir") } else { matches!(name, Some("list_dir" | "read_file" | "file_search" | "grep_search")) }
+        if directory_alias { name == Some("list_dir") } else { name.is_some_and(allowed) }
     }).cloned().collect();
     request.tools = Some(Value::Array(selected));
     if !continuation { request.tool_choice = Some(json!("required")); }
+    if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
+        let index = request.messages.iter().take_while(|m| m.role=="system").count();
+        request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
+            content:json!("Use the supplied registered tools and exact argument types. Read an existing file before changing it, using a useful chunk (for example lines 1 to 200 unless a specific range was requested). Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. After the requested changes are observed complete, report the result and stop. Do not force further tool calls merely because tools remain available."),
+            tool_calls:None,tool_call_id:None,name:Some("mundusx_native_coding_policy".into())});
+    }
     true
 }
 
@@ -345,6 +361,22 @@ mod native_turn_tool_policy_tests {
         for text in [r"Read D:\sample\..\private.txt", r"Read D:\outside\test.txt", r"Read D:\sample\test.txt?", r"Read D:\sample\test.txt but do not read it"] {
             r.messages.last_mut().unwrap().content = json!(format!("<userRequest>{text}</userRequest>"));
             assert!(native_inspection_shortcut(&r,"test",1,"model").is_none());
+        }
+    }
+    #[test]
+    fn explicit_coding_actions_keep_file_tools_but_exclude_unrequested_catalogs() {
+        for action in ["Create","Update","Fix"] {
+            let mut r = directory_request(r"- D:\sample");
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{action} D:\\sample\\test.js. Use file tools. Do not run commands.</userRequest>"));
+            r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"type":"function","function":{"name":"replace_string_in_file","parameters":{"type":"object","properties":{"oldString":{"type":"string"}}}}}));
+            let original=r.tools.as_ref().unwrap().as_array().unwrap().iter().find(|t|t["function"]["name"]=="replace_string_in_file").unwrap().clone();
+            assert!(apply_native_turn_tool_policy(&mut r));
+            let tools=r.tools.as_ref().unwrap().as_array().unwrap();
+            assert!(tools.contains(&original));
+            assert!(tools.iter().any(|t|t["function"]["name"]=="create_file"));
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="run_in_terminal"));
+            assert_eq!(r.tool_choice,Some(json!("required")));
+            assert_eq!(r.messages[0].content,"Keep all host instructions");
         }
     }
 }
