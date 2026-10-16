@@ -9761,7 +9761,8 @@ fn handle_connection_with_streams(
                                                     "choices":[{"index":0,"delta":delta,"finish_reason":null}]
                                                 })));
                                             }
-                                            chat_gateway::sse_frame(&events)
+                                            if events.is_empty() {chat_gateway::sse_keep_alive().to_string()}
+                                            else {chat_gateway::sse_frame(&events)}
                                         }
                                     }
                                     Some(delta) => {

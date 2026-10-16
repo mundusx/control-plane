@@ -153,6 +153,14 @@ mod tests {
         assert!(validate(&serde_json::json!({}),&serde_json::json!({"role":"assistant","content":""})).is_err());
     }
     #[test]
+    fn withholding_tool_only_deltas_does_not_end_the_http_stream() {
+        let held=before_validation(serde_json::json!({"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}));
+        assert_eq!(held,serde_json::json!({}));
+        let frame=crate::chat_gateway::sse_frame("");
+        assert!(!frame.starts_with("0\r\n"));
+        assert!(frame.contains(": keep-alive\n\n"));
+    }
+    #[test]
     fn mutation_gets_one_schema_valid_diagnostics_handoff_without_a_model_job() {
         let mut p=payload();p["tools"].as_array_mut().unwrap().push(serde_json::json!({"type":"function","function":{"name":"get_errors","parameters":{"type":"object","properties":{"filePaths":{"type":"array","items":{"type":"string"}}}}}}));
         p["messages"].as_array_mut().unwrap().push(edit("D:/sample/routes/studentRoutes.js"));

@@ -1255,6 +1255,8 @@ pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token
 }
 
 pub fn sse_frame(payload: &str) -> String {
+    // An empty HTTP chunk is the terminal marker, not an empty SSE event.
+    if payload.is_empty() {return sse_frame(": keep-alive\n\n");}
     format!("{:X}\r\n{}\r\n", payload.len(), payload)
 }
 
