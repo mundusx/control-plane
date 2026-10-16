@@ -2,6 +2,7 @@ mod admission_profile;
 mod capability_policy;
 mod chat_api_keys;
 mod native_stream;
+mod native_edit_guard;
 mod qualification;
 mod vision_probe;
 mod global_skills;
@@ -9489,7 +9490,8 @@ fn handle_connection_with_streams(
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
                     if let Some(completion) = chat_gateway::native_git_shortcut(&request_body, &completion_id, created, public_model)
-                        .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model)) {
+                        .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model))
+                        .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model)) {
                         let response = if wants_stream {
                             format!("{}{}", chat_gateway::sse_start(&completion_id, created, public_model, false, ""), chat_gateway::sse_finish(&completion))
                         } else { json_response("200 OK", completion) };
@@ -9747,6 +9749,11 @@ fn handle_connection_with_streams(
                                         } else {
                                             let mut events = String::new();
                                             for delta in deltas {
+                                                // Tool fragments from older agents must not
+                                                // reach a client before gateway preconditions
+                                                // have validated the full assistant batch.
+                                                let delta=native_edit_guard::before_validation(delta);
+                                                if delta==serde_json::json!({}) {continue;}
                                                 native_stream.push(&delta)?;
                                                 events.push_str(&format!("data: {}\n\n", serde_json::json!({
                                                     "id": completion_id, "object":"chat.completion.chunk",
@@ -9848,6 +9855,18 @@ fn handle_connection_with_streams(
                         Some(&completed),
                         None,
                     );
+                    if native_tool_turn {
+                        let payload=chat_gateway::native_tool_payload(&request_body);
+                        if let Err(error)=native_edit_guard::validate(&payload,&completion["choices"][0]["message"]) {
+                            if live_stream_job {live_streams.lock().expect("live stream registry lock").remove(&record.job_id);}
+                            if wants_stream {
+                                let event=serde_json::json!({"error":{"message":error,"type":"native_response_validation_failed","code":"native_response_validation_failed"}});
+                                let _=stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
+                                return;
+                            }
+                            return write_chat_error(&mut stream,"502 Bad Gateway",&error);
+                        }
+                    }
                     if wants_stream {
                         if live_stream_job {
                             live_streams
