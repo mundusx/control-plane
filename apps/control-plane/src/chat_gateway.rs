@@ -129,6 +129,13 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let coding = explicit_path && native_workspace_root(request).is_some()
         && ["create ","update ","fix ","edit ","add "].iter().any(|prefix| text.starts_with(prefix))
         && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
+    // A file path does not make browser, notebook, repository, or other
+    // explicitly requested capabilities irrelevant. Defer these mixed tasks
+    // to the original client catalog rather than silently hiding their tools.
+    if coding && text.split(|c: char| !c.is_alphanumeric()).any(|word|
+        matches!(word,"browser" | "webpage" | "screenshot" | "notebook" | "github" | "docker" | "memory" | "extension" | "extensions" | "parallel" | "subagent")) {
+        return false;
+    }
     if !coding && (!inspection || !explicit_path || text.contains("\n") || text.contains("?")
         || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term))) {
         return false;
@@ -153,7 +160,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
         let index = request.messages.iter().take_while(|m| m.role=="system").count();
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
-            content:json!("Use the supplied registered tools and exact argument types. Read an existing file before changing it, using a useful chunk (for example lines 1 to 200 unless a specific range was requested). Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. After the requested changes are observed complete, report the result and stop. Do not force further tool calls merely because tools remain available."),
+            content:json!("Use the supplied registered tools and exact argument types. Read an existing file before changing it, using a useful chunk (for example lines 1 to 200 unless a specific range was requested). Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. After the requested changes are observed complete, report the result briefly and stop; do not reprint entire files unless the user requested that. Do not force further tool calls merely because tools remain available."),
             tool_calls:None,tool_call_id:None,name:Some("mundusx_native_coding_policy".into())});
     }
     true
@@ -377,6 +384,16 @@ mod native_turn_tool_policy_tests {
             assert!(!tools.iter().any(|t|t["function"]["name"]=="run_in_terminal"));
             assert_eq!(r.tool_choice,Some(json!("required")));
             assert_eq!(r.messages[0].content,"Keep all host instructions");
+        }
+    }
+    #[test]
+    fn mixed_coding_tasks_preserve_explicitly_requested_capabilities() {
+        for capability in ["browser", "screenshot", "GitHub", "notebook", "memory", "parallel"] {
+            let mut r=directory_request(r"- D:\sample");
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>Fix D:\\sample\\test.js and use {capability} to verify it</userRequest>"));
+            let before=serde_json::to_value(&r).unwrap();
+            assert!(!apply_native_turn_tool_policy(&mut r));
+            assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
     }
 }
