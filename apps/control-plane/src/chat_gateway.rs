@@ -205,7 +205,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
         let index = request.messages.iter().take_while(|m| m.role=="system").count();
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
-            content:json!("Use the supplied registered tools and exact argument types. Perform ONE file operation per assistant turn, then stop and wait for its result. Keep file contents concise; use separate modules for separate responsibilities. Do not generate redundant variants of lists, dependency entries, patterns or code. Complete every tool argument and close the call. Read an existing file before changing it, using a useful chunk (for example lines 1 to 200 unless a specific range was requested). Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. Interpret diagnostic messages rather than assuming every <compileError> tag is a syntax failure. Editor extensions can report duplication, style or security advisories in that tag. Do not change already-correct syntax to address unrelated advisories; stay within the requested repair scope and report remaining advisories separately. Before claiming a project works, check that imports match declared dependencies and that database APIs match the selected driver. A syntax-only check does not establish runtime correctness. After the requested changes are observed complete, report the result briefly and stop; do not reprint entire files unless the user requested that. Do not force further tool calls merely because tools remain available."),
+            content:json!("Use the supplied registered tools and exact argument types. Perform ONE file operation per assistant turn, then stop and wait for its result. Keep file contents concise; use separate modules for separate responsibilities. Do not generate redundant variants of lists, dependency entries, patterns or code. Complete every tool argument and close the call. Read an existing file before changing it, using the exact requested range, or a useful initial chunk. A partial read does not establish the file ends there; request later ranges when the relevant code is not present. After observing relevant code, apply a small targeted patch rather than repeatedly restating plans or rereading unchanged ranges. Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. Interpret diagnostic messages rather than assuming every <compileError> tag is a syntax failure. Editor extensions can report duplication, style or security advisories in that tag. Do not change already-correct syntax to address unrelated advisories; stay within the requested repair scope and report remaining advisories separately. Before claiming a project works, check that imports match declared dependencies and that database APIs match the selected driver. A syntax-only check does not establish runtime correctness. After the requested changes are observed complete, report the result briefly and stop; do not reprint entire files unless the user requested that. Do not force further tool calls merely because tools remain available."),
             tool_calls:None,tool_call_id:None,name:Some("mundusx_native_coding_policy".into())});
     }
     true
@@ -314,7 +314,15 @@ pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, cre
         || !["integer","number"].contains(&parameters.pointer("/properties/startLine/type")?.as_str()?)
         || !["integer","number"].contains(&parameters.pointer("/properties/endLine/type")?.as_str()?)
         || parameters["required"].as_array()?.iter().any(|field| !matches!(field.as_str(),Some("filePath" | "startLine" | "endLine"))) { return None; }
-    Some(native_shortcut_completion("read_file",json!({"filePath":path,"startLine":1,"endLine":200}),id,created,model))
+    // Explicit line ranges take precedence over the default initial chunk.
+    let range=regex::Regex::new(r"(?i)\blines?\s+(\d+)\s*(?:through|to|[-–])\s*(\d+)\b").ok()?;
+    let (start,end)=if let Some(found)=range.captures(text) {
+        let start=found[1].parse::<u64>().ok()?;let end=found[2].parse::<u64>().ok()?;
+        if start==0 || end<start || end-start>=2000 {return None;}
+        (start,end)
+    }else if lower.contains("lines ") || lower.contains("line ") {return None;}
+    else {(1,200)};
+    Some(native_shortcut_completion("read_file",json!({"filePath":path,"startLine":start,"endLine":end}),id,created,model))
 }
 
 #[cfg(test)]
@@ -525,6 +533,18 @@ mod native_turn_tool_policy_tests {
         assert!(native_git_shortcut(&r,"test",1,"model").is_none());r.tool_choice=None;
         r.messages[1].content=json!("<environment_info>The user's current OS is: Linux</environment_info>");
         assert!(native_git_shortcut(&r,"test",1,"model").is_none());
+    }
+    #[test]
+    fn native_initial_read_honors_explicit_later_line_ranges() {
+        for (range,start,end) in [("Read lines 230 through 310",230,310),("read lines 201-300",201,300),("lines 5 to 20",5,20)] {
+            let mut r=directory_request(r"- D:\sample");
+            r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"function":{"name":"replace_string_in_file"}}));
+            r.tools.as_mut().unwrap()[0]["function"]["parameters"]=json!({"type":"object","properties":{"filePath":{"type":"string"},"startLine":{"type":"number"},"endLine":{"type":"number"}},"required":["filePath","startLine","endLine"]});
+            r.messages.last_mut().unwrap().content=json!(format!(r"<userRequest>Fix D:\sample\test.js JSON errors. {range}. Use file tools only.</userRequest>"));
+            let answer=native_inspection_shortcut(&r,"range",1,"model").unwrap();
+            let args:Value=serde_json::from_str(answer["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(args["startLine"],start);assert_eq!(args["endLine"],end);
+        }
     }
     #[test]
     fn pending_fix_gets_one_action_decision_but_never_an_unbounded_forced_loop() {
