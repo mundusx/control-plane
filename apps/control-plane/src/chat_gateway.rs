@@ -151,7 +151,7 @@ pub fn apply_adaptive_native_edit_policy(request: &mut ChatCompletionRequest) ->
         request.messages.insert(0, crate::contracts::ChatMessage {
             role: "system".to_string(),
             content: Value::String(
-                "This edit turn has a large workspace history. Plan silently, then issue one small, targeted mutation using the available edit or replacement tool. Keep changed text under 2000 characters when possible. Do not rewrite an entire existing file in one tool call. After the tool result, continue with the next bounded patch until the original task is complete. Preserve exact tool arguments and do not claim completion before verification."
+                "This tool turn has a large workspace history. When an edit is needed for the user's current task, use a small targeted mutation and keep changed text under 2000 characters when possible. Do not rewrite an entire existing file in one tool call. Available edit tools do not require an edit: use inspection tools for read-only requests, and answer normally when the requested work is complete. Preserve exact tool arguments and report only observed results."
                     .to_string(),
             ),
             tool_calls: None,
