@@ -288,11 +288,20 @@ pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, cre
     let (_, tail) = last.content.as_str()?.split_once("<userRequest>")?;
     let (text, remainder) = tail.split_once("</userRequest>")?;
     let text = text.trim(); let lower = text.to_ascii_lowercase();
-    if !lower.starts_with("read ") || text.contains(['\n','?']) || remainder.contains("<userRequest>")
-        || ["do not read", "don't read", "example", "pretend", "create ", "delete ", "update ", "replace ", "run_in_terminal"].iter().any(|term| lower.contains(term)) { return None; }
-    let rest = text[5..].trim_start();
-    let path = if let Some(quoted) = rest.strip_prefix('"') { quoted.split_once('"')?.0 }
-        else { rest.split_whitespace().next()?.trim_end_matches('.') };
+    let edit = ["fix ","edit ","update "].iter().find(|prefix|lower.starts_with(**prefix));
+    if remainder.contains("<userRequest>") || ["do not read", "don't read", "pretend"].iter().any(|term|lower.contains(term)) {return None;}
+    let rest=if let Some(prefix)=edit {
+        if !request.tools.as_ref()?.as_array()?.iter().any(|tool|tool["function"]["name"]=="replace_string_in_file") {return None;}
+        text[prefix.len()..].trim_start()
+    }else{
+        if !lower.starts_with("read ") || text.contains(['\n','?'])
+            || ["example", "create ", "delete ", "update ", "replace ", "run_in_terminal"].iter().any(|term|lower.contains(term)) {return None;}
+        text[5..].trim_start()
+    };
+    let path = if let Some(quote)=rest.chars().next().filter(|c|matches!(c,'"'|'\''|'`')) {
+        rest[quote.len_utf8()..].split_once(quote)?.0
+    }else{rest.split_whitespace().next()?.trim_end_matches(['.',',',':',';'])};
+    if edit.is_some() && !path.rsplit(['/', '\\']).next()?.contains('.') {return None;}
     let root = native_workspace_root(request)?;
     let normalized = path.replace('\\',"/"); let root = root.replace('\\',"/");
     let comparable = if root.as_bytes().get(1) == Some(&b':') { normalized.to_ascii_lowercase() } else { normalized.clone() };
@@ -438,6 +447,22 @@ mod native_turn_tool_policy_tests {
         for text in [r"Read D:\sample\..\private.txt", r"Read D:\outside\test.txt", r"Read D:\sample\test.txt?", r"Read D:\sample\test.txt but do not read it"] {
             r.messages.last_mut().unwrap().content = json!(format!("<userRequest>{text}</userRequest>"));
             assert!(native_inspection_shortcut(&r,"test",1,"model").is_none());
+        }
+    }
+    #[test]
+    fn explicit_file_repairs_read_the_exact_target_before_any_model_decision() {
+        let mut r=directory_request(r"- D:\sample");
+        r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"function":{"name":"replace_string_in_file"}}));
+        r.tools.as_mut().unwrap()[0]["function"]["parameters"]=json!({"type":"object","properties":{"filePath":{"type":"string"},"startLine":{"type":"number"},"endLine":{"type":"number"}},"required":["filePath","startLine","endLine"]});
+        for text in [r"Fix D:\sample\server.js startup failures", r"Update `D:\sample\student model.js` validation"] {
+            r.messages.last_mut().unwrap().content=json!(format!("<editorContext>D:\\sample\\other.js</editorContext><userRequest>{text}</userRequest>"));
+            let answer=native_inspection_shortcut(&r,"id",1,"model").unwrap();
+            assert_eq!(answer["mundusx"]["inference"],false);
+            assert_eq!(answer["choices"][0]["message"]["tool_calls"][0]["function"]["name"],"read_file");
+        }
+        for text in [r"Fix D:\sample\server.js but do not read it",r"Fix D:\outside\server.js",r"Fix the project in D:\sample"] {
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{text}</userRequest>"));
+            assert!(native_inspection_shortcut(&r,"id",1,"model").is_none());
         }
     }
     #[test]
