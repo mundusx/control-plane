@@ -101,6 +101,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     if user_request.contains('<') || remainder.contains("<userRequest>") { return false; }
     let text = user_request.trim().to_ascii_lowercase();
     let directory_alias = text == "ls ." && native_workspace_root(request).is_some();
+    let git_alias = native_git_arguments(request,&text).is_some();
     let Some(tools) = request.tools.as_ref().and_then(Value::as_array) else { return false };
     // This policy targets the known VS Code file-tool catalog, not arbitrary
     // custom tool clients that happen to use similar message delimiters.
@@ -123,9 +124,9 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     }
     // Require a concrete path for coding actions; requests for illustrative
     // code and ambiguous intent keep the client's original tool policy.
-    let inspection = directory_alias || ["list the files in ", "list files in ", "read ", "find the definition of "]
+    let inspection = directory_alias || git_alias || ["list the files in ", "list files in ", "read ", "find the definition of "]
         .iter().any(|prefix| text.starts_with(prefix));
-    let explicit_path = directory_alias || text.contains(":\\") || text.contains(":/") || text.contains(" /");
+    let explicit_path = directory_alias || git_alias || text.contains(":\\") || text.contains(":/") || text.contains(" /");
     let coding = explicit_path && native_workspace_root(request).is_some()
         && ["create ","update ","fix ","edit ","add "].iter().any(|prefix| text.starts_with(prefix))
         && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
@@ -144,7 +145,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let allowed = |name: &str| match name {
         "list_dir" | "read_file" | "file_search" | "grep_search" => true,
         "create_file" | "create_directory" | "replace_string_in_file" | "get_errors" => coding,
-        "run_in_terminal" => coding && !no_commands,
+        "run_in_terminal" => (coding || git_alias) && !no_commands,
         _ => false,
     };
     if tools.iter().any(|tool| {
@@ -153,10 +154,20 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     }) { return false; }
     let selected: Vec<Value> = tools.iter().filter(|tool| {
         let name = tool.pointer("/function/name").and_then(Value::as_str);
-        if directory_alias { name == Some("list_dir") } else { name.is_some_and(allowed) }
+        if directory_alias { name == Some("list_dir") } else if git_alias { name == Some("run_in_terminal") } else { name.is_some_and(allowed) }
     }).cloned().collect();
+    let pending_after_first_read = if continuation && coding && !text.starts_with("create ") {
+        let user_index=request.messages.iter().rposition(|m|m.role=="user").unwrap_or(0);
+        let calls:Vec<&Value>=request.messages[user_index+1..].iter().filter(|m|m.role=="assistant")
+            .filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
+        let reads=calls.iter().filter(|call|call.pointer("/function/name").and_then(Value::as_str)==Some("read_file")).count();
+        let wrote=calls.iter().any(|call|matches!(call.pointer("/function/name").and_then(Value::as_str),Some("create_file" | "create_directory" | "replace_string_in_file" | "run_in_terminal")));
+        let last_read=calls.iter().any(|call|call.get("id").and_then(Value::as_str)==last.tool_call_id.as_deref()
+            && call.pointer("/function/name").and_then(Value::as_str)==Some("read_file"));
+        reads==1 && !wrote && last_read && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
+    } else {false};
     request.tools = Some(Value::Array(selected));
-    if !continuation { request.tool_choice = Some(json!("required")); }
+    if !continuation || pending_after_first_read { request.tool_choice = Some(json!("required")); }
     if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
         let index = request.messages.iter().take_while(|m| m.role=="system").count();
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
@@ -208,6 +219,31 @@ fn native_shortcut_completion(name: &str, arguments: Value, id: &str, created: u
     let mut completion = completion_response(id, created, model, &format!("__MUNDUSX_OPENAI_TOOL_RESULT_V1__{native}"), "tool_calls", None, None);
     completion["mundusx"] = json!({"routing":"registered-tool-shortcut","inference":false});
     completion
+}
+
+fn native_git_arguments(request: &ChatCompletionRequest, text: &str) -> Option<Value> {
+    let operation=match text {"git init"=>"init","git status"=>"status","git diff"=>"diff",_=>return None};
+    let windows=request.messages.iter().rev().filter(|m|m.role=="user").find_map(|m|m.content.as_str()?.split_once("<environment_info>")?.1.split_once("</environment_info>").map(|(body,_)|body))?
+        .contains("The user's current OS is: Windows");
+    if !windows {return None;}
+    let root=native_workspace_root(request)?;
+    let tool=request.tools.as_ref()?.as_array()?.iter().find(|tool|tool.pointer("/function/name").and_then(Value::as_str)==Some("run_in_terminal"))?;
+    let schema=tool.pointer("/function/parameters")?;
+    if schema["type"]!="object" || ["command","explanation","goal","mode"].iter().any(|field|schema["properties"][field]["type"]!="string")
+        || schema["required"].as_array()?.iter().any(|field|!matches!(field.as_str(),Some("command" | "explanation" | "goal" | "mode")))
+        || schema["properties"]["mode"]["enum"].as_array().is_some_and(|values|!values.contains(&json!("sync"))) {return None;}
+    Some(json!({"command":format!("git -C '{}' {operation}",root.replace('\'',"''")),
+        "explanation":format!("Run git {operation} in the current workspace."),"goal":format!("Git {operation}"),"mode":"sync"}))
+}
+
+pub fn native_git_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|choice|choice.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;if last.role!="user" {return None;}
+    let (_,tail)=last.content.as_str()?.split_once("<userRequest>")?;
+    let (text,remainder)=tail.split_once("</userRequest>")?;
+    if remainder.contains("<userRequest>") {return None;}
+    let arguments=native_git_arguments(request,text.trim())?;
+    Some(native_shortcut_completion("run_in_terminal",arguments,id,created,model))
 }
 
 pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
@@ -395,6 +431,39 @@ mod native_turn_tool_policy_tests {
             assert!(!apply_native_turn_tool_policy(&mut r));
             assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
+    }
+    #[test]
+    fn exact_windows_git_requests_preserve_the_registered_terminal_contract() {
+        let mut r=directory_request(r"- D:\Sam's project");
+        r.messages.insert(1,crate::contracts::ChatMessage {role:"user".into(),content:json!("<environment_info>The user's current OS is: Windows</environment_info>"),tool_calls:None,tool_call_id:None,name:None});
+        let terminal=r.tools.as_mut().unwrap().as_array_mut().unwrap().iter_mut().find(|t|t["function"]["name"]=="run_in_terminal").unwrap();
+        terminal["function"]["parameters"]=json!({"type":"object","properties":{"command":{"type":"string"},"explanation":{"type":"string"},"goal":{"type":"string"},"mode":{"type":"string","enum":["sync","async"]}},"required":["command","explanation","goal","mode"]});
+        for operation in ["init","status","diff"] {
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>git {operation}</userRequest>"));
+            let completion=native_git_shortcut(&r,"test",1,"model").unwrap();
+            let args:Value=serde_json::from_str(completion["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(args["command"],format!("git -C 'D:\\Sam''s project' {operation}"));
+            assert_eq!(args["mode"],"sync");assert!(args.get("timeout").is_none());assert_eq!(args.as_object().unwrap().len(),4);
+        }
+        r.messages.last_mut().unwrap().content=json!("<userRequest>git init && other-command</userRequest>");
+        assert!(native_git_shortcut(&r,"test",1,"model").is_none());
+        r.messages.last_mut().unwrap().content=json!("<userRequest>git init</userRequest>");r.tool_choice=Some(json!("none"));
+        assert!(native_git_shortcut(&r,"test",1,"model").is_none());r.tool_choice=None;
+        r.messages[1].content=json!("<environment_info>The user's current OS is: Linux</environment_info>");
+        assert!(native_git_shortcut(&r,"test",1,"model").is_none());
+    }
+    #[test]
+    fn pending_fix_gets_one_action_decision_but_never_an_unbounded_forced_loop() {
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!(r"<userRequest>Fix D:\sample\test.js so invalid inputs throw a TypeError. Do not run commands.</userRequest>");
+        let assistant=|id:&str,name:&str|crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":id,"type":"function","function":{"name":name,"arguments":"{}"}}])),tool_call_id:None,name:None};
+        let result=|id:&str|crate::contracts::ChatMessage {role:"tool".into(),content:json!("observed complete file"),tool_calls:None,tool_call_id:Some(id.into()),name:None};
+        r.messages.push(assistant("read1","read_file"));r.messages.push(result("read1"));
+        let mut pending=r.clone();assert!(apply_native_turn_tool_policy(&mut pending));assert_eq!(pending.tool_choice,Some(json!("required")));
+        let mut verified=r.clone();verified.messages.push(assistant("read2","read_file"));verified.messages.push(result("read2"));
+        assert!(apply_native_turn_tool_policy(&mut verified));assert_eq!(verified.tool_choice,None);
+        let mut changed=r.clone();changed.messages.push(assistant("edit1","replace_string_in_file"));changed.messages.push(result("edit1"));
+        assert!(apply_native_turn_tool_policy(&mut changed));assert_eq!(changed.tool_choice,None);
     }
 }
 
