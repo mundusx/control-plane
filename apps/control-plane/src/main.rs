@@ -9491,7 +9491,15 @@ fn handle_connection_with_streams(
                     }
                     if let Some(completion) = chat_gateway::native_git_shortcut(&request_body, &completion_id, created, public_model)
                         .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model))
-                        .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model)) {
+                        .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model))
+                        .or_else(||native_edit_guard::diagnostics_refresh(&request_body,&completion_id,created,public_model))
+                        .or_else(||native_edit_guard::verification_loop_stop(&request_body,&completion_id,created,public_model)) {
+                        // Native get_errors samples cached diagnostics before
+                        // opening a fresh document snapshot. Refresh once after
+                        // language services have had time to process the edit.
+                        if completion["mundusx"]["routing"]=="registered-diagnostics-refresh" {
+                            std::thread::sleep(Duration::from_millis(1250));
+                        }
                         let response = if wants_stream {
                             format!("{}{}", chat_gateway::sse_start(&completion_id, created, public_model, false, ""), chat_gateway::sse_finish(&completion))
                         } else { json_response("200 OK", completion) };
