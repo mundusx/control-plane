@@ -26,6 +26,16 @@ fn validate_native_tool_schema(payload:&serde_json::Value,message:&serde_json::V
     Ok(())
 }
 
+fn syntax_references(code:&str)->(std::collections::BTreeSet<String>,std::collections::BTreeMap<String,usize>) {
+    let words=code.split(|c:char|!c.is_alphanumeric()&&c!='_').filter(|s|!s.is_empty()).map(str::to_owned).collect();
+    let mut members=std::collections::BTreeMap::new();
+    for token in code.split(|c:char|!c.is_alphanumeric()&&c!='_'&&c!='.') {
+        let parts:Vec<&str>=token.split('.').collect();
+        for pair in parts.windows(2) {if pair.iter().all(|s|s.chars().next().is_some_and(|c|c.is_alphabetic()||c=='_')) {*members.entry(format!("{}.{}",pair[0],pair[1])).or_insert(0)+=1;}}
+    }
+    (words,members)
+}
+
 fn observed_file_key(path:&str)->Option<String> {
     let normalized=path.replace('\\',"/");
     if normalized.split('/').any(|part|part=="..") {return None;}
@@ -60,6 +70,10 @@ pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(
             if !path.rsplit(['/', '\\']).next().is_some_and(|name|name.contains('.')) {return None;}
             observed_file_key(path)
         }).into_iter().collect();
+    let syntax_only=!scoped_files.is_empty() && start.checked_sub(1).and_then(|i|messages[i]["content"].as_str())
+        .and_then(|s|s.split_once("<userRequest>")?.1.split_once("</userRequest>").map(|(s,_)|s.to_ascii_lowercase()))
+        .is_some_and(|s|s.trim_start().starts_with("fix ")&&s.contains(" syntax")
+            && !["remove ","delete ","rename ","replace identifiers","correct spelling"].iter().any(|term|s.contains(term)));
     let mut changed=std::collections::HashSet::new();
     for call in calls {
         let name=call["function"]["name"].as_str().unwrap_or("");
@@ -93,6 +107,16 @@ pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(
                 .ok_or("native edit precondition failed: oldString must be nonempty")?;
             if !observed.is_some_and(|text|text.contains(old)) {
                 return Err("native edit precondition failed: read the exact target and use its observed oldString before replacing it".into());
+            }
+            if syntax_only {
+                let new=args["newString"].as_str().unwrap_or("");
+                let (old_words,old_members)=syntax_references(old);let (new_words,new_members)=syntax_references(new);
+                if let Some(word)=old_words.difference(&new_words).next() {
+                    return Err(format!("native edit precondition failed: syntax-only repair would drop existing identifier/literal {word}; preserve behavior and fix punctuation rather than deleting code"));
+                }
+                if let Some((member,_))=old_members.iter().find(|(member,count)|new_members.get(*member).copied().unwrap_or(0)<**count) {
+                    return Err(format!("native edit precondition failed: syntax-only repair would remove existing member reference {member}; preserve the statement"));
+                }
             }
         }
     }
@@ -205,6 +229,18 @@ mod tests {
         p["messages"][0]["content"]=serde_json::json!("<userRequest>Fix `D:/sample/my routes.js` syntax</userRequest>");
         p["messages"][1]["tool_calls"][0]["function"]["arguments"]=serde_json::json!("{\"filePath\":\"D:/sample/my routes.js\"}");
         assert!(validate(&p,&edit("D:/sample/my routes.js")).is_ok());
+    }
+    #[test]
+    fn syntax_fix_cannot_pass_by_deleting_existing_behavior() {
+        let p=payload();let mut removed=edit("D:/sample/routes/studentRoutes.js");
+        let mut args:serde_json::Value=serde_json::from_str(removed["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        args["newString"]=serde_json::json!("");removed["tool_calls"][0]["function"]["arguments"]=serde_json::json!(args.to_string());
+        assert!(validate(&p,&removed).unwrap_err().contains("syntax-only repair"));
+        assert!(validate(&p,&edit("D:/sample/routes/studentRoutes.js")).is_ok());
+        for (old,new) in [("router.delete/:id', handler);","router.delete('/:id', handler);"),("self.update(value","self.update(value)"),("student.name","student.name")] {
+            let (old_words,old_members)=syntax_references(old);let (new_words,new_members)=syntax_references(new);
+            assert!(old_words.is_subset(&new_words));assert!(old_members.iter().all(|(key,count)|new_members.get(key).copied().unwrap_or(0)>=*count));
+        }
     }
     #[test]
     fn unobserved_stale_and_recreated_targets_are_rejected() {
