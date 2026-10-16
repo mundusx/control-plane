@@ -9488,7 +9488,8 @@ fn handle_connection_with_streams(
                     if let Err(error)=chat_gateway::validate_image_inputs(&request_body) {
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
-                    if let Some(completion) = chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model) {
+                    if let Some(completion) = chat_gateway::native_git_shortcut(&request_body, &completion_id, created, public_model)
+                        .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model)) {
                         let response = if wants_stream {
                             format!("{}{}", chat_gateway::sse_start(&completion_id, created, public_model, false, ""), chat_gateway::sse_finish(&completion))
                         } else { json_response("200 OK", completion) };
