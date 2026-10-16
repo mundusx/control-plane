@@ -295,6 +295,21 @@ mod native_turn_tool_policy_tests {
         assert_eq!(completion["mundusx"]["inference"],false);
         assert!(sse_finish(&completion).contains("\"index\":0"));
         assert!(sse_finish(&completion).contains("data: [DONE]"));
+        let response = format!("{}{}", sse_start("chatcmpl-test",1,"mundusx-agnostic",false,""),sse_finish(&completion));
+        let (_, mut wire) = response.split_once("\r\n\r\n").unwrap();
+        let mut decoded = String::new();
+        loop {
+            let (size, rest) = wire.split_once("\r\n").expect("HTTP chunk header");
+            let size = usize::from_str_radix(size,16).expect("hexadecimal chunk size");
+            if size == 0 { assert_eq!(rest,"\r\n"); break; }
+            assert!(rest.is_char_boundary(size));
+            decoded.push_str(&rest[..size]);
+            assert_eq!(&rest[size..size+2],"\r\n"); wire = &rest[size+2..];
+        }
+        let data: Vec<&str> = decoded.lines().filter_map(|line| line.strip_prefix("data: ")).collect();
+        assert_eq!(data.last(),Some(&"[DONE]"));
+        let first: Value = serde_json::from_str(data[0]).unwrap();
+        assert_eq!(first["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],"list_dir");
     }
     #[test]
     fn directory_shortcut_rejects_ambiguous_roots_flags_and_other_schemas() {
@@ -1146,7 +1161,8 @@ pub fn sse_finish(completion: &Value) -> String {
             "choices": [{"index": 0, "delta": {"role": "assistant", "content": Value::Null, "tool_calls": indexed_tool_calls}, "finish_reason": Value::Null}]
         });
         format!(
-            "data: {chunk}\n\n{}",
+            "{}{}",
+            sse_frame(&format!("data: {chunk}\n\n")),
             sse_end(id, created, model, finish_reason)
         )
     } else {
