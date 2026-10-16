@@ -106,7 +106,7 @@ mod tests {
     fn payload()->serde_json::Value {serde_json::json!({"tools":[
         {"function":{"name":"read_file"}},{"function":{"name":"list_dir"}},{"function":{"name":"replace_string_in_file"}}],
         "messages":[{"role":"user","content":"<editorContext>D:/sample/models/Student.js</editorContext><userRequest>Fix D:/sample/routes/studentRoutes.js syntax</userRequest>"},
-        {"role":"assistant","tool_calls":[{"id":"read1","function":{"name":"read_file","arguments":"{\"filePath\":\"D:/sample/routes/studentRoutes.js\"}"}}]},
+        {"role":"assistant","content":null,"tool_calls":[{"id":"read1","function":{"name":"read_file","arguments":"{\"filePath\":\"D:/sample/routes/studentRoutes.js\"}"}}]},
         {"role":"tool","tool_call_id":"read1","content":"router.delete/:id', controller.delete);"}]})}
     fn edit(path:&str)->serde_json::Value {serde_json::json!({"role":"assistant","content":null,"tool_calls":[{"id":"edit1","type":"function","function":{"name":"replace_string_in_file","arguments":serde_json::json!({"filePath":path,"oldString":"router.delete/:id', controller.delete);","newString":"router.delete('/:id', controller.delete);"}).to_string()}}]})}
     #[test]
