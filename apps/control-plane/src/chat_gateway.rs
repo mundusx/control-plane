@@ -175,12 +175,44 @@ pub fn native_directory_shortcut(request: &ChatCompletionRequest, id: &str, crea
         || tool.pointer("/function/parameters/properties/path/type")?.as_str()? != "string"
         || tool.pointer("/function/parameters/required")?.as_array()?.iter().any(|field| field.as_str() != Some("path")) { return None; }
     let path = native_workspace_root(request)?;
+    Some(native_shortcut_completion("list_dir",json!({"path":path}),id,created,model))
+}
+
+fn native_shortcut_completion(name: &str, arguments: Value, id: &str, created: u64, model: &str) -> Value {
     let native = json!({"message":{"role":"assistant","content":Value::Null,"tool_calls":[{
-        "id":format!("call_{id}"),"type":"function","function":{"name":"list_dir","arguments":json!({"path":path}).to_string()}
+        "id":format!("call_{id}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}
     }]},"finish_reason":"tool_calls"});
     let mut completion = completion_response(id, created, model, &format!("__MUNDUSX_OPENAI_TOOL_RESULT_V1__{native}"), "tool_calls", None, None);
     completion["mundusx"] = json!({"routing":"registered-tool-shortcut","inference":false});
-    Some(completion)
+    completion
+}
+
+pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
+    if let Some(completion) = native_directory_shortcut(request,id,created,model) { return Some(completion); }
+    if request.tool_choice.as_ref().is_some_and(|choice| choice.as_str() != Some("auto")) { return None; }
+    let last = request.messages.last()?;
+    if last.role != "user" { return None; }
+    let (_, tail) = last.content.as_str()?.split_once("<userRequest>")?;
+    let (text, remainder) = tail.split_once("</userRequest>")?;
+    let text = text.trim(); let lower = text.to_ascii_lowercase();
+    if !lower.starts_with("read ") || text.contains(['\n','?']) || remainder.contains("<userRequest>")
+        || ["do not read", "don't read", "example", "pretend", "create ", "delete ", "update ", "replace ", "run_in_terminal"].iter().any(|term| lower.contains(term)) { return None; }
+    let rest = text[5..].trim_start();
+    let path = if let Some(quoted) = rest.strip_prefix('"') { quoted.split_once('"')?.0 }
+        else { rest.split_whitespace().next()?.trim_end_matches('.') };
+    let root = native_workspace_root(request)?;
+    let normalized = path.replace('\\',"/"); let root = root.replace('\\',"/");
+    let comparable = if root.as_bytes().get(1) == Some(&b':') { normalized.to_ascii_lowercase() } else { normalized.clone() };
+    let root = if root.as_bytes().get(1) == Some(&b':') { root.to_ascii_lowercase() } else { root };
+    if !comparable.starts_with(&(root.trim_end_matches('/').to_string()+"/"))
+        || normalized.split('/').any(|part| matches!(part,"." | "..")) || path.len()>1024 || path.chars().any(char::is_control) { return None; }
+    let tool = request.tools.as_ref()?.as_array()?.iter().find(|t| t.pointer("/function/name").and_then(Value::as_str)==Some("read_file"))?;
+    let parameters = tool.pointer("/function/parameters")?;
+    if parameters["type"] != "object" || parameters.pointer("/properties/filePath/type")?.as_str()? != "string"
+        || !["integer","number"].contains(&parameters.pointer("/properties/startLine/type")?.as_str()?)
+        || !["integer","number"].contains(&parameters.pointer("/properties/endLine/type")?.as_str()?)
+        || parameters["required"].as_array()?.iter().any(|field| !matches!(field.as_str(),Some("filePath" | "startLine" | "endLine"))) { return None; }
+    Some(native_shortcut_completion("read_file",json!({"filePath":path,"startLine":1,"endLine":200}),id,created,model))
 }
 
 #[cfg(test)]
@@ -285,6 +317,20 @@ mod native_turn_tool_policy_tests {
         assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
         assert!(apply_native_turn_tool_policy(&mut r)); assert_eq!(r.tool_choice,None);
         assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap().len(),1);
+    }
+    #[test]
+    fn exact_file_read_requests_a_useful_chunk_with_original_argument_types() {
+        let mut r = directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content = json!(r"<userRequest>Read D:\sample\test.txt and report the number. Use file tools.</userRequest>");
+        r.tools.as_mut().unwrap()[0]["function"]["parameters"] = json!({"type":"object","properties":{"filePath":{"type":"string"},"startLine":{"type":"number"},"endLine":{"type":"number"}},"required":["filePath","startLine","endLine"]});
+        let completion = native_inspection_shortcut(&r,"test",1,"model").unwrap();
+        let call = &completion["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["function"]["name"],"read_file");
+        assert_eq!(serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap(),json!({"filePath":r"D:\sample\test.txt","startLine":1,"endLine":200}));
+        for text in [r"Read D:\sample\..\private.txt", r"Read D:\outside\test.txt", r"Read D:\sample\test.txt?", r"Read D:\sample\test.txt but do not read it"] {
+            r.messages.last_mut().unwrap().content = json!(format!("<userRequest>{text}</userRequest>"));
+            assert!(native_inspection_shortcut(&r,"test",1,"model").is_none());
+        }
     }
 }
 
