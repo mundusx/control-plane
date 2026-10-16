@@ -21,6 +21,17 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
     payload.as_object_mut().expect("request object").retain(|_, value| !value.is_null());
     payload["stream"] = serde_json::json!(false);
     payload["max_tokens"] = serde_json::json!(request.max_tokens.unwrap_or(3_072));
+    let vscode_files = request.tools.as_ref().and_then(Value::as_array).is_some_and(|tools|
+        ["read_file", "list_dir"].iter().all(|name| tools.iter().any(|tool|
+            tool.pointer("/function/name").and_then(Value::as_str) == Some(name))));
+    if vscode_files {
+        // Apply to the full-catalog path too: editor context may change while
+        // the client continues an existing task. It is not a new user request.
+        payload["messages"].as_array_mut().expect("messages array").insert(0, json!({
+            "role":"system", "name":"mundusx_workspace_edit_boundaries",
+            "content":"Follow the user's requested task and the host's instructions. Opening, focusing, selecting, or browsing an editor file is context only, not authorization to edit it or to change the task's target. Keep each planned mutation bound to its explicit file path; re-read that same path before an existing-file edit and use exact observed old text. Never substitute the currently focused file for a planned target. Use create_file only for a new path. If it reports that the file already exists, read it and make a targeted edit only when the current task requires it; do not recreate or replace its full contents. Preserve unrelated completed files and user edits. Do not claim a write succeeded unless its tool result confirms success. Check changed code for syntax errors before reporting completion."
+        }));
+    }
     payload
 }
 
@@ -50,6 +61,21 @@ mod native_payload_tests {
         assert_eq!(payload["max_tokens"],512);
         assert!((payload["temperature"].as_f64().unwrap() - 0.1).abs() < 1e-6);
         assert!((payload["top_p"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    }
+    #[test]
+    fn browsing_context_does_not_rebind_recorded_tool_targets() {
+        for focused in ["D:/sample/models/Student.js", "D:/sample/routes/studentRoutes.js"] {
+            let request:ChatCompletionRequest=serde_json::from_value(json!({
+                "messages":[{"role":"user","content":format!("<editorContext>{focused}</editorContext><userRequest>Fix the routes file syntax</userRequest>")},
+                    {"role":"assistant","content":null,"tool_calls":[{"id":"read1","type":"function","function":{"name":"read_file","arguments":"{\"filePath\":\"D:/sample/routes/studentRoutes.js\"}"}}]}],
+                "tools":[{"type":"function","function":{"name":"read_file"}},{"type":"function","function":{"name":"list_dir"}}]
+            })).unwrap();
+            let original=serde_json::to_value(&request.messages).unwrap();
+            let payload=native_tool_payload(&request);
+            assert_eq!(payload["messages"][0]["name"],"mundusx_workspace_edit_boundaries");
+            assert_eq!(json!(&payload["messages"].as_array().unwrap()[1..]),original);
+            assert!(payload["messages"][0]["content"].as_str().unwrap().contains("not authorization"));
+        }
     }
 }
 
@@ -127,8 +153,16 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let inspection = directory_alias || git_alias || ["list the files in ", "list files in ", "read ", "find the definition of "]
         .iter().any(|prefix| text.starts_with(prefix));
     let explicit_path = directory_alias || git_alias || text.contains(":\\") || text.contains(":/") || text.contains(" /");
-    let coding = explicit_path && native_workspace_root(request).is_some()
-        && ["create ","update ","fix ","edit ","add "].iter().any(|prefix| text.starts_with(prefix))
+    let action = text.strip_prefix("lets ").or_else(|| text.strip_prefix("let's "))
+        .or_else(|| text.strip_prefix("please ")).unwrap_or(&text);
+    // Workspace creation is explicit even without an absolute path. Do not
+    // infer mutation intent from illustrative questions or active editor state.
+    let project_creation = action.starts_with("create ")
+        && action.split_whitespace().any(|word| word == "here" || word == "workspace")
+        && action.split(|c:char| !c.is_alphanumeric()).any(|word|
+            matches!(word,"program" | "project" | "application" | "app" | "api"));
+    let coding = (explicit_path || project_creation) && native_workspace_root(request).is_some()
+        && ["create ","update ","fix ","edit ","add "].iter().any(|prefix| action.starts_with(prefix))
         && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
     // A file path does not make browser, notebook, repository, or other
     // explicitly requested capabilities irrelevant. Defer these mixed tasks
@@ -420,6 +454,21 @@ mod native_turn_tool_policy_tests {
             assert!(!tools.iter().any(|t|t["function"]["name"]=="run_in_terminal"));
             assert_eq!(r.tool_choice,Some(json!("required")));
             assert_eq!(r.messages[0].content,"Keep all host instructions");
+        }
+    }
+    #[test]
+    fn explicit_workspace_project_creation_keeps_catalog_through_results() {
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!("<userRequest>lets create a nodejs program here using sql lite, i want a express , structure folder Student CRUD API</userRequest>");
+        assert!(apply_native_turn_tool_policy(&mut r));
+        assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="create_file"));
+        r.tool_choice=None;
+        r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"create1","type":"function","function":{"name":"create_file","arguments":"{}"}}])),tool_call_id:None,name:None});
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("created"),tool_calls:None,tool_call_id:Some("create1".into()),name:None});
+        assert!(apply_native_turn_tool_policy(&mut r));assert_eq!(r.tool_choice,None);
+        for text in ["Show an example Node.js program", "Explain how to create a project here", "create an API example", "create an app here using browser screenshots"] {
+            let mut r=directory_request(r"- D:\sample");r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{text}</userRequest>"));
+            let before=serde_json::to_value(&r).unwrap();assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
     }
     #[test]
