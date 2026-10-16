@@ -9489,6 +9489,9 @@ fn handle_connection_with_streams(
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
                     let native_tool_turn = chat_gateway::is_native_tool_turn(&request_body);
+                    if native_tool_turn {
+                        chat_gateway::apply_native_turn_tool_policy(&mut request_body);
+                    }
                     let adaptive_native_edit = native_tool_turn
                         && chat_gateway::apply_adaptive_native_edit_policy(&mut request_body);
                     let (system_prompt, prompt) = if native_tool_turn {

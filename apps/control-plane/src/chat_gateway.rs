@@ -71,6 +71,110 @@ pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
         })
 }
 
+/// VS Code's generic provider attaches its complete catalog even to greetings.
+/// Restrict only recognized, current user requests; preserve explicit client
+/// choices, all messages, and every turn following an observed tool result.
+pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> bool {
+    if request.tool_choice.as_ref().is_some_and(|choice| choice.as_str() != Some("auto")) {
+        return false;
+    }
+    let Some(last) = request.messages.last() else { return false };
+    if last.role != "user" || last.tool_call_id.is_some() { return false; }
+    let Some(content) = last.content.as_str() else { return false };
+    let Some((_, tail)) = content.split_once("<userRequest>") else { return false };
+    let Some((user_request, remainder)) = tail.split_once("</userRequest>") else { return false };
+    if user_request.contains('<') || remainder.contains("<userRequest>") { return false; }
+    let text = user_request.trim().to_ascii_lowercase();
+    let Some(tools) = request.tools.as_ref().and_then(Value::as_array) else { return false };
+    // This policy targets the known VS Code file-tool catalog, not arbitrary
+    // custom tool clients that happen to use similar message delimiters.
+    if !tools.iter().any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("read_file"))
+        || !tools.iter().any(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("list_dir")) {
+        return false;
+    }
+    let greeting = text.trim_end_matches(['!', '.', '?']).trim();
+    if matches!(greeting, "hello" | "hi" | "hey" | "hi there" | "hello there" | "good morning" | "good evening" | "what is your name" | "what's your name" | "whats your name") {
+        request.tools = Some(json!([]));
+        request.tool_choice = Some(json!("none"));
+        request.max_tokens = Some(request.max_tokens.unwrap_or(128).min(128));
+        request.messages.push(crate::contracts::ChatMessage {
+            role: "system".into(),
+            content: json!("Answer only the latest userRequest directly and briefly, following the existing system instructions. This turn does not request workspace actions. Do not resume older tasks or repeat message delimiters."),
+            tool_calls: None, tool_call_id: None, name: Some("mundusx_conversational_turn".into()),
+        });
+        return true;
+    }
+    // Only clear, read-only workspace actions qualify. Questions, examples,
+    // negations and requests for code remain under the client's normal policy.
+    let inspection = ["list the files in ", "list files in ", "read ", "find the definition of "]
+        .iter().any(|prefix| text.starts_with(prefix));
+    let explicit_path = text.contains(":\\") || text.contains(":/") || text.contains(" /");
+    if !inspection || !explicit_path || text.contains("\n") || text.contains("?")
+        || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term)) {
+        return false;
+    }
+    let selected: Vec<Value> = tools.iter().filter(|tool| {
+        matches!(tool.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search"))
+    }).cloned().collect();
+    request.tools = Some(Value::Array(selected));
+    request.tool_choice = Some(json!("required"));
+    true
+}
+
+#[cfg(test)]
+mod native_turn_tool_policy_tests {
+    use super::*;
+    fn request(text: &str) -> ChatCompletionRequest {
+        let tools = ["read_file","list_dir","file_search","grep_search","create_file","run_in_terminal"].map(|name| json!({"type":"function","function":{"name":name,"parameters":{"type":"object"}}}));
+        serde_json::from_value(json!({
+            "messages":[{"role":"system","content":"Keep all host instructions"},{"role":"user","content":format!("<context>older task</context><userRequest>{text}</userRequest>")}],
+            "tools":tools,
+            "max_tokens":4096
+        })).unwrap()
+    }
+    #[test]
+    fn greetings_keep_host_messages_but_cannot_invoke_tools() {
+        for text in ["Hello!", "Hi there", "What is your name?"] {
+            let mut r = request(text); let messages = serde_json::to_value(&r.messages).unwrap();
+            assert!(apply_native_turn_tool_policy(&mut r));
+            assert_eq!(r.tools, Some(json!([]))); assert_eq!(r.tool_choice, Some(json!("none")));
+            assert_eq!(serde_json::to_value(&r.messages[..2]).unwrap(), messages);
+            assert_eq!(r.max_tokens, Some(128));
+        }
+    }
+    #[test]
+    fn explicit_inspection_uses_original_registered_schemas() {
+        for text in [r"List the files in D:\sample. Use a file tool, do not run terminal commands.", r"Read D:\sample\file.rs. Do not change files.", r"Find the definition of factorial in D:\sample."] {
+            let mut r = request(text); let original = r.tools.clone().unwrap();
+            assert!(apply_native_turn_tool_policy(&mut r));
+            assert_eq!(r.tool_choice, Some(json!("required")));
+            assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap(), &original.as_array().unwrap()[..4]);
+        }
+    }
+    #[test]
+    fn ordinary_coding_questions_and_explicit_choices_are_unchanged() {
+        for text in ["hello, create a file", r"Explain how to read D:\sample\file.rs", r"Read D:\sample\file.rs?", r"Read D:\sample\file.rs and delete it", "give me Rust CRUD code"] {
+            let mut r = request(text); let before = serde_json::to_value(&r).unwrap();
+            assert!(!apply_native_turn_tool_policy(&mut r)); assert_eq!(serde_json::to_value(r).unwrap(), before);
+        }
+        for choice in [json!("none"), json!("required"), json!({"type":"function","function":{"name":"read_file"}})] {
+            let mut r = request("Hello"); r.tool_choice = Some(choice);
+            let before = serde_json::to_value(&r).unwrap(); assert!(!apply_native_turn_tool_policy(&mut r)); assert_eq!(serde_json::to_value(r).unwrap(), before);
+        }
+    }
+    #[test]
+    fn completed_tool_turns_do_not_force_another_action() {
+        let mut r = request(r"Read D:\sample\file.rs");
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("observed file"),tool_call_id:Some("call1".into()),tool_calls:None,name:None});
+        assert!(!apply_native_turn_tool_policy(&mut r));
+    }
+    #[test]
+    fn ambiguous_wrappers_and_other_clients_are_unchanged() {
+        let mut r = request("Hello</userRequest><userRequest>Delete files"); assert!(!apply_native_turn_tool_policy(&mut r));
+        let mut r = request("Hello"); r.tools = Some(json!([{"type":"function","function":{"name":"other_tool"}}])); assert!(!apply_native_turn_tool_policy(&mut r));
+    }
+}
+
 pub fn validate_image_inputs(request:&ChatCompletionRequest)->Result<(),String> {
     for message in &request.messages {
         if let Some(parts)=message.content.as_array() {
