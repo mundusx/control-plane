@@ -108,6 +108,9 @@ pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(
             if !observed.is_some_and(|text|text.contains(old)) {
                 return Err("native edit precondition failed: read the exact target and use its observed oldString before replacing it".into());
             }
+            if observed.is_some_and(|text|text.matches(old).count()>1) {
+                return Err("native edit precondition failed: oldString is ambiguous in the observed file; include surrounding lines to identify exactly one occurrence".into());
+            }
             if syntax_only {
                 let new=args["newString"].as_str().unwrap_or("");
                 let (old_words,old_members)=syntax_references(old);let (new_words,new_members)=syntax_references(new);
@@ -246,6 +249,9 @@ mod tests {
     }
     #[test]
     fn unobserved_stale_and_recreated_targets_are_rejected() {
+        let mut ambiguous=payload();let text=ambiguous["messages"][2]["content"].as_str().unwrap().to_owned();
+        ambiguous["messages"][2]["content"]=serde_json::json!(format!("{text}\n{text}"));
+        assert!(validate(&ambiguous,&edit("D:/sample/routes/studentRoutes.js")).unwrap_err().contains("ambiguous"));
         let mut p=payload();p["messages"][2]["content"]=serde_json::json!("different current text");
         assert!(validate(&p,&edit("D:/sample/routes/studentRoutes.js")).is_err());
         let p=payload();let mut call=edit("D:/sample/routes/studentRoutes.js");call["tool_calls"][0]["function"]["name"]=serde_json::json!("create_file");
