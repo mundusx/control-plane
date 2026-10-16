@@ -73,14 +73,29 @@ pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
 
 /// VS Code's generic provider attaches its complete catalog even to greetings.
 /// Restrict only recognized, current user requests; preserve explicit client
-/// choices, all messages, and every turn following an observed tool result.
+/// choices and all messages. Inspection continuations retain the same catalog
+/// without requiring another action, keeping their prompt prefix reusable.
 pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> bool {
     if request.tool_choice.as_ref().is_some_and(|choice| choice.as_str() != Some("auto")) {
         return false;
     }
     let Some(last) = request.messages.last() else { return false };
-    if last.role != "user" || last.tool_call_id.is_some() { return false; }
-    let Some(content) = last.content.as_str() else { return false };
+    let continuation = last.role == "tool" && last.tool_call_id.is_some();
+    let user = if continuation {
+        let matched = request.messages.iter().rev().find(|message| message.role == "assistant")
+            .and_then(|message| message.tool_calls.as_ref()).and_then(Value::as_array)
+            .is_some_and(|calls| calls.iter().any(|call| {
+                call.get("id").and_then(Value::as_str) == last.tool_call_id.as_deref()
+                    && matches!(call.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search"))
+            }));
+        if !matched { return false; }
+        let Some(user) = request.messages.iter().rev().find(|message| message.role == "user") else { return false };
+        user
+    } else {
+        if last.role != "user" || last.tool_call_id.is_some() { return false; }
+        last
+    };
+    let Some(content) = user.content.as_str() else { return false };
     let Some((_, tail)) = content.split_once("<userRequest>") else { return false };
     let Some((user_request, remainder)) = tail.split_once("</userRequest>") else { return false };
     if user_request.contains('<') || remainder.contains("<userRequest>") { return false; }
@@ -94,6 +109,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     }
     let greeting = text.trim_end_matches(['!', '.', '?']).trim();
     if matches!(greeting, "hello" | "hi" | "hey" | "hi there" | "hello there" | "good morning" | "good evening" | "what is your name" | "what's your name" | "whats your name") {
+        if continuation { return false; }
         request.tools = Some(json!([]));
         request.tool_choice = Some(json!("none"));
         request.max_tokens = Some(request.max_tokens.unwrap_or(128).min(128));
@@ -113,11 +129,15 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term)) {
         return false;
     }
+    if tools.iter().any(|tool| {
+        let name = tool.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
+        !name.is_empty() && !matches!(name, "list_dir" | "read_file" | "file_search" | "grep_search") && text.contains(&name.to_ascii_lowercase())
+    }) { return false; }
     let selected: Vec<Value> = tools.iter().filter(|tool| {
         matches!(tool.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search"))
     }).cloned().collect();
     request.tools = Some(Value::Array(selected));
-    request.tool_choice = Some(json!("required"));
+    if !continuation { request.tool_choice = Some(json!("required")); }
     true
 }
 
@@ -153,7 +173,7 @@ mod native_turn_tool_policy_tests {
     }
     #[test]
     fn ordinary_coding_questions_and_explicit_choices_are_unchanged() {
-        for text in ["hello, create a file", r"Explain how to read D:\sample\file.rs", r"Read D:\sample\file.rs?", r"Read D:\sample\file.rs and delete it", "give me Rust CRUD code"] {
+        for text in ["hello, create a file", r"Explain how to read D:\sample\file.rs", r"Read D:\sample\file.rs?", r"Read D:\sample\file.rs and delete it", r"Read D:\sample\file.rs using run_in_terminal", "give me Rust CRUD code"] {
             let mut r = request(text); let before = serde_json::to_value(&r).unwrap();
             assert!(!apply_native_turn_tool_policy(&mut r)); assert_eq!(serde_json::to_value(r).unwrap(), before);
         }
@@ -165,7 +185,18 @@ mod native_turn_tool_policy_tests {
     #[test]
     fn completed_tool_turns_do_not_force_another_action() {
         let mut r = request(r"Read D:\sample\file.rs");
+        r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"call1","type":"function","function":{"name":"read_file","arguments":"{}"}}])),tool_call_id:None,name:None});
         r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("observed file"),tool_call_id:Some("call1".into()),tool_calls:None,name:None});
+        let messages = serde_json::to_value(&r.messages).unwrap();
+        assert!(apply_native_turn_tool_policy(&mut r));
+        assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap().len(), 4);
+        assert_eq!(r.tool_choice, None);
+        assert_eq!(serde_json::to_value(&r.messages).unwrap(), messages);
+    }
+    #[test]
+    fn unmatched_tool_results_do_not_change_the_catalog() {
+        let mut r = request(r"Read D:\sample\file.rs");
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("observed file"),tool_call_id:Some("unknown".into()),tool_calls:None,name:None});
         assert!(!apply_native_turn_tool_policy(&mut r));
     }
     #[test]
