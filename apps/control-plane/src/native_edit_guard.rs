@@ -212,12 +212,23 @@ pub fn diagnostics_refresh(request:&crate::contracts::ChatCompletionRequest,id:&
         "mundusx":{"routing":"registered-diagnostics-refresh","inference":false}}))
 }
 
+/// Recognize only specific editor advisories observed in the native client.
+/// Unknown diagnostics, including mixed advisory/syntax results, stay actionable.
+pub fn advisory_only(text:&str)->bool {
+    let Ok(pattern)=regex::Regex::new(r"<compileError>([\s\S]*?)</compileError>") else {return false;};
+    let messages:Vec<_>=pattern.captures_iter(text).map(|c|c[1].trim().to_owned()).collect();
+    !messages.is_empty() && messages.iter().all(|message|
+        message.starts_with("Code Duplication (")
+        || (message.starts_with("Prefer `node:") && message.contains(" over "))
+        || message=="This framework implicitly discloses version information by default. Make sure it is safe here.")
+}
+
 /// A diagnostic snippet is context, not a registered read result. Supply the
 /// exact freshly mutated file before asking the model for its next repair.
 pub fn diagnostics_read(request:&crate::contracts::ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<serde_json::Value> {
     if request.tool_choice.as_ref().is_some_and(|c|c.as_str()!=Some("auto")) {return None;}
     let last=request.messages.last()?;
-    if last.role!="tool" || !last.content.as_str()?.contains("<compileError>") {return None;}
+    if last.role!="tool" || !last.content.as_str()?.contains("<compileError>") || advisory_only(last.content.as_str()?) {return None;}
     let call_id=last.tool_call_id.as_deref()?;
     if !call_id.starts_with("call_verify_refresh_chatcmpl-") {return None;}
     let call=request.messages.iter().rev().find(|m|m.role=="assistant")?.tool_calls.as_ref()?.as_array()?.iter()
@@ -276,6 +287,14 @@ mod tests {
             let (old_words,old_members)=syntax_references(old);let (new_words,new_members)=syntax_references(new);
             assert!(old_words.is_subset(&new_words));assert!(old_members.iter().all(|(key,count)|new_members.get(key).copied().unwrap_or(0)>=*count));
         }
+    }
+    #[test]
+    fn advisory_detection_does_not_hide_syntax_or_unknown_diagnostics() {
+        let style="<compileError>Prefer `node:path` over `path`.</compileError><compileError>Code Duplication ()</compileError>";
+        assert!(advisory_only(style));
+        assert!(!advisory_only(&format!("{style}<compileError>Unexpected token ')' </compileError>")));
+        assert!(!advisory_only("<compileError>Unknown problem</compileError>"));
+        assert!(!advisory_only("No errors found"));
     }
     #[test]
     fn windows_read_and_edit_paths_and_line_endings_are_equivalent() {
