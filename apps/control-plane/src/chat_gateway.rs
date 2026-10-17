@@ -190,19 +190,21 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         let name = tool.pointer("/function/name").and_then(Value::as_str);
         if directory_alias { name == Some("list_dir") } else if git_alias { name == Some("run_in_terminal") } else { name.is_some_and(allowed) }
     }).cloned().collect();
-    let pending_after_first_read = if continuation && coding && !text.starts_with("create ") {
+    let pending_after_read = if continuation && coding && !text.starts_with("create ") {
         let user_index=request.messages.iter().rposition(|m|m.role=="user").unwrap_or(0);
         let calls:Vec<&Value>=request.messages[user_index+1..].iter().filter(|m|m.role=="assistant")
             .filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
         let reads=calls.iter().filter(|call|call.pointer("/function/name").and_then(Value::as_str)==Some("read_file")).count();
-        let wrote=calls.iter().any(|call|matches!(call.pointer("/function/name").and_then(Value::as_str),Some("create_file" | "create_directory" | "replace_string_in_file" | "run_in_terminal")));
+        let wrote=calls.iter().any(|call|matches!(call.pointer("/function/name").and_then(Value::as_str),Some("create_file" | "create_directory" | "replace_string_in_file"))
+            && request.messages[user_index+1..].iter().any(|result|result.role=="tool"&&result.tool_call_id.as_deref()==call["id"].as_str()
+                && result.content.as_str().is_some_and(|text|!text.trim_start().to_ascii_lowercase().starts_with("error")&&!text.trim_start().to_ascii_lowercase().starts_with("string replacement failed:"))));
         let last_read=calls.iter().any(|call|call.get("id").and_then(Value::as_str)==last.tool_call_id.as_deref()
             && call.pointer("/function/name").and_then(Value::as_str)==Some("read_file"));
-        reads==1 && !wrote && last_read && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
+        (1..8).contains(&reads) && !wrote && last_read && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
     } else {false};
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
-    if !continuation || pending_after_first_read { request.tool_choice = Some(json!("required")); }
+    if !continuation || pending_after_read { request.tool_choice = Some(json!("required")); }
     if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
         let index = request.messages.iter().take_while(|m| m.role=="system").count();
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
@@ -639,15 +641,19 @@ mod native_turn_tool_policy_tests {
         }
     }
     #[test]
-    fn pending_fix_gets_one_action_decision_but_never_an_unbounded_forced_loop() {
+    fn pending_fix_stays_in_action_mode_until_a_successful_write_with_bounded_reads() {
         let mut r=directory_request(r"- D:\sample");
         r.messages.last_mut().unwrap().content=json!(r"<userRequest>Fix D:\sample\test.js so invalid inputs throw a TypeError. Do not run commands.</userRequest>");
         let assistant=|id:&str,name:&str|crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":id,"type":"function","function":{"name":name,"arguments":"{}"}}])),tool_call_id:None,name:None};
         let result=|id:&str|crate::contracts::ChatMessage {role:"tool".into(),content:json!("observed complete file"),tool_calls:None,tool_call_id:Some(id.into()),name:None};
         r.messages.push(assistant("read1","read_file"));r.messages.push(result("read1"));
         let mut pending=r.clone();assert!(apply_native_turn_tool_policy(&mut pending));assert_eq!(pending.tool_choice,Some(json!("required")));
-        let mut verified=r.clone();verified.messages.push(assistant("read2","read_file"));verified.messages.push(result("read2"));
-        assert!(apply_native_turn_tool_policy(&mut verified));assert_eq!(verified.tool_choice,None);
+        let mut reading=r.clone();reading.messages.push(assistant("read2","read_file"));reading.messages.push(result("read2"));
+        assert!(apply_native_turn_tool_policy(&mut reading));assert_eq!(reading.tool_choice,Some(json!("required")));
+        let mut bounded=r.clone();for i in 2..=8 {let id=format!("read{i}");bounded.messages.push(assistant(&id,"read_file"));bounded.messages.push(result(&id));}
+        assert!(apply_native_turn_tool_policy(&mut bounded));assert_eq!(bounded.tool_choice,None);
+        let mut failed=r.clone();failed.messages.push(assistant("bad","replace_string_in_file"));let mut failure=result("bad");failure.content=json!("String replacement failed: source mismatch");failed.messages.push(failure);failed.messages.push(assistant("read2","read_file"));failed.messages.push(result("read2"));
+        assert!(apply_native_turn_tool_policy(&mut failed));assert_eq!(failed.tool_choice,Some(json!("required")));
         let mut changed=r.clone();changed.messages.push(assistant("edit1","replace_string_in_file"));changed.messages.push(result("edit1"));
         assert!(apply_native_turn_tool_policy(&mut changed));assert_eq!(changed.tool_choice,None);
     }
