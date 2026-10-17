@@ -1119,7 +1119,8 @@ pub fn apply_adaptive_native_edit_policy(request: &mut ChatCompletionRequest) ->
             && message.name.as_deref() == Some(ADAPTIVE_EDIT_POLICY_NAME)
     });
     if !already_applied {
-        request.messages.insert(0, crate::contracts::ChatMessage {
+        let index=request.messages.iter().take_while(|m|m.role=="system").count();
+        request.messages.insert(index, crate::contracts::ChatMessage {
             role: "system".to_string(),
             content: Value::String(
                 "This tool turn has a large workspace history. When an edit is needed for the user's current task, use a small targeted mutation and keep changed text under 2000 characters when possible. Do not rewrite an entire existing file in one tool call. Available edit tools do not require an edit: use inspection tools for read-only requests, and answer normally when the requested work is complete. Preserve exact tool arguments and report only observed results."
@@ -1209,6 +1210,14 @@ mod harness_routing_tests {
                 .count(),
             1
         );
+    }
+    #[test]
+    fn adaptive_edit_guidance_keeps_the_host_prefix_first() {
+        let mut r:ChatCompletionRequest=serde_json::from_value(json!({"messages":[{"role":"system","content":"Stable host instructions"},{"role":"user","content":"Update this project"},{"role":"assistant","content":null,"tool_calls":[{"id":"read","function":{"name":"read_file","arguments":"{}"}}]},{"role":"tool","tool_call_id":"read","content":"x".repeat(LARGE_TOOL_RESULT_CHARS+1)}],"tools":[{"function":{"name":"edit_existing_file","parameters":{"type":"object"}}}],"max_tokens":4096})).unwrap();
+        let host=serde_json::to_value(&r.messages[0]).unwrap();
+        assert!(apply_adaptive_native_edit_policy(&mut r));
+        assert_eq!(serde_json::to_value(&r.messages[0]).unwrap(),host);
+        assert_eq!(r.messages[1].name.as_deref(),Some(ADAPTIVE_EDIT_POLICY_NAME));
     }
 
     #[test]
