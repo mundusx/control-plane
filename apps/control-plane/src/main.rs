@@ -9489,7 +9489,8 @@ fn handle_connection_with_streams(
                     if let Err(error)=chat_gateway::validate_image_inputs(&request_body) {
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
-                    if let Some(completion) = chat_gateway::native_terminal_failure_stop(&request_body, &completion_id, created, public_model)
+                    if let Some(completion) = chat_gateway::native_http_parse_recovery(&request_body, &completion_id, created, public_model)
+                        .or_else(||chat_gateway::native_terminal_failure_stop(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_result_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_git_shortcut(&request_body, &completion_id, created, public_model))

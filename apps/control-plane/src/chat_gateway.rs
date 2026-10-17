@@ -288,6 +288,33 @@ fn native_workspace_root(request: &ChatCompletionRequest) -> Option<String> {
 
 /// Stop identical failed terminal retries before another inference/execution.
 /// Only matched current-turn results count; successful or pending calls reset it.
+pub fn native_http_parse_recovery(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|v|v.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;
+    if last.role!="tool" || !last.content.as_str()?.contains("ExpandPropertyNotFound") {return None;}
+    let start=request.messages.iter().rposition(|m|m.role=="user")?;
+    let calls:Vec<&Value>=request.messages[start+1..].iter().filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
+    let call=calls.iter().find(|c|c["id"].as_str()==last.tool_call_id.as_deref())?;
+    if call["function"]["name"]!="run_in_terminal" {return None;}
+    for previous in &calls {
+        let args:Value=serde_json::from_str(previous["function"]["arguments"].as_str()?).ok()?;
+        if args["goal"]=="Inspect raw JSON after failed GET filtering" {return None;}
+    }
+    let args:Value=serde_json::from_str(call["function"]["arguments"].as_str()?).ok()?;
+    let pattern=regex::Regex::new(r#"^curl\.exe\s+-X\s+GET\s+(https?://[^\s'";|&]+)\s*\|\s*ConvertFrom-Json\s*\|"#).ok()?;
+    let found=pattern.captures(args["command"].as_str()?.trim())?;
+    let address=&found[1];let url=url::Url::parse(address).ok()?;
+    if !url.username().is_empty() || url.password().is_some() || address.chars().any(char::is_control) {return None;}
+    let mut original=request.clone();original.messages.truncate(start+1);
+    let content=original.messages[start].content.as_str()?;
+    let (prefix,tail)=content.split_once("<userRequest>")?;let (_,suffix)=tail.split_once("</userRequest>")?;
+    original.messages[start].content=json!(format!("{prefix}<userRequest>GET {address}</userRequest>{suffix}"));
+    let mut completion=native_http_shortcut(&original,id,created,model)?;
+    let arguments=json!({"command":format!("$ErrorActionPreference = 'Stop'; $mundusxResponse = Invoke-RestMethod -Uri '{}' -Method Get; ConvertTo-Json -InputObject $mundusxResponse -Depth 20",address.replace('\'',"''")),"goal":"Inspect raw JSON after failed GET filtering","explanation":"Read the actual response without the failing filter; do not repeat the failed pipeline.","mode":"sync"});
+    completion["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]=json!(arguments.to_string());
+    completion["mundusx"]=json!({"routing":"observed-get-parse-recovery","inference_used":false});Some(completion)
+}
+
 pub fn native_terminal_failure_stop(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
     let last=request.messages.last()?;
     if last.role!="tool" {return None;}
@@ -2404,6 +2431,21 @@ mod native_http_shortcut_tests {
   assert_eq!(native_http_result_shortcut(&count,"id",1,"model").unwrap()["choices"][0]["message"]["content"],"2");
   let post=observed_request(r#"POST http://localhost:3000/api/records with JSON {"name":"Record","age":20} using curl. Report only created ID. Do not edit files."#,json!({"id":7,"name":"Record","age":20}));
   assert_eq!(native_http_result_shortcut(&post,"id",1,"model").unwrap()["choices"][0]["message"]["content"],"7");
+ }
+ #[test] fn failed_get_filter_reads_raw_json_once_without_replaying_mutations() {
+  let mut r=observed_request("GET http://localhost:3000/api/records",json!({}));
+  r.messages[2].tool_calls.as_mut().unwrap()[0]["function"]["arguments"]=json!(json!({"command":"curl.exe -X GET http://localhost:3000/api/records | ConvertFrom-Json | Where-Object { $_.name -eq 'Record' } | Select-Object -ExpandProperty age"}).to_string());
+  r.messages.last_mut().unwrap().content=json!("FullyQualifiedErrorId : ExpandPropertyNotFound");
+  let result=native_http_parse_recovery(&r,"recovery",1,"model").unwrap();
+  let args:Value=serde_json::from_str(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+  assert!(args["command"].as_str().unwrap().contains("Invoke-RestMethod"));
+  assert!(!args["command"].as_str().unwrap().contains("Where-Object"));
+  let mut post=r.clone();post.messages[2].tool_calls.as_mut().unwrap()[0]["function"]["arguments"]=json!(json!({"command":"curl.exe -X POST http://localhost:3000/api/records | ConvertFrom-Json | Select-Object -ExpandProperty age"}).to_string());
+  assert!(native_http_parse_recovery(&post,"id",1,"model").is_none());
+  let calls=result["choices"][0]["message"]["tool_calls"].clone();
+  r.messages.push(serde_json::from_value(json!({"role":"assistant","content":null,"tool_calls":calls})).unwrap());
+  r.messages.push(serde_json::from_value(json!({"role":"tool","tool_call_id":calls[0]["id"],"content":"ExpandPropertyNotFound"})).unwrap());
+  assert!(native_http_parse_recovery(&r,"id",1,"model").is_none());
  }
  #[test] fn uncertain_errors_changed_commands_and_mismatched_records_use_model() {
   let text=r#"POST http://localhost:3000/api/records with JSON {"name":"Record"} using curl. Report only created ID. Do not edit files."#;
