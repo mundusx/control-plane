@@ -161,7 +161,8 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         && action.split_whitespace().any(|word| word == "here" || word == "workspace")
         && action.split(|c:char| !c.is_alphanumeric()).any(|word|
             matches!(word,"program" | "project" | "application" | "app" | "api"));
-    let workspace_action = native_workspace_action(&text);
+    let http_action = native_http_command_action(&text);
+    let workspace_action = native_workspace_action(&text) || http_action;
     let coding = native_workspace_root(request).is_some()
         && (workspace_action || ((explicit_path || project_creation)
         && ["create ","update ","fix ","edit ","add ","repair ","continue "].iter().any(|prefix| action.starts_with(prefix))))
@@ -194,7 +195,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         let name = tool.pointer("/function/name").and_then(Value::as_str);
         if directory_alias { name == Some("list_dir") } else if git_alias { name == Some("run_in_terminal") } else { name.is_some_and(allowed) }
     }).cloned().collect();
-    let pending_after_read = if continuation && coding && !text.starts_with("create ") {
+    let pending_after_read = if continuation && coding && !http_action && !text.starts_with("create ") {
         let user_index=request.messages.iter().rposition(|m|m.role=="user").unwrap_or(0);
         let calls:Vec<&Value>=request.messages[user_index+1..].iter().filter(|m|m.role=="assistant")
             .filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
@@ -209,13 +210,18 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
     if !continuation || pending_after_read { request.tool_choice = Some(json!("required")); }
-    if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
+    if coding && !http_action && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
         let index = request.messages.iter().take_while(|m| m.role=="system").count();
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
             content:json!("Use the supplied registered tools and exact argument types. Perform ONE file operation per assistant turn, then stop and wait for its result. Keep file contents concise; use separate modules for separate responsibilities. Do not generate redundant variants of lists, dependency entries, patterns or code. Complete every tool argument and close the call. Read an existing file before changing it, using the exact requested range, or a useful initial chunk. A partial read does not establish the file ends there; request later ranges when the relevant code is not present. After observing relevant code, apply a small targeted patch rather than repeatedly restating plans or rereading unchanged ranges. Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. Interpret diagnostic messages rather than assuming every <compileError> tag is a syntax failure. Editor extensions can report duplication, style or security advisories in that tag. Do not change already-correct syntax to address unrelated advisories; stay within the requested repair scope and report remaining advisories separately. Before claiming a project works, check that imports match declared dependencies and that database APIs match the selected driver. A syntax-only check does not establish runtime correctness. After the requested changes are observed complete, report the result briefly and stop; do not reprint entire files unless the user requested that. Do not force further tool calls merely because tools remain available."),
             tool_calls:None,tool_call_id:None,name:Some("mundusx_native_coding_policy".into())});
     }
-    if advisory_context {
+    if http_action && !request.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_http_policy")) {
+        let index=request.messages.iter().take_while(|m|m.role=="system").count();
+        request.messages.insert(index,crate::contracts::ChatMessage {role:"system".into(),name:Some("mundusx_native_http_policy".into()),tool_calls:None,tool_call_id:None,
+            content:json!("Perform the requested HTTP/API operation using the registered terminal tool. Inspect existing tool results first: do not replay a successful POST, PUT, PATCH or DELETE merely to verify it; use a read request when verification is needed. If a mutation's result is uncertain, check the current state before retrying. Use known endpoint details from the conversation; read route/config files only if necessary, and avoid unrelated repository inspection, edits or builds. On Windows PowerShell use Invoke-RestMethod for JSON APIs or curl.exe with curl flags, not the curl alias; Invoke-WebRequest requires -UseBasicParsing. Include every required tool argument, including goal, explanation and mode. Report only the actual observed response.")});
+    }
+    if advisory_context && !http_action {
         request.messages.push(crate::contracts::ChatMessage {role:"system".into(),
             content:json!("The latest editor diagnostics contain only recognized style/duplication/security advisories, not a syntax failure. Unless the user specifically requested these advisory changes, leave them alone and continue the unfinished original task. Do not divert project creation into unrelated advisory repairs."),
             tool_calls:None,tool_call_id:None,name:Some("mundusx_diagnostic_scope".into())});
@@ -242,6 +248,13 @@ fn native_coding_tool(name: &str) -> bool {
 fn native_workspace_action(text: &str) -> bool {
     regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|start|build|test|debug|fix|repair|update|edit|create|continue)\s+(?:the\s+|this\s+|our\s+|my\s+)?(?:proj|project|app|application|workspace)\b")
         .is_ok_and(|pattern| pattern.is_match(text))
+}
+
+fn native_http_command_action(text:&str)->bool {
+    let client=text.split(|c:char|!c.is_alphanumeric()).any(|w|matches!(w,"curl"|"restmethod"))
+        || text.contains("invoke-restmethod") || text.contains("invoke-webrequest");
+    client && regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|create|add|update|delete|send|test|check|verify|get|post|fetch|request)\b")
+        .is_ok_and(|r|r.is_match(text))
 }
 
 fn native_workspace_root(request: &ChatCompletionRequest) -> Option<String> {
@@ -483,6 +496,17 @@ mod native_turn_tool_policy_tests {
             let mut r=project_execution_request("run this proj");r.tool_choice=Some(choice);let before=serde_json::to_value(&r).unwrap();
             assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
+    }
+    #[test]
+    fn api_curl_actions_use_focused_tools_without_source_mutation_policy() {
+        for text in ["create one more new record of student using curl","please send a POST using curl.exe","check the API using Invoke-RestMethod"] {
+            let mut r=project_execution_request(text);assert!(apply_native_turn_tool_policy(&mut r),"{text}");
+            assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="run_in_terminal"));
+            assert!(!r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="appmod-create-migration-summary"));
+            assert!(r.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_http_policy")));
+            assert!(!r.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_coding_policy")));
+        }
+        let mut r=project_execution_request("Explain curl and HTTP POST");let before=serde_json::to_value(&r).unwrap();assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
     }
     #[test]
     fn completed_tool_turns_do_not_force_another_action() {
