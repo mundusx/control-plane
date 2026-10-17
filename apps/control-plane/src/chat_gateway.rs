@@ -11,6 +11,15 @@ use std::time::{Duration, Instant};
 
 pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]";
 
+fn normalize_native_read_results(payload:&mut Value) {
+    let Some(messages)=payload["messages"].as_array_mut() else {return;};let mut reads=BTreeMap::new();
+    for m in messages {
+        if m["role"]=="assistant" {for c in m["tool_calls"].as_array().into_iter().flatten() {if let Some(id)=c["id"].as_str().filter(|s|!s.is_empty()) {reads.insert(id.to_string(),c["function"]["name"]=="read_file");}}}
+        if m["role"]!="tool"||!m["tool_call_id"].as_str().is_some_and(|id|reads.get(id)==Some(&true)) {continue;}
+        if let Some(text)=m["content"].as_str().filter(|s|s.contains("\r\r\n")) {let mut text=text.to_string();while text.contains("\r\r\n") {text=text.replace("\r\r\n","\r\n");}m["content"]=json!(text);}
+    }
+}
+
 /// Keep harness tool results on the native path even during a final turn that
 /// omits tool definitions. Server lookups must not replace the harness's answer.
 /// Native runtimes accept omitted options, but MLX rejects explicit JSON null
@@ -42,12 +51,23 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
             "content":"Use the actual client shell, not the server OS. For Windows JSON APIs prefer assigning the parsed response first: $records = Invoke-RestMethod -Uri 'URL' -Method Get; then filter $records. Windows PowerShell 5.1 ConvertFrom-Json may emit a JSON array as one pipeline object: assign it to a variable before piping its records to Where-Object. Inspect the actual JSON shape before selecting properties; unwrap data only when observed. After a parsing/filtering failure, fetch the raw response without filtering before another attempt. Never repeat an unchanged failed command. Do not assume jq, curl.exe, Python or other optional clients exist: check Get-Command on PowerShell or command -v on POSIX before switching dependencies. When curl.exe is unavailable on Windows, use Invoke-RestMethod. If the observed response already answers the question, answer and stop. Do not replay successful mutations."
         }));
     }
+    normalize_native_read_results(&mut payload);
     crate::native_json_api::prepare(payload)
 }
 
 #[cfg(test)]
 mod native_payload_tests {
     use super::*;
+    #[test]
+    fn full_file_crlf_transport_normalizes_only_matched_read_results() {
+        let request:ChatCompletionRequest=serde_json::from_value(json!({"messages":[{"role":"user","content":"<userRequest>Fix D:/app/main.js syntax</userRequest>literal\r\r\n"},{"role":"assistant","content":null,"tool_calls":[{"id":"read1","function":{"name":"read_file","arguments":"{\"filePath\":\"D:/app/main.js\",\"startLine\":1,\"endLine\":200}"}}]},{"role":"tool","tool_call_id":"read1","content":"const first = 1;\r\r\nconst x = 'bad\";\r\r\n"},{"role":"tool","tool_call_id":"unmatched","content":"terminal data\r\r\n"}],"tools":[{"function":{"name":"read_file"}},{"function":{"name":"list_dir"}},{"function":{"name":"replace_string_in_file"}}]})).unwrap();
+        let p=native_tool_payload(&request);let messages=p["messages"].as_array().unwrap();
+        assert!(messages.iter().find(|m|m["role"]=="user").unwrap()["content"].as_str().unwrap().ends_with("\r\r\n"));
+        assert_eq!(messages.iter().find(|m|m["tool_call_id"]=="read1").unwrap()["content"],"const first = 1;\r\nconst x = 'bad\";\r\n");
+        assert_eq!(messages.iter().find(|m|m["tool_call_id"]=="unmatched").unwrap()["content"],"terminal data\r\r\n");
+        let edit=json!({"tool_calls":[{"function":{"name":"replace_string_in_file","arguments":json!({"filePath":"D:/app/main.js","oldString":"const x = 'bad\";\r\n","newString":"const x = 'bad';\r\n"}).to_string()}}]});
+        crate::native_edit_guard::validate(&p,&edit).unwrap();
+    }
     #[test]
     fn native_payload_omits_null_options_but_preserves_message_nulls() {
         let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
