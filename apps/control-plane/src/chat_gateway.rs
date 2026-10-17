@@ -224,7 +224,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     if http_action && !request.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_http_policy")) {
         let index=request.messages.iter().take_while(|m|m.role=="system").count();
         request.messages.insert(index,crate::contracts::ChatMessage {role:"system".into(),name:Some("mundusx_native_http_policy".into()),tool_calls:None,tool_call_id:None,
-            content:json!("Perform the requested HTTP/API operation using the registered terminal tool. Inspect existing tool results first: do not replay a successful POST, PUT, PATCH or DELETE merely to verify it; use a read request when verification is needed. If a mutation's result is uncertain, check the current state before retrying. Use known endpoint details from the conversation; read route/config files only if necessary, and avoid unrelated repository inspection, edits or builds. On Windows PowerShell use Invoke-RestMethod for JSON APIs or curl.exe with curl flags, not the curl alias; Invoke-WebRequest requires -UseBasicParsing. Include every required tool argument, including goal, explanation and mode. Report only the actual observed response.")});
+            content:json!("Perform the requested HTTP/API operation using the registered terminal tool. Inspect existing tool results first: do not replay a successful POST, PUT, PATCH or DELETE merely to verify it; use a read request when verification is needed. If a mutation's result is uncertain, check the current state before retrying. Use known endpoint details from the conversation; read route/config files only if necessary, and avoid unrelated repository inspection, edits or builds. On Windows PowerShell use Invoke-RestMethod for JSON APIs or curl.exe with curl flags, not the curl alias; Invoke-WebRequest requires -UseBasicParsing. Include every required tool argument, including goal, explanation and mode. Report only the actual observed response. If the user asks for a count, answer with the count in one short sentence; do not enumerate records unless requested. For creation, report the returned ID and only the fields requested by the user.")});
     }
     if advisory_context && !http_action {
         request.messages.push(crate::contracts::ChatMessage {role:"system".into(),
@@ -276,6 +276,44 @@ fn native_workspace_root(request: &ChatCompletionRequest) -> Option<String> {
     let absolute = root.starts_with('/') || (bytes.first().is_some_and(u8::is_ascii_alphabetic)
         && bytes.get(1) == Some(&b':') && matches!(bytes.get(2), Some(b'/' | b'\\')));
     (absolute && root.len() <= 1024 && !root.chars().any(char::is_control)).then(|| root.to_string())
+}
+
+/// A fully specified HTTP request needs no model turn to choose its host tool.
+/// Conservative grammar: HTTP method, URL, optional explicit JSON and curl.
+pub fn native_http_shortcut(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|v|v.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;if last.role!="user" {return None;}
+    let content=last.content.as_str()?;let (_,tail)=content.split_once("<userRequest>")?;let (text,remainder)=tail.split_once("</userRequest>")?;
+    if remainder.contains("<userRequest>") {return None;}
+    if !request.messages.iter().filter(|m|m.role=="user").any(|m|m.content.as_str().is_some_and(|s|s.contains("<environment_info>")&&s.contains("The user's current OS is: Windows"))) {return None;}
+    let found=regex::Regex::new(r"(?is)^(GET|POST|PUT|PATCH|DELETE)\s+(https?://[^\s]+)(.*)$").ok()?.captures(text.trim())?;
+    let method=found[1].to_ascii_uppercase();let address=&found[2];let rest=found[3].trim();
+    let url=url::Url::parse(address).ok()?;
+    if !matches!(url.scheme(),"http"|"https") || !url.username().is_empty() || url.password().is_some() || address.chars().any(char::is_control) {return None;}
+    let allowed_tail=|s:&str| {
+        let text=s.trim().to_ascii_lowercase();
+        !["delete ","create ","update ","execute ","run "," and then "].iter().any(|p|text.contains(p))
+            && regex::Regex::new(r"^(?:using curl(?:\.|\s+and)?\s*)?(?:report (?:only )?(?:(?:the )?(?:number|count) of [a-z0-9 _-]+|(?:created|returned) id|response|status))?\.?(?:\s*do not edit(?: any)? files\.)?$").is_ok_and(|r|r.is_match(&text))
+    };
+    let body=if matches!(method.as_str(),"POST"|"PUT"|"PATCH") {
+        let input=rest.strip_prefix("with JSON ").or_else(||rest.strip_prefix("with json "))?;
+        if input.len()>16384 {return None;}
+        let mut stream=serde_json::Deserializer::from_str(input).into_iter::<Value>();let body=stream.next()?.ok()?;
+        if !body.is_object() || !allowed_tail(&input[stream.byte_offset()..]) {return None;}Some(body)
+    }else {if !allowed_tail(rest) {return None;}None};
+    let tool=request.tools.as_ref()?.as_array()?.iter().find(|t|t["function"]["name"]=="run_in_terminal")?;let schema=&tool["function"]["parameters"];
+    if schema["type"]!="object" || ["command","goal","explanation","mode"].iter().any(|field|schema["properties"][*field]["type"]!="string") || !schema["properties"]["mode"]["enum"].as_array()?.iter().any(|v|v=="sync") || schema["required"].as_array()?.iter().any(|v|!matches!(v.as_str(),Some("command"|"goal"|"explanation"|"mode"))) {return None;}
+    let quote=|s:&str|format!("'{}'",s.replace('\'',"''"));
+    let mut prefix=String::new();let mut body_arg=String::new();let mut cleanup=String::new();
+    if let Some(body)=body {
+        let bytes=serde_json::to_vec(&body).ok()?.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        prefix=format!("$mundusxPayload = [IO.Path]::GetTempFileName(); [IO.File]::WriteAllBytes($mundusxPayload,[byte[]]@({bytes})); try {{ ");
+        body_arg=" -H 'Content-Type: application/json' --data-binary ('@' + $mundusxPayload)".into();
+        cleanup=" } finally { Remove-Item -LiteralPath $mundusxPayload -ErrorAction SilentlyContinue }".into();
+    }
+    let command=format!("$ErrorActionPreference = 'Stop'; {prefix}curl.exe -sS --fail-with-body --request {method} {}{body_arg}; if ($LASTEXITCODE -ne 0) {{ throw ('curl exited with code ' + $LASTEXITCODE) }}{cleanup}",quote(address));
+    let mut completion=native_shortcut_completion("run_in_terminal",json!({"command":command,"goal":format!("Send requested {method} request"),"explanation":"Execute the explicitly specified HTTP operation and return its actual result.","mode":"sync"}),id,created,model);
+    completion["mundusx"]=json!({"routing":"registered-http-request","inference_used":false});Some(completion)
 }
 
 /// Exact `ls .` is a registered file-tool operation, never a terminal command.
@@ -2244,4 +2282,20 @@ mod native_failure_tests {
         assert!(wire.contains("native_edit_rejected"));
         assert!(wire.contains("[DONE]"));
     }
+}
+
+#[cfg(test)]
+mod native_http_shortcut_tests {
+ use super::*;
+ fn request(text:&str)->ChatCompletionRequest {serde_json::from_value(json!({"messages":[{"role":"user","content":"<environment_info>The user's current OS is: Windows</environment_info>"},{"role":"user","content":format!("<userRequest>{text}</userRequest>")}],"tools":[{"type":"function","function":{"name":"run_in_terminal","parameters":{"type":"object","properties":{"command":{"type":"string"},"goal":{"type":"string"},"explanation":{"type":"string"},"mode":{"type":"string","enum":["sync","async"]}},"required":["command","goal","explanation","mode"]}}}]})).unwrap()}
+ #[test] fn explicit_requests_use_registered_tool_without_inference() {
+  for text in ["GET http://localhost:3000/api/students using curl", "Get http://localhost:3000/api/students using curl and report the number of student records. Do not edit any files.",r#"POST http://localhost:3000/api/students with JSON {"name":"O'Brien","email":"fixture@example.com","age":20} using curl. Report only created ID. Do not edit files."#] {
+   let result=native_http_shortcut(&request(text),"http-test",1,"model").unwrap();assert_eq!(result["choices"][0]["message"]["tool_calls"][0]["function"]["name"],"run_in_terminal");assert_eq!(result["mundusx"]["inference_used"],false);
+   let args:Value=serde_json::from_str(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();assert!(args["command"].as_str().unwrap().contains("curl.exe"));assert_eq!(args["mode"],"sync");
+  }
+ }
+ #[test] fn ambiguous_or_explicitly_restricted_requests_keep_normal_path() {
+  for text in ["Explain GET http://localhost:3000", "GET http://localhost:3000 but do not run commands", "GET http://localhost:3000 with header X-Test: value", "POST http://localhost:3000 using curl", "GET http://localhost:3000 and then delete records", "GET http://user:pass@localhost:3000", "POST http://localhost:3000 with JSON {} using curl instead use DELETE"] {assert!(native_http_shortcut(&request(text),"id",1,"model").is_none(),"{text}");}
+  let mut r=request("GET http://localhost:3000");r.tool_choice=Some(json!("none"));assert!(native_http_shortcut(&r,"id",1,"model").is_none());r.tool_choice=None;r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("success"),tool_call_id:Some("prior".into()),tool_calls:None,name:None});assert!(native_http_shortcut(&r,"id",1,"model").is_none());
+ }
 }
