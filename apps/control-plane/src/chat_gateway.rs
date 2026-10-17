@@ -336,6 +336,11 @@ pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, cre
     // Explicit line ranges take precedence over the default initial chunk.
     let range=regex::Regex::new(r"(?i)\blines?\s+(\d+)\s*(?:through|to|[-–])\s*(\d+)\b").ok()?;
     let (start,end)=if let Some(found)=range.captures(text) {
+        // A range following a second file reference may belong to that file,
+        // not the leading repair target. Let the model select the read rather
+        // than silently applying the other file's range to this document.
+        let paths=regex::Regex::new(r#"(?:^|[\s`'"])(?:[A-Za-z]:[/\\]|/)[^\s`'"<>]+"#).ok()?;
+        if paths.find_iter(text).count()>1 {return None;}
         let start=found[1].parse::<u64>().ok()?;let end=found[2].parse::<u64>().ok()?;
         if start==0 || end<start || end-start>=2000 {return None;}
         (start,end)
@@ -639,6 +644,11 @@ mod native_turn_tool_policy_tests {
             let args:Value=serde_json::from_str(answer["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
             assert_eq!(args["startLine"],start);assert_eq!(args["endLine"],end);
         }
+        let mut r=directory_request(r"- D:\sample");
+        r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"function":{"name":"replace_string_in_file"}}));
+        r.tools.as_mut().unwrap()[0]["function"]["parameters"]=json!({"type":"object","properties":{"filePath":{"type":"string"},"startLine":{"type":"number"},"endLine":{"type":"number"}},"required":["filePath","startLine","endLine"]});
+        r.messages.last_mut().unwrap().content=json!(r"<userRequest>Fix D:\sample\model.js. Read the driver D:\sample\node_modules\driver.d.ts lines 60 to 75.</userRequest>");
+        assert!(native_inspection_shortcut(&r,"range",1,"model").is_none());
     }
     #[test]
     fn pending_fix_stays_in_action_mode_until_a_successful_write_with_bounded_reads() {
