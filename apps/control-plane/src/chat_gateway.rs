@@ -316,6 +316,40 @@ pub fn native_http_shortcut(request:&ChatCompletionRequest,id:&str,created:u64,m
     completion["mundusx"]=json!({"routing":"registered-http-request","inference_used":false});Some(completion)
 }
 
+/// Return explicitly requested scalar facts from an observed JSON tool result.
+/// Never execute, retry, or infer a response when the result is incomplete.
+pub fn native_http_result_shortcut(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|v|v.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;if last.role!="tool" {return None;}
+    let user_index=request.messages.iter().rposition(|m|m.role=="user"&&m.content.as_str().is_some_and(|s|s.contains("<userRequest>")))?;
+    let text=request.messages[user_index].content.as_str()?.split_once("<userRequest>")?.1.split_once("</userRequest>")?.0.trim();
+    let lower=text.to_ascii_lowercase();
+    let count=lower.starts_with("get ") && (lower.contains("report the number of ") || lower.contains("report the count of "));
+    let identifier=lower.starts_with("post ")&&lower.ends_with("using curl. report only created id. do not edit files.");
+    if !count && !identifier {return None;}
+    let calls:Vec<&Value>=request.messages[user_index+1..].iter().filter(|m|m.role=="assistant").filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
+    if calls.len()!=1 || calls[0]["function"]["name"]!="run_in_terminal" || calls[0]["id"].as_str()!=last.tool_call_id.as_deref() {return None;}
+    let mut original=request.clone();original.messages.truncate(user_index+1);
+    let expected=native_http_shortcut(&original,"verify-only",created,model)?;
+    let expected_args:Value=serde_json::from_str(expected["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str()?).ok()?;
+    let actual_args:Value=serde_json::from_str(calls[0]["function"]["arguments"].as_str()?).ok()?;
+    if actual_args!=expected_args {return None;}
+    let result:Value=serde_json::from_str(last.content.as_str()?.trim()).ok()?;
+    if result.get("error").is_some() || result.get("errors").is_some() || result.get("success")==Some(&json!(false)) {return None;}
+    let answer=if count {
+        result.as_array().or_else(||result.get("data").and_then(Value::as_array))?.len().to_string()
+    }else {
+        let data=result.get("data").filter(|v|v.is_object()).unwrap_or(&result);
+        let input=text.split_once(" with JSON ").or_else(||text.split_once(" with json "))?.1;
+        let body=serde_json::Deserializer::from_str(input).into_iter::<Value>().next()?.ok()?;
+        if !body.as_object()?.iter().all(|(key,value)|data.get(key)==Some(value)) {return None;}
+        let value=data.get("id")?;
+        if let Some(value)=value.as_str().filter(|v|!v.is_empty()&&v.len()<256&&!v.chars().any(char::is_control)) {value.to_string()}
+        else if value.is_number() {value.to_string()} else {return None;}
+    };
+    Some(json!({"id":id,"object":"chat.completion","created":created,"model":model,"choices":[{"index":0,"message":{"role":"assistant","content":answer},"finish_reason":"stop"}],"mundusx":{"routing":"observed-http-result","inference_used":false}}))
+}
+
 /// Exact `ls .` is a registered file-tool operation, never a terminal command.
 /// Return no inference job for this routing decision; the client still owns
 /// permissions/execution and submits the observed result for its final answer.
@@ -2298,4 +2332,22 @@ mod native_http_shortcut_tests {
   for text in ["Explain GET http://localhost:3000", "GET http://localhost:3000 but do not run commands", "GET http://localhost:3000 with header X-Test: value", "POST http://localhost:3000 using curl", "GET http://localhost:3000 and then delete records", "GET http://user:pass@localhost:3000", "POST http://localhost:3000 with JSON {} using curl instead use DELETE"] {assert!(native_http_shortcut(&request(text),"id",1,"model").is_none(),"{text}");}
   let mut r=request("GET http://localhost:3000");r.tool_choice=Some(json!("none"));assert!(native_http_shortcut(&r,"id",1,"model").is_none());r.tool_choice=None;r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("success"),tool_call_id:Some("prior".into()),tool_calls:None,name:None});assert!(native_http_shortcut(&r,"id",1,"model").is_none());
  }
+ fn observed_request(text:&str,result:Value)->ChatCompletionRequest {
+  let mut r=request(text);let completion=native_http_shortcut(&r,"observed",1,"model").unwrap();let calls=completion["choices"][0]["message"]["tool_calls"].clone();let call_id=calls[0]["id"].as_str().unwrap().to_string();
+  r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(calls),tool_call_id:None,name:None});
+  r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!(result.to_string()),tool_calls:None,tool_call_id:Some(call_id),name:None});r
+ }
+ #[test] fn observed_json_scalar_results_do_not_need_inference() {
+  let count=observed_request("GET http://localhost:3000/api/records using curl and report the number of records. Do not edit any files.",json!({"data":[{"id":1},{"id":2}]}));
+  assert_eq!(native_http_result_shortcut(&count,"id",1,"model").unwrap()["choices"][0]["message"]["content"],"2");
+  let post=observed_request(r#"POST http://localhost:3000/api/records with JSON {"name":"Record","age":20} using curl. Report only created ID. Do not edit files."#,json!({"id":7,"name":"Record","age":20}));
+  assert_eq!(native_http_result_shortcut(&post,"id",1,"model").unwrap()["choices"][0]["message"]["content"],"7");
+ }
+ #[test] fn uncertain_errors_changed_commands_and_mismatched_records_use_model() {
+  let text=r#"POST http://localhost:3000/api/records with JSON {"name":"Record"} using curl. Report only created ID. Do not edit files."#;
+  for body in [json!({"error":"conflict","id":7,"name":"Record"}),json!({"id":7,"name":"Other"}),json!({"name":"Record"}),json!({"success":false,"id":7,"name":"Record"})] {assert!(native_http_result_shortcut(&observed_request(text,body),"id",1,"model").is_none());}
+  let mut r=observed_request(text,json!({"id":7,"name":"Record"}));r.messages.last_mut().unwrap().content=json!("truncated JSON { id: 7");assert!(native_http_result_shortcut(&r,"id",1,"model").is_none());
+  let mut r=observed_request(text,json!({"id":7,"name":"Record"}));r.messages[2].tool_calls.as_mut().unwrap()[0]["function"]["arguments"]=json!("{\"command\":\"different command\"}");assert!(native_http_result_shortcut(&r,"id",1,"model").is_none());
+ }
+
 }
