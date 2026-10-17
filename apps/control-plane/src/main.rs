@@ -9879,7 +9879,9 @@ fn handle_connection_with_streams(
                         let original=serde_json::to_value(&request_body).expect("validated request serializes");
                         match native_json_api::compile(&original,&payload,&completion["choices"][0]["message"]) {
                             Ok(message)=>{
-                                completion["choices"][0]["finish_reason"]=serde_json::json!(if message["tool_calls"].as_array().is_some_and(|c|!c.is_empty()) {"tool_calls"}else{"stop"});
+                                if message!=completion["choices"][0]["message"] {
+                                    completion["choices"][0]["finish_reason"]=serde_json::json!(if message["tool_calls"].as_array().is_some_and(|c|!c.is_empty()) {"tool_calls"}else{"stop"});
+                                }
                                 completion["choices"][0]["message"]=message;
                             },
                             Err(error)=>{
