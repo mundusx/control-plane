@@ -27,7 +27,8 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
     if vscode_files {
         // Apply to the full-catalog path too: editor context may change while
         // the client continues an existing task. It is not a new user request.
-        payload["messages"].as_array_mut().expect("messages array").insert(0, json!({
+        let index=payload["messages"].as_array().expect("messages array").iter().take_while(|m|m["role"]=="system").count();
+        payload["messages"].as_array_mut().expect("messages array").insert(index, json!({
             "role":"system", "name":"mundusx_workspace_edit_boundaries",
             "content":"Follow the user's requested task and the host's instructions. Opening, focusing, selecting, or browsing an editor file is context only, not authorization to edit it or to change the task's target. Keep each planned mutation bound to its explicit file path; re-read that same path before an existing-file edit and use exact observed old text. Never substitute the currently focused file for a planned target. Use create_file only for a new path. If it reports that the file already exists, read it and make a targeted edit only when the current task requires it; do not recreate or replace its full contents. Preserve unrelated completed files and user edits. For syntax-only repairs, preserve existing behavior and registrations: correct the malformed statement in place rather than deleting it to silence diagnostics. Do not claim a write succeeded unless its tool result confirms success. Use get_errors on all changed files before reporting completion; read the actual source around each actionable error and repair it. When command execution is permitted, use the project build/typecheck and tests for its language, including a startup or functional check where relevant. If commands are forbidden or unavailable, state that runtime verification was not performed. Never treat empty/stale diagnostics as proof of runtime correctness."
         }));
@@ -35,7 +36,8 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
     let terminal = request.tools.as_ref().and_then(Value::as_array).is_some_and(|tools|
         tools.iter().any(|tool| tool["function"]["name"]=="run_in_terminal"));
     if terminal {
-        payload["messages"].as_array_mut().expect("messages array").insert(0,json!({
+        let index=payload["messages"].as_array().expect("messages array").iter().take_while(|m|m["role"]=="system").count();
+        payload["messages"].as_array_mut().expect("messages array").insert(index,json!({
             "role":"system","name":"mundusx_terminal_result_recovery",
             "content":"Use the actual client shell, not the server OS. For Windows JSON APIs prefer assigning the parsed response first: $records = Invoke-RestMethod -Uri 'URL' -Method Get; then filter $records. Windows PowerShell 5.1 ConvertFrom-Json may emit a JSON array as one pipeline object: assign it to a variable before piping its records to Where-Object. Inspect the actual JSON shape before selecting properties; unwrap data only when observed. After a parsing/filtering failure, fetch the raw response without filtering before another attempt. Never repeat an unchanged failed command. Do not assume jq, curl.exe, Python or other optional clients exist: check Get-Command on PowerShell or command -v on POSIX before switching dependencies. When curl.exe is unavailable on Windows, use Invoke-RestMethod. If the observed response already answers the question, answer and stop. Do not replay successful mutations."
         }));
@@ -83,6 +85,17 @@ mod native_payload_tests {
             assert_eq!(payload["messages"][0]["name"],"mundusx_workspace_edit_boundaries");
             assert_eq!(json!(&payload["messages"].as_array().unwrap()[1..]),original);
             assert!(payload["messages"][0]["content"].as_str().unwrap().contains("not authorization"));
+        }
+    }
+    #[test]
+    fn native_policies_preserve_the_stable_host_prefix_before_changing_catalogs() {
+        for tools in [json!([{"function":{"name":"read_file"}},{"function":{"name":"list_dir"}}]),json!([{"function":{"name":"read_file"}},{"function":{"name":"list_dir"}},{"function":{"name":"run_in_terminal"}}])] {
+            let host=json!({"role":"system","content":"Stable host instructions and persistent permissions"});
+            let request:ChatCompletionRequest=serde_json::from_value(json!({"messages":[host.clone(),{"role":"user","content":"Inspect the project"}],"tools":tools})).unwrap();
+            let payload=native_tool_payload(&request);
+            assert_eq!(payload["messages"][0],host);
+            assert_eq!(payload["messages"].as_array().unwrap().last().unwrap()["content"],"Inspect the project");
+            assert!(payload["messages"][1]["name"].as_str().unwrap().starts_with("mundusx_"));
         }
     }
 }
@@ -266,6 +279,8 @@ fn native_coding_tool(name: &str) -> bool {
 fn native_workspace_action(text: &str) -> bool {
     regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|start|build|test|debug|fix|repair|update|edit|create|continue)\s+(?:the\s+|this\s+|our\s+|my\s+)?(?:proj|project|app|application|workspace)\b")
         .is_ok_and(|pattern| pattern.is_match(text))
+        || regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:(?:can|could|would)\s+(?:you|u)\s+)|(?:i\s+(?:need|want)\s+(?:(?:you|u)\s+)?to\s+))?(?:(?:please|pls)\s+)?(?:add|implement|update|fix|repair|remove|delete)\s+[^\n]*\b(?:this|our|my|the|existing)\s+(?:project|workspace|app|application)\b")
+            .is_ok_and(|pattern|pattern.is_match(text))
 }
 
 fn native_http_command_action(text:&str)->bool {
@@ -669,6 +684,23 @@ mod native_turn_tool_policy_tests {
             assert!(!tools.iter().any(|t|t["function"]["name"]=="appmod-create-migration-summary"));
             assert!(!tools.iter().any(|t|t["function"]["name"]=="open_browser_page"));
             assert_eq!(serde_json::to_value(r.messages.iter().filter(|m|m.name.as_deref()!=Some("mundusx_native_coding_policy")).collect::<Vec<_>>()).unwrap(),messages);
+        }
+    }
+    #[test]
+    fn feature_requests_use_focused_coding_tools_for_any_project_language() {
+        for text in ["i need to add course CRUD api in this project please do","Add course CRUD API to this project, following the existing student API conventions.","could you implement a Rust endpoint in our project","please add a Java controller to the application","I want you to update the C++ parser in this project"] {
+            let mut r=project_execution_request(text);let original=r.tools.clone().unwrap();
+            assert!(apply_native_turn_tool_policy(&mut r),"{text}");
+            let tools=r.tools.as_ref().unwrap().as_array().unwrap();
+            for name in ["read_file","list_dir","create_file","run_in_terminal","get_errors"] {
+                assert!(tools.contains(original.as_array().unwrap().iter().find(|t|t["function"]["name"]==name).unwrap()));
+            }
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="mcp_github_create_issue"));
+            assert!(r.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_coding_policy")));
+        }
+        for text in ["Explain how to add courses to this project","Do not add courses to this project","Show an example of adding Rust code to this project"] {
+            let mut r=project_execution_request(text);let before=serde_json::to_value(&r).unwrap();
+            assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
     }
     #[test]
