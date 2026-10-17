@@ -305,7 +305,20 @@ pub fn prepare(payload: Value) -> Value {
     if let Some((_, data)) = source.as_ref() {
         let (roots, fields) = observed_paths(data);
         let schema = &mut tool["function"]["parameters"];
-        schema["properties"]["records_pointer"]["enum"] = json!(roots);
+        schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_call_id");
+        let mut required = vec![json!("select_pointer")];
+        if roots.len() == 1 {
+            schema["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("records_pointer");
+        } else {
+            schema["properties"]["records_pointer"]["enum"] = json!(roots);
+            required.push(json!("records_pointer"));
+        }
         schema["properties"]["match_pointer"]["enum"] = json!(fields);
         schema["properties"]["select_pointer"]["enum"] = json!(fields);
         let (_, _, text) = current(&payload).unwrap();
@@ -320,14 +333,10 @@ pub fn prepare(payload: Value) -> Value {
                 .iter()
                 .any(|p| data.pointer(p).is_some_and(Value::is_array))
         {
-            schema["required"] = json!([
-                "source_call_id",
-                "records_pointer",
-                "match_pointer",
-                "match_value",
-                "select_pointer"
-            ]);
+            required.extend([json!("match_pointer"), json!("match_value")]);
         }
+        schema["required"] = json!(required);
+        tool["function"]["description"]=json!("Query the JSON response that was just fetched. The source is already bound automatically. If records_pointer is not in the schema, the only observed record container is already bound too. Supply the exact observed match field, typed match value, and requested field using only the offered JSON Pointer paths. Return all matches; never silently select the first duplicate. This executes no shell command and makes no HTTP request.");
         // Querying an already-fetched response does not depend on old shell
         // attempts. Keep authority-bearing messages and the matched current
         // fetch exchange, dropping earlier assistant/tool failures.
@@ -541,12 +550,15 @@ pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Va
     {
         return Err("JSON API planner is unavailable for this turn".into());
     }
-    let args: Value = serde_json::from_str(
+    let mut args: Value = serde_json::from_str(
         call["function"]["arguments"]
             .as_str()
             .ok_or("Missing JSON API plan")?,
     )
     .map_err(|_| "Invalid JSON API plan")?;
+    if !args.is_object() {
+        return Err("JSON API plan must be an object".into());
+    }
     if name == FETCH {
         terminal(original).ok_or("Compatible client terminal is required")?;
         let arguments = fetch_args(&args, windows(original).ok_or("Unknown client OS")?)?;
@@ -555,8 +567,12 @@ pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Va
         )
     } else {
         let (id, data) = observed(original).ok_or("No complete observed JSON response")?;
-        if args["source_call_id"] != id {
+        if args.get("source_call_id").is_some_and(|value| value != id) {
             return Err("JSON source call does not match observed result".into());
+        }
+        let (roots, _) = observed_paths(&data);
+        if args.get("records_pointer").is_none() && roots.len() == 1 {
+            args["records_pointer"] = json!(roots[0]);
         }
         let result = match query(&data, &args) {
             Ok(v) => v,
@@ -801,7 +817,21 @@ mod tests {
         p["messages"].as_array_mut().unwrap().insert(1,json!({"role":"assistant","content":"old failed pipeline with invented /value wrapper"}));
         let prepared = prepare(p);
         let schema = &prepared["tools"][0]["function"]["parameters"];
-        assert_eq!(schema["properties"]["records_pointer"]["enum"], json!([""]));
+        assert!(schema["properties"].get("records_pointer").is_none());
+        assert!(schema["properties"].get("source_call_id").is_none());
+        let simple = call(
+            QUERY,
+            json!({"match_pointer":"/name","match_value":"David","select_pointer":"/age"}),
+        );
+        assert_eq!(
+            compile(
+                &fetched(r#"[{"name":"David","age":40}]"#),
+                &prepared,
+                &simple
+            )
+            .unwrap()["content"],
+            "40"
+        );
         assert_eq!(
             schema["properties"]["select_pointer"]["enum"],
             json!(["", "/age", "/name"])
