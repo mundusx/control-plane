@@ -40,7 +40,7 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
             "content":"Use the actual client shell, not the server OS. For Windows JSON APIs prefer assigning the parsed response first: $records = Invoke-RestMethod -Uri 'URL' -Method Get; then filter $records. Windows PowerShell 5.1 ConvertFrom-Json may emit a JSON array as one pipeline object: assign it to a variable before piping its records to Where-Object. Inspect the actual JSON shape before selecting properties; unwrap data only when observed. After a parsing/filtering failure, fetch the raw response without filtering before another attempt. Never repeat an unchanged failed command. Do not assume jq, curl.exe, Python or other optional clients exist: check Get-Command on PowerShell or command -v on POSIX before switching dependencies. When curl.exe is unavailable on Windows, use Invoke-RestMethod. If the observed response already answers the question, answer and stop. Do not replay successful mutations."
         }));
     }
-    payload
+    crate::native_json_api::prepare(payload)
 }
 
 #[cfg(test)]
@@ -328,8 +328,10 @@ pub fn native_terminal_failure_stop(request:&ChatCompletionRequest,id:&str,creat
         let args:Value=serde_json::from_str(call["function"]["arguments"].as_str()?).ok()?;
         let command=args["command"].as_str()?.trim().to_owned();
         let output=message.content.as_str()?.to_ascii_lowercase();
-        let failed=output.contains("exit code 1") || output.contains("exit code: 1")
-            || output.contains("expandpropertynotfound") || output.contains("commandnotfoundexception");
+        let exit=regex::Regex::new(r"\bexit\s*code\s*:?\s*(-?\d+)\b").ok()?
+            .captures(&output).and_then(|c|c[1].parse::<i64>().ok());
+        let failed=exit.map(|code|code!=0).unwrap_or_else(||
+            output.contains("expandpropertynotfound") || output.contains("commandnotfoundexception"));
         if !failed {previous=None;repeats=0;continue;}
         repeats=if previous.as_ref()==Some(&command) {repeats+1}else{1};previous=Some(command);
     }
@@ -363,6 +365,14 @@ mod terminal_failure_stop_tests {
         }
         let mut r=request(&[("a","exit code 1"),("a","exit code 1")]);
         r.messages.push(serde_json::from_value(json!({"role":"user","content":"Try a different request"})).unwrap());
+        assert!(native_terminal_failure_stop(&r,"id",1,"model").is_none());
+    }
+    #[test] fn every_nonzero_exit_is_bounded_but_successful_error_text_is_not_failure() {
+        for code in [2,127,-1] {
+            let text=format!("Exit code: {code}");let r=request(&[("a",&text),("a",&text)]);
+            assert!(native_terminal_failure_stop(&r,"id",1,"model").is_some());
+        }
+        let r=request(&[("a","Exit code: 0\nExpandPropertyNotFound"),("a","Exit code: 0\nExpandPropertyNotFound")]);
         assert!(native_terminal_failure_stop(&r,"id",1,"model").is_none());
     }
 }

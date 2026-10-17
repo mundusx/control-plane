@@ -3,6 +3,7 @@ mod capability_policy;
 mod chat_api_keys;
 mod native_stream;
 mod native_edit_guard;
+mod native_json_api;
 mod qualification;
 mod vision_probe;
 mod global_skills;
@@ -9489,7 +9490,8 @@ fn handle_connection_with_streams(
                     if let Err(error)=chat_gateway::validate_image_inputs(&request_body) {
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
-                    if let Some(completion) = chat_gateway::native_http_parse_recovery(&request_body, &completion_id, created, public_model)
+                    if let Some(completion) = native_json_api::failure_completion(&request_body, &completion_id, created, public_model)
+                        .or_else(||chat_gateway::native_http_parse_recovery(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_terminal_failure_stop(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_result_shortcut(&request_body, &completion_id, created, public_model))
@@ -9747,6 +9749,7 @@ fn handle_connection_with_streams(
                     let mut streamed_content = String::new();
                     let mut native_stream = native_stream::NativeStream::default();
                     let mut native_delta_decoder = native_stream::DeltaDecoder::default();
+                    let structured_json_turn=native_tool_turn && native_json_api::active(&chat_gateway::native_tool_payload(&request_body));
                     let completed_result = if live_stream_job {
                         chat_gateway::wait_for_job_with_stream(
                             &state,
@@ -9756,6 +9759,9 @@ fn handle_connection_with_streams(
                             |delta| {
                                 let event = match delta {
                                     Some(delta) if native_tool_turn => {
+                                        // Private plans and their unverified prose must never
+                                        // reach the client before compilation to host tools.
+                                        if structured_json_turn {return stream.write_all(chat_gateway::sse_keep_alive().as_bytes()).and_then(|_|stream.flush()).map_err(|e|format!("chat stream disconnected: {e}"));}
                                         let deltas = native_delta_decoder.push(delta)?;
                                         if deltas.is_empty() {
                                             chat_gateway::sse_keep_alive().to_string()
@@ -9859,7 +9865,7 @@ fn handle_connection_with_streams(
                     let raw_content = completed.output.as_deref().unwrap_or_default();
                     let finish_reason = chat_gateway::finish_reason_for_job(&completed);
                     let content = chat_gateway::strip_generation_limit_marker(raw_content);
-                    let completion = chat_gateway::completion_response(
+                    let mut completion = chat_gateway::completion_response(
                         &completion_id,
                         created,
                         public_model,
@@ -9870,7 +9876,21 @@ fn handle_connection_with_streams(
                     );
                     if native_tool_turn {
                         let payload=chat_gateway::native_tool_payload(&request_body);
-                        if let Err(error)=native_edit_guard::validate(&payload,&completion["choices"][0]["message"]) {
+                        let original=serde_json::to_value(&request_body).expect("validated request serializes");
+                        match native_json_api::compile(&original,&payload,&completion["choices"][0]["message"]) {
+                            Ok(message)=>{
+                                if message!=completion["choices"][0]["message"] {
+                                    completion["choices"][0]["finish_reason"]=serde_json::json!(if message["tool_calls"].as_array().is_some_and(|c|!c.is_empty()) {"tool_calls"}else{"stop"});
+                                }
+                                completion["choices"][0]["message"]=message;
+                            },
+                            Err(error)=>{
+                                if live_stream_job {live_streams.lock().expect("live stream registry lock").remove(&record.job_id);}
+                                if wants_stream {let _=stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"native_json_plan_invalid").as_bytes());return;}
+                                return write_chat_error(&mut stream,"502 Bad Gateway",&error);
+                            }
+                        }
+                        if let Err(error)=native_edit_guard::validate(&original,&completion["choices"][0]["message"]) {
                             if live_stream_job {live_streams.lock().expect("live stream registry lock").remove(&record.job_id);}
                             if wants_stream {
                                 let _=stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"native_response_validation_failed").as_bytes());
