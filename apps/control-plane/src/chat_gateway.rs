@@ -304,11 +304,21 @@ pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, cre
             || ["example", "create ", "delete ", "update ", "replace ", "run_in_terminal"].iter().any(|term|lower.contains(term)) {return None;}
         text[5..].trim_start()
     };
-    let path = if let Some(quote)=rest.chars().next().filter(|c|matches!(c,'"'|'\''|'`')) {
+    let leading = if let Some(quote)=rest.chars().next().filter(|c|matches!(c,'"'|'\''|'`')) {
         rest[quote.len_utf8()..].split_once(quote)?.0
     }else{rest.split_whitespace().next()?.trim_end_matches(['.',',',':',';'])};
-    if edit.is_some() && !path.rsplit(['/', '\\']).next()?.contains('.') {return None;}
     let root = native_workspace_root(request)?;
+    let path=if edit.is_none() || leading.rsplit(['/', '\\']).next()?.contains('.') {leading.to_owned()}
+    else {
+        // A project continuation can explicitly request a relative file read.
+        // Resolve only that user-provided path, never the active editor file.
+        let pattern=regex::Regex::new(r"(?i)\bread\s+(?:(?:the\s+)?(?:current|existing)\s+)?([A-Za-z0-9_./\\:-]+\.[A-Za-z0-9_-]+)").ok()?;
+        let reads:Vec<_>=pattern.captures_iter(text).map(|c|c[1].to_owned()).collect();
+        if reads.len()!=1 {return None;}
+        let target=&reads[0];
+        if target.starts_with('/') || target.as_bytes().get(1)==Some(&b':') {target.clone()}
+        else {format!("{}/{}",root.trim_end_matches(['/', '\\']),target)}
+    };
     let normalized = path.replace('\\',"/"); let root = root.replace('\\',"/");
     let comparable = if root.as_bytes().get(1) == Some(&b':') { normalized.to_ascii_lowercase() } else { normalized.clone() };
     let root = if root.as_bytes().get(1) == Some(&b':') { root.to_ascii_lowercase() } else { root };
@@ -551,6 +561,20 @@ mod native_turn_tool_policy_tests {
         assert_eq!(r.messages.last().unwrap().name.as_deref(),Some("mundusx_diagnostic_scope"));
         assert!(apply_native_turn_tool_policy(&mut unknown));
         assert!(!unknown.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_diagnostic_scope")));
+    }
+    #[test]
+    fn project_continuations_read_only_explicit_relative_targets() {
+        let mut r=directory_request(r"- D:\sample");
+        r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"function":{"name":"replace_string_in_file"}}));
+        r.tools.as_mut().unwrap()[0]["function"]["parameters"]=json!({"type":"object","properties":{"filePath":{"type":"string"},"startLine":{"type":"number"},"endLine":{"type":"number"}},"required":["filePath","startLine","endLine"]});
+        r.messages.last_mut().unwrap().content=json!("<editorContext>D:/sample/other.js</editorContext><userRequest>Update the project. Read the current server.js lines 1 through 400, then wire the router.</userRequest>");
+        let answer=native_inspection_shortcut(&r,"read",1,"model").unwrap();
+        let args:Value=serde_json::from_str(answer["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["filePath"].as_str().unwrap().replace('\\',"/"),"D:/sample/server.js");assert_eq!(args["endLine"],400);
+        for text in ["Update the project; use the current editor", "Update the project. Read ../secret.js", "Update the project. Read D:/outside/file.js", "Update the project. Read server.js and read other.js", "Update the project. Read server.js but do not read it"] {
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{text}</userRequest>"));
+            assert!(native_inspection_shortcut(&r,"read",1,"model").is_none(),"{text}");
+        }
     }
     #[test]
     fn native_initial_read_honors_explicit_later_line_ranges() {
