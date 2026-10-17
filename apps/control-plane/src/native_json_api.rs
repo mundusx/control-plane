@@ -453,7 +453,7 @@ fn fetch_args(args: &Value, win: bool) -> Result<Value, String> {
             .map(|(k, v)| format!("{}={}", quote(k, true), quote(v, true)))
             .collect::<Vec<_>>()
             .join(";");
-        format!("$ErrorActionPreference = 'Stop'; $mundusxResponse = Invoke-WebRequest -UseBasicParsing -Uri {} -Method Get -Headers @{{{headers}}} -TimeoutSec 30; Write-Output $mundusxResponse.Content",quote(address,true))
+        format!("$ErrorActionPreference = 'Stop'; $mundusxResponse = Invoke-WebRequest -UseBasicParsing -Uri {} -Method Get -Headers @{{{headers}}} -TimeoutSec 30; Write-Output ([Text.Encoding]::UTF8.GetString($mundusxResponse.RawContentStream.ToArray()).TrimStart([char]0xfeff))",quote(address,true))
     } else {
         let flags = headers
             .iter()
@@ -529,6 +529,20 @@ fn query(data: &Value, args: &Value) -> Result<Value, String> {
 }
 /// Compile only private calls selected for this exact request. All public
 /// tool calls retain the host's original validation and execution lifecycle.
+fn mentions(text: &str, value: &Value) -> bool {
+    let needle = value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string());
+    if needle.is_empty() {
+        return text.contains("\"\"") || text.contains("''");
+    }
+    regex::Regex::new(&format!(
+        r"(?:^|[^\p{{L}}\p{{N}}_]){}(?:$|[^\p{{L}}\p{{N}}_])",
+        regex::escape(&needle)
+    ))
+    .is_ok_and(|r| r.is_match(text))
+}
 pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Value, String> {
     let Some(calls) = message["tool_calls"].as_array() else {
         return Ok(message.clone());
@@ -540,6 +554,42 @@ pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Va
         return Ok(message.clone());
     }
     if calls.len() != 1 {
+        // Queries are pure evaluation over one observed response. Do not
+        // reject a whole turn merely because the model also repeated an old
+        // lookup. Keep only values explicitly requested by the latest user.
+        if calls.len() <= 16 && calls.iter().all(|c| c["function"]["name"] == QUERY) {
+            let (_, _, text) = current(original).ok_or("Missing current API lookup")?;
+            let mut seen = std::collections::BTreeSet::new();
+            let mut results = vec![];
+            for call in calls {
+                let args: Value =
+                    serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or(""))
+                        .map_err(|_| "Invalid JSON query arguments")?;
+                if !args.get("match_value").is_some_and(|v| mentions(text, v)) {
+                    continue;
+                }
+                if !seen.insert(args.to_string()) {
+                    continue;
+                }
+                results.push(
+                    compile(
+                        original,
+                        prepared,
+                        &json!({"role":"assistant","content":null,"tool_calls":[call]}),
+                    )?["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+            }
+            if results.is_empty() {
+                return Err(
+                    "No query plan matches the current request; older lookups were not repeated"
+                        .into(),
+                );
+            }
+            return Ok(json!({"role":"assistant","content":results.join("\n")}));
+        }
         return Err("JSON API plans require one operation per turn".into());
     }
     let call = &calls[0];
@@ -567,6 +617,15 @@ pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Va
         )
     } else {
         let (id, data) = observed(original).ok_or("No complete observed JSON response")?;
+        let (_, _, text) = current(original).ok_or("Missing current API lookup")?;
+        let contextual = regex::Regex::new(r"(?i)\b(his|her|their|that|same|its)\b")
+            .unwrap()
+            .is_match(text);
+        if args.get("match_value").is_some_and(|v| !mentions(text, v)) && !contextual {
+            return Err(
+                "The query value is not in the current request; lookup was not verified".into(),
+            );
+        }
         if args.get("source_call_id").is_some_and(|value| value != id) {
             return Err("JSON source call does not match observed result".into());
         }
@@ -587,6 +646,10 @@ pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Va
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| value.to_string())
+        } else if result["matches"] == 0 {
+            "No matching record was found in the fetched response.".to_owned()
+        } else if result["matches"] == 1 && result["missing_selected_fields"] == 1 {
+            "The matching record does not contain the requested field.".to_owned()
         } else {
             format!("API lookup result: {result}")
         };
@@ -746,7 +809,11 @@ mod tests {
             "run_in_terminal"
         );
         assert!(!fetch.to_string().contains(FETCH));
-        let p = fetched(r#"{"result":[{"key":"x-8","price":19.5}]}"#);
+        let mut p = fetched(r#"{"result":[{"key":"x-8","price":19.5}]}"#);
+        p["messages"][0]["content"] = json!(p["messages"][0]["content"].as_str().unwrap().replace(
+            "whats the age of David? pls find it in api",
+            "find price for key x-8 via API"
+        ));
         let prepared = prepare(p.clone());
         assert_eq!(prepared["tools"][0]["function"]["name"], QUERY);
         let args = json!({"source_call_id":"fetch-1","records_pointer":"/result","match_pointer":"/key","match_value":"x-8","select_pointer":"/price"});
@@ -806,6 +873,33 @@ mod tests {
         let args:Value=serde_json::from_str(r#"{"records_pointer":"","match_pointer":"/id","match_value":18446744073709551617001,"select_pointer":"/value"}"#).unwrap();
         assert_eq!(query(&data, &args).unwrap()["values"], json!(["exact"]));
         assert!(data.to_string().contains("18446744073709551617001"));
+    }
+    #[test]
+    fn batched_old_lookups_are_not_executed_or_confused_with_a_current_missing_id() {
+        let mut p =
+            fetched(r#"{"payload":{"records":[{"recordKey":"STU-007","metrics":{"score":91}}]}}"#);
+        p["messages"][0]["content"] = json!(p["messages"][0]["content"].as_str().unwrap().replace(
+            "whats the age of David? pls find it in api",
+            "Using the API, find score for recordKey STU-999"
+        ));
+        let old = call(
+            QUERY,
+            json!({"match_pointer":"/recordKey","match_value":"STU-007","select_pointer":"/metrics/score"}),
+        );
+        let requested = call(
+            QUERY,
+            json!({"match_pointer":"/recordKey","match_value":"STU-999","select_pointer":"/metrics/score"}),
+        );
+        let batch = json!({"role":"assistant","content":null,"tool_calls":[old["tool_calls"][0],requested["tool_calls"][0],requested["tool_calls"][0]]});
+        let result = compile(&p, &prepare(p.clone()), &batch).unwrap();
+        assert_eq!(
+            result["content"],
+            "No matching record was found in the fetched response."
+        );
+        assert!(result["tool_calls"].is_null());
+        assert!(compile(&p, &prepare(p.clone()), &old).is_err());
+        assert!(!mentions("id 1050", &json!(105)));
+        assert!(mentions("id 105", &json!(105)));
     }
     #[test]
     fn query_paths_are_observed_enums_and_old_failures_do_not_poison_query_context() {
@@ -912,7 +1006,7 @@ mod tests {
                         let mut bytes = [0; 4096];
                         let n = stream.read(&mut bytes).unwrap();
                         assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("GET /records"));
-                        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+                        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
