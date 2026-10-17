@@ -1154,6 +1154,10 @@ pub struct ChatCompletionRequest {
     pub tool_choice: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    // Gateway-owned snapshot only. Public clients cannot inject a second
+    // catalog or bypass the registered tools via a JSON extension field.
+    #[serde(skip)]
+    pub native_tool_catalog: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

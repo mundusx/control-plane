@@ -17,6 +17,11 @@ pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]
 /// for numeric generation parameters. Message nulls (e.g. tool-call content)
 /// remain intact; only optional top-level fields are omitted.
 pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value {
+    native_tool_payload_with_discovery(request,
+        std::env::var("MUNDUSX_NATIVE_TOOL_DISCOVERY").is_ok_and(|v|v=="1"))
+}
+
+fn native_tool_payload_with_discovery(request:&ChatCompletionRequest,enabled:bool)->Value {
     let mut payload = serde_json::to_value(request).expect("validated request serializes");
     payload.as_object_mut().expect("request object").retain(|_, value| !value.is_null());
     payload["stream"] = serde_json::json!(false);
@@ -31,6 +36,20 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
             "role":"system", "name":"mundusx_workspace_edit_boundaries",
             "content":"Follow the user's requested task and the host's instructions. Opening, focusing, selecting, or browsing an editor file is context only, not authorization to edit it or to change the task's target. Keep each planned mutation bound to its explicit file path; re-read that same path before an existing-file edit and use exact observed old text. Never substitute the currently focused file for a planned target. Use create_file only for a new path. If it reports that the file already exists, read it and make a targeted edit only when the current task requires it; do not recreate or replace its full contents. Preserve unrelated completed files and user edits. For syntax-only repairs, preserve existing behavior and registrations: correct the malformed statement in place rather than deleting it to silence diagnostics. Do not claim a write succeeded unless its tool result confirms success. Use get_errors on all changed files before reporting completion; read the actual source around each actionable error and repair it. When command execution is permitted, use the project build/typecheck and tests for its language, including a startup or functional check where relevant. If commands are forbidden or unavailable, state that runtime verification was not performed. Never treat empty/stale diagnostics as proof of runtime correctness."
         }));
+    }
+    let catalog=request.native_tool_catalog.as_ref().or(request.tools.as_ref()).and_then(Value::as_array);
+    let eligible_choice=request.native_tool_catalog.is_some() || request.tool_choice.as_ref().is_none_or(|c|c.as_str()==Some("auto"));
+    let commands_removed=request.native_tool_catalog.is_some() && request.tools.as_ref().and_then(Value::as_array)
+        .is_some_and(|tools|!tools.iter().any(|t|t["function"]["name"].as_str().is_some_and(native_terminal_tool)));
+    if enabled && vscode_files && eligible_choice && !commands_removed {
+        if let Some(catalog)=catalog.filter(|tools|tools.len()>32) {
+            let active:Vec<Value>=catalog.iter().filter(|t|t["function"]["name"].as_str().is_some_and(native_coding_tool))
+                .map(|t|t["function"]["name"].clone()).collect();
+            // Keep the registered universe for final gateway validation. The
+            // updated worker alone consumes this private discovery hint.
+            payload["tools"]=json!(catalog);
+            payload["mundusx_tool_discovery"]=json!({"active_tools":active});
+        }
     }
     payload
 }
@@ -61,6 +80,32 @@ mod native_payload_tests {
         assert_eq!(payload["max_tokens"],512);
         assert!((payload["temperature"].as_f64().unwrap() - 0.1).abs() < 1e-6);
         assert!((payload["top_p"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    }
+    fn discovery_request()->ChatCompletionRequest {
+        let mut tools:Vec<Value>=["read_file","list_dir","run_in_terminal","create_file"].iter().map(|n|json!({"type":"function","function":{"name":n,"parameters":{"type":"object"}}})).collect();
+        tools.extend((0..40).map(|i|json!({"type":"function","function":{"name":format!("specialized_{i}"),"parameters":{"type":"object","properties":{"original":{"type":"integer"}}}}})));
+        serde_json::from_value(json!({"tools":tools,"messages":[{"role":"user","content":"<workspace_info>following folders:\n- D:\\sample\n</workspace_info><userRequest>run this proj</userRequest>"}]})).unwrap()
+    }
+    #[test]
+    fn discovery_is_opt_in_and_preserves_original_registered_catalog() {
+        let mut r=discovery_request();let original=r.tools.clone().unwrap();
+        assert!(apply_native_turn_tool_policy(&mut r));
+        let legacy=native_tool_payload_with_discovery(&r,false);
+        assert_eq!(legacy["tools"].as_array().unwrap().len(),4);assert!(legacy.get("mundusx_tool_discovery").is_none());
+        let enabled=native_tool_payload_with_discovery(&r,true);
+        assert_eq!(enabled["tools"],original);assert_eq!(enabled["mundusx_tool_discovery"]["active_tools"].as_array().unwrap().len(),4);
+        assert!(serde_json::to_value(&r).unwrap().get("native_tool_catalog").is_none());
+    }
+    #[test]
+    fn discovery_does_not_reopen_forbidden_tools_or_override_explicit_choice() {
+        let mut r=discovery_request();r.messages[0].content=json!("<workspace_info>following folders:\n- D:\\sample\n</workspace_info><userRequest>run this proj. Use file tools only; do not run terminal commands.</userRequest>");
+        assert!(apply_native_turn_tool_policy(&mut r));let p=native_tool_payload_with_discovery(&r,true);
+        assert!(p.get("mundusx_tool_discovery").is_none());assert!(!p["tools"].as_array().unwrap().iter().any(|t|t["function"]["name"]=="run_in_terminal"));
+        for choice in [json!("none"),json!({"type":"function","function":{"name":"run_in_terminal"}})] {
+            let mut r=discovery_request();r.tool_choice=Some(choice);assert!(native_tool_payload_with_discovery(&r,true).get("mundusx_tool_discovery").is_none());
+        }
+        let mut value=serde_json::to_value(discovery_request()).unwrap();value["native_tool_catalog"]=json!([{"function":{"name":"injected"}}]);
+        let r:ChatCompletionRequest=serde_json::from_value(value).unwrap();assert!(r.native_tool_catalog.is_none());
     }
     #[test]
     fn browsing_context_does_not_rebind_recorded_tool_targets() {
@@ -207,6 +252,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         (1..8).contains(&reads) && !wrote && last_inspection && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
     } else {false};
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
+    if coding && request.native_tool_catalog.is_none() {request.native_tool_catalog=request.tools.clone();}
     request.tools = Some(Value::Array(selected));
     if !continuation || pending_after_read { request.tool_choice = Some(json!("required")); }
     if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {

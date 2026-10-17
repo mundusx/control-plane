@@ -1775,6 +1775,9 @@ impl ControlPlaneState {
             let mut requirements = Vec::new();
             if images {requirements.push(CapabilityRequirement {capability:"vision".into(),weight:100,minimum_score:60,required:true});}
             if tools || !images {requirements.push(CapabilityRequirement {capability:"native_tool_calls_v1".into(),weight:100,minimum_score:60,required:true});}
+            if body.as_ref().is_some_and(|b|b.get("mundusx_tool_discovery").is_some()) {
+                requirements.push(CapabilityRequirement {capability:"native_tool_discovery_v1".into(),weight:100,minimum_score:60,required:true});
+            }
             return requirements;
         }
         let step_requirements = Self::graph_workload(job, active_graph_node_id)
@@ -2009,7 +2012,7 @@ impl ControlPlaneState {
             if requirement.capability == "vision" {
                 if !model.supports_vision {return false;} continue;
             }
-            if requirement.capability == "native_tool_calls_v1" {
+            if matches!(requirement.capability.as_str(),"native_tool_calls_v1"|"native_tool_discovery_v1") {
                 let node_supports_native_tools =
                     node.worker_health.as_ref().is_some_and(|health| {
                         health.capabilities.supports_tools
@@ -2017,7 +2020,7 @@ impl ControlPlaneState {
                                 .capabilities
                                 .supported_tools
                                 .iter()
-                                .any(|tool| tool == "native_tool_calls_v1")
+                                .any(|tool| tool == &requirement.capability)
                     });
                 if !node_supports_native_tools {
                     return false;
@@ -2081,7 +2084,7 @@ impl ControlPlaneState {
                 let mut weighted_score = 0_u32;
                 let mut total_weight = 0_u32;
                 for requirement in &requirements {
-                    let capability_score = if requirement.capability == "native_tool_calls_v1" {
+                    let capability_score = if matches!(requirement.capability.as_str(),"native_tool_calls_v1"|"native_tool_discovery_v1") {
                         // Native tool support is actively verified and advertised by
                         // the worker at node scope. Use that same authority for
                         // scoring so telemetry cannot report zero for an eligible
@@ -2092,7 +2095,7 @@ impl ControlPlaneState {
                                     .capabilities
                                     .supported_tools
                                     .iter()
-                                    .any(|tool| tool == "native_tool_calls_v1")
+                                    .any(|tool| tool == &requirement.capability)
                             {
                                 100
                             } else {
@@ -10964,6 +10967,25 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.starts_with("capability_fit:native_tool_calls_v1:100;")));
+    }
+
+    #[test]
+    fn deferred_native_turn_waits_for_a_discovery_capable_worker() {
+        let mut state=ControlPlaneState::default();state.register(vllm_registration("node-vllm"));
+        let mut heartbeat=ready_vllm_heartbeat("node-vllm","1");
+        heartbeat.worker_health.capabilities.supports_tools=true;
+        heartbeat.worker_health.capabilities.supported_tools=vec!["native_tool_calls_v1".into()];
+        state.heartbeat(heartbeat.clone(),"1".into());
+        let mut request=classification_request(concat!("__MUNDUSX_OPENAI_TOOL_TURN_V1__",
+            r#"{"messages":[{"role":"user","content":"inspect files"}],"tools":[{"type":"function","function":{"name":"read_file"}}],"mundusx_tool_discovery":{"active_tools":["read_file"]}}"#));
+        request.execution_mode=JobExecutionMode::Single;request.model=None;
+        let submitted=state.submit_job(request,"2".into());
+        assert!(state.claim_job("node-vllm","3".into()).job.is_none(),"older workers must not receive discovery metadata");
+        heartbeat.worker_health.capabilities.supported_tools.push("native_tool_discovery_v1".into());
+        state.heartbeat(heartbeat,"4".into());
+        let decision=state.best_scheduler_decision_for_job(&submitted);
+        assert!(state.claim_job("node-vllm","5".into()).job.is_some());
+        assert!(decision.reasons.iter().any(|r|r.starts_with("capability_fit:native_tool_discovery_v1:100;")));
     }
 
     #[test]
