@@ -223,6 +223,11 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
     if !continuation || pending_after_read { request.tool_choice = Some(json!("required")); }
+    if inspection && !coding && !git_alias && !request.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_current_inspection_scope")) {
+        request.messages.push(crate::contracts::ChatMessage {role:"system".into(),
+            content:json!("Complete only the latest userRequest. This is an inspection task, not authorization to resume earlier unfinished coding work. Preserve persistent user preferences, but do not continue an older feature request after answering this inspection question. Use the registered read tools only as needed for the latest question. When observed source answers it, return that answer and stop. Do not create files, edit files, run commands, or explore unrelated paths for an older task."),
+            tool_calls:None,tool_call_id:None,name:Some("mundusx_current_inspection_scope".into())});
+    }
     if coding && !http_action && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
         let index = request.messages.iter().take_while(|m| m.role=="system").count();
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
@@ -607,6 +612,22 @@ mod native_turn_tool_policy_tests {
         }
     }
     #[test]
+    fn current_inspection_does_not_reactivate_an_older_coding_task() {
+        let mut r=request(r"Read D:\sample3\server.js using read_file and tell me the configured default port. Do not edit any files or run terminal commands.");
+        r.messages.insert(1,crate::contracts::ChatMessage {role:"user".into(),content:json!("<userRequest>Add course CRUD API</userRequest>"),tool_calls:None,tool_call_id:None,name:None});
+        let original=r.messages.clone();
+        assert!(apply_native_turn_tool_policy(&mut r));
+        assert_eq!(serde_json::to_value(&r.messages[..original.len()]).unwrap(),serde_json::to_value(&original).unwrap());
+        assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().all(|t|matches!(t["function"]["name"].as_str(),Some("read_file"|"list_dir"|"file_search"|"grep_search"))));
+        assert!(r.messages.last().unwrap().content.as_str().unwrap().contains("not authorization to resume earlier"));
+        let mut continuation=request(r"Read D:\sample3\server.js using read_file and tell me the configured default port. Do not edit any files or run terminal commands.");
+        continuation.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"read1","type":"function","function":{"name":"read_file","arguments":"{}"}}])),tool_call_id:None,name:None});
+        continuation.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("const port = process.env.PORT || 3000;"),tool_calls:None,tool_call_id:Some("read1".into()),name:None});
+        assert!(apply_native_turn_tool_policy(&mut continuation));
+        assert_ne!(continuation.tool_choice,Some(json!("required")));
+        assert_eq!(continuation.messages.last().unwrap().name.as_deref(),Some("mundusx_current_inspection_scope"));
+    }
+    #[test]
     fn explicit_inspection_uses_original_registered_schemas() {
         for text in [r"List the files in D:\sample. Use a file tool, do not run terminal commands.", r"Read D:\sample\file.rs. Do not change files.", r"Find the definition of factorial in D:\sample."] {
             let mut r = request(text); let original = r.tools.clone().unwrap();
@@ -726,7 +747,8 @@ mod native_turn_tool_policy_tests {
         assert!(apply_native_turn_tool_policy(&mut r));
         assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap().len(), 4);
         assert_eq!(r.tool_choice, None);
-        assert_eq!(serde_json::to_value(&r.messages).unwrap(), messages);
+        assert_eq!(serde_json::to_value(&r.messages[..r.messages.len()-1]).unwrap(), messages);
+        assert_eq!(r.messages.last().unwrap().name.as_deref(),Some("mundusx_current_inspection_scope"));
     }
     #[test]
     fn unmatched_tool_results_do_not_change_the_catalog() {
