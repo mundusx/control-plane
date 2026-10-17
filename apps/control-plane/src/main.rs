@@ -9496,6 +9496,7 @@ fn handle_connection_with_streams(
                         .or_else(||chat_gateway::native_terminal_failure_stop(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_result_shortcut(&request_body, &completion_id, created, public_model))
+                        .or_else(||native_json_api::explicit_fetch_completion(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_git_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model))

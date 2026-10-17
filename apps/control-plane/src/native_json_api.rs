@@ -23,6 +23,13 @@ fn current(payload: &Value) -> Option<(&[Value], usize, &str)> {
 }
 fn read_intent(text: &str) -> bool {
     let text = text.to_lowercase();
+    let instruction_text = regex::Regex::new(r#""(?:\\.|[^"\\])*"|'[^']*'"#)
+        .unwrap()
+        .replace_all(&text, " ");
+    let instruction_text=regex::Regex::new(r"(?i)(?:do not|don't)\s+(?:edit|modify|change|write)(?:\s+any)?\s+files?\b|without\s+(?:editing|modifying|changing|writing)(?:\s+any)?\s+files?\b").unwrap().replace_all(&instruction_text," ").into_owned();
+    let abstain = regex::Regex::new(r"(?i)\b(?:do not|don't|never|without)\b")
+        .unwrap()
+        .is_match(&instruction_text);
     let words: Vec<&str> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -30,37 +37,112 @@ fn read_intent(text: &str) -> bool {
     let api = words.iter().any(|w| matches!(*w, "api" | "endpoint"))
         || text.contains("http://")
         || text.contains("https://");
-    api && !words.iter().any(|w| {
-        matches!(
-            *w,
-            "create"
-                | "post"
-                | "put"
-                | "patch"
-                | "delete"
-                | "update"
-                | "build"
-                | "implement"
-                | "code"
-                | "fix"
-                | "write"
-                | "explain"
-        )
-    }) && words.iter().any(|w| {
-        matches!(
-            *w,
-            "what"
-                | "whats"
-                | "which"
-                | "find"
-                | "get"
-                | "fetch"
-                | "lookup"
-                | "show"
-                | "check"
-                | "retrieve"
-        )
-    })
+    let denied = [
+        "do not fetch",
+        "don't fetch",
+        "do not call",
+        "don't call",
+        "do not run",
+        "don't run",
+        "do not execute",
+        "don't execute",
+        "without calling",
+        "without fetching",
+        "without terminal",
+        "no terminal",
+        "no network",
+        "just explain",
+        "only explain",
+    ]
+    .iter()
+    .any(|s| instruction_text.contains(s));
+    let mutation=regex::Regex::new(r"(?i)(?:^(?:(?:please|pls|can you|could you|would you|ok|okay)\s+)*|\b(?:and|then|please|pls|you|u)\s+)(?:create|post|put|patch|delete|update|build|implement|fix|write|generate|edit|change|modify|remove|execute)\b").unwrap().is_match(&instruction_text);
+    let conceptual=regex::Regex::new(r"(?i)^(?:explain\b|(?:what is|what's|whats)\s+(?:(?:an?|the)\s+)?api[?.! ]*$)|\b(?:get|find|show|give|generate)\s+(?:me\s+)?(?:some\s+|a\s+)?code\b").unwrap().is_match(&instruction_text);
+    api && !denied
+        && !abstain
+        && !mutation
+        && !conceptual
+        && words.iter().any(|w| {
+            matches!(
+                *w,
+                "what"
+                    | "whats"
+                    | "which"
+                    | "find"
+                    | "get"
+                    | "fetch"
+                    | "lookup"
+                    | "show"
+                    | "check"
+                    | "retrieve"
+            )
+        })
+}
+fn explicit_read_url(payload: &Value) -> Option<String> {
+    let (messages, _, text) = current(payload)?;
+    if !read_intent(text) {
+        return None;
+    }
+    let options = regex::Regex::new(
+        r"(?i)\b(authorization|headers?|bearer|token|cookies?|credentials?)\b|api[_ -]?key",
+    )
+    .ok()?;
+    if messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| {
+            m["content"]
+                .as_str()?
+                .split_once("<userRequest>")?
+                .1
+                .split_once("</userRequest>")
+                .map(|v| v.0)
+        })
+        .any(|s| options.is_match(s))
+    {
+        return None;
+    }
+    let pattern = regex::Regex::new(r#"https?://[^\s<>"']+"#).ok()?;
+    let values: Vec<_> = pattern.find_iter(text).collect();
+    if values.len() != 1 {
+        return None;
+    }
+    let address = values[0]
+        .as_str()
+        .trim_end_matches([',', '.', ';', ')', ']']);
+    let url = url::Url::parse(address).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || address.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(address.to_owned())
+}
+pub fn explicit_fetch_completion(
+    request: &crate::contracts::ChatCompletionRequest,
+    id: &str,
+    created: u64,
+    model: &str,
+) -> Option<Value> {
+    if request
+        .tool_choice
+        .as_ref()
+        .is_some_and(|v| v.as_str() != Some("auto"))
+    {
+        return None;
+    }
+    if request.messages.last()?.role != "user" {
+        return None;
+    }
+    let payload = serde_json::to_value(request).ok()?;
+    terminal(&payload)?;
+    let win = windows(&payload)?;
+    let address = explicit_read_url(&payload)?;
+    let args = fetch_args(&json!({"url":address}), win).ok()?;
+    Some(
+        json!({"id":id,"created":created,"model":model,"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":format!("call_json_get_{id}"),"type":"function","function":{"name":"run_in_terminal","arguments":args.to_string()}}]},"finish_reason":"tool_calls"}],"mundusx":{"routing":"explicit-json-get","inference_used":false}}),
+    )
 }
 fn terminal(payload: &Value) -> Option<&Value> {
     let tool = payload["tools"]
@@ -353,7 +435,7 @@ pub fn prepare(payload: Value) -> Value {
         out["messages"] = json!(kept);
     }
     let mut tools = vec![tool];
-    if source.is_none() {
+    if source.is_none() && explicit_read_url(&payload).is_none() {
         tools.extend(
             payload["tools"]
                 .as_array()
@@ -1093,6 +1175,55 @@ mod tests {
             "No matching record was found in the fetched response."
         );
         assert_eq!(result["mundusx"]["inference_used"], false);
+    }
+    #[test]
+    fn explicit_read_urls_skip_discovery_and_inference_but_preserve_auth_options_and_constraints() {
+        let mut p = fixture("Windows");
+        let text = "Using the API http://localhost:38611/unicode, find 年龄 for 编号 学生-002.";
+        p["messages"][0]["content"] = json!(p["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .replace("whats the age of David? pls find it in api", text));
+        let request: crate::contracts::ChatCompletionRequest =
+            serde_json::from_value(p.clone()).unwrap();
+        let result = explicit_fetch_completion(&request, "id", 1, "model").unwrap();
+        assert_eq!(result["mundusx"]["inference_used"], false);
+        let args: Value = serde_json::from_str(
+            result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(args["command"]
+            .as_str()
+            .unwrap()
+            .contains("http://localhost:38611/unicode'"));
+        assert_eq!(args["goal"], GOAL);
+        assert_eq!(prepare(p.clone())["tools"].as_array().unwrap().len(), 1);
+        for text in [
+            "Using API http://localhost:38611/unicode with Authorization header, find age",
+            "Using API http://localhost:38611/unicode and http://localhost:38611/nested find age",
+            "Using API http://localhost:38611/unicode, do not run commands; just explain",
+            "delete http://localhost:38611/unicode via API",
+            "get http://localhost:38611/unicode and then delete a record",
+        ] {
+            let mut r = request.clone();
+            r.messages[0].content=json!(format!("<environment_info>The user's current OS is: Windows</environment_info><userRequest>{text}</userRequest>"));
+            assert!(
+                explicit_fetch_completion(&r, "id", 1, "model").is_none(),
+                "{text}"
+            );
+        }
+        for choice in [json!("none"), json!("required")] {
+            let mut r = request.clone();
+            r.tool_choice = Some(choice);
+            assert!(explicit_fetch_completion(&r, "id", 1, "model").is_none());
+        }
+        assert!(read_intent(
+            "Using API http://localhost/items, find value for code delete."
+        ));
+        assert!(!read_intent("what is an API?"));
+        assert!(!read_intent("show code for the API"));
     }
     #[test]
     fn batched_old_lookups_are_not_executed_or_confused_with_a_current_missing_id() {
