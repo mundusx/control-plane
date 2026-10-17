@@ -166,7 +166,8 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let coding = native_workspace_root(request).is_some()
         && (workspace_action || ((explicit_path || project_creation)
         && ["create ","update ","fix ","edit ","add ","repair ","continue "].iter().any(|prefix| action.starts_with(prefix))))
-        && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
+        && !text.contains("pretend")
+        && (http_action || !["do not create", "don't create", "do not edit", "don't edit"].iter().any(|term| text.contains(term)));
     // A file path does not make browser, notebook, repository, or other
     // explicitly requested capabilities irrelevant. Defer these mixed tasks
     // to the original client catalog rather than silently hiding their tools.
@@ -512,6 +513,14 @@ mod native_turn_tool_policy_tests {
             assert!(!r.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_coding_policy")));
         }
         let mut r=project_execution_request("Explain curl and HTTP POST");let before=serde_json::to_value(&r).unwrap();assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
+    }
+    #[test]
+    fn api_actions_preserve_no_file_edit_instructions_without_bypassing_http_routing() {
+        let mut r=project_execution_request("Get http://localhost:3000/api/students using curl and report the number of student records. Do not edit any files.");
+        let original=r.messages.clone();assert!(apply_native_turn_tool_policy(&mut r));
+        assert!(r.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_http_policy")));
+        assert!(r.messages.iter().any(|m|m.content==original.last().unwrap().content));
+        assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().all(|t|matches!(t["function"]["name"].as_str(),Some("run_in_terminal"|"get_terminal_output"|"send_to_terminal"|"kill_terminal"))));
     }
     #[test]
     fn known_http_endpoint_keeps_only_terminal_lifecycle_schemas() {
