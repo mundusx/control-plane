@@ -162,7 +162,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         && action.split(|c:char| !c.is_alphanumeric()).any(|word|
             matches!(word,"program" | "project" | "application" | "app" | "api"));
     let coding = (explicit_path || project_creation) && native_workspace_root(request).is_some()
-        && ["create ","update ","fix ","edit ","add "].iter().any(|prefix| action.starts_with(prefix))
+        && ["create ","update ","fix ","edit ","add ","repair ","continue "].iter().any(|prefix| action.starts_with(prefix))
         && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
     // A file path does not make browser, notebook, repository, or other
     // explicitly requested capabilities irrelevant. Defer these mixed tasks
@@ -529,6 +529,20 @@ mod native_turn_tool_policy_tests {
             assert!(!apply_native_turn_tool_policy(&mut r));
             assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
+    }
+    #[test]
+    fn explicit_project_recovery_keeps_file_tools_and_honors_no_terminal() {
+        for verb in ["Continue", "Repair"] {
+            let mut r=directory_request(r"- D:\sample");
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{verb} the project in D:\\sample. Use file tools only; do not run terminal commands.</userRequest>"));
+            assert!(apply_native_turn_tool_policy(&mut r));
+            let tools=r.tools.as_ref().unwrap().as_array().unwrap();
+            assert!(tools.iter().any(|t|t["function"]["name"]=="read_file"));
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="run_in_terminal"));
+        }
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!("<userRequest>Continue explaining this example</userRequest>");
+        assert!(!apply_native_turn_tool_policy(&mut r));
     }
     #[test]
     fn exact_windows_git_requests_preserve_the_registered_terminal_contract() {
