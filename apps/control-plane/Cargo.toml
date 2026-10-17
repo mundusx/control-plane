@@ -19,7 +19,7 @@ rustls-native-certs = "0.8"
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 subtle = "2.6"
 regex = "1.11"
 ureq = { version = "2.12", features = ["json"] }
