@@ -194,13 +194,13 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         let user_index=request.messages.iter().rposition(|m|m.role=="user").unwrap_or(0);
         let calls:Vec<&Value>=request.messages[user_index+1..].iter().filter(|m|m.role=="assistant")
             .filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
-        let reads=calls.iter().filter(|call|call.pointer("/function/name").and_then(Value::as_str)==Some("read_file")).count();
+        let inspection=|call:&Value|matches!(call.pointer("/function/name").and_then(Value::as_str),Some("read_file"|"list_dir"|"file_search"|"grep_search"|"get_errors"));
+        let reads=calls.iter().filter(|call|inspection(call)).count();
         let wrote=calls.iter().any(|call|matches!(call.pointer("/function/name").and_then(Value::as_str),Some("create_file" | "create_directory" | "replace_string_in_file"))
             && request.messages[user_index+1..].iter().any(|result|result.role=="tool"&&result.tool_call_id.as_deref()==call["id"].as_str()
                 && result.content.as_str().is_some_and(|text|!text.trim_start().to_ascii_lowercase().starts_with("error")&&!text.trim_start().to_ascii_lowercase().starts_with("string replacement failed:"))));
-        let last_read=calls.iter().any(|call|call.get("id").and_then(Value::as_str)==last.tool_call_id.as_deref()
-            && call.pointer("/function/name").and_then(Value::as_str)==Some("read_file"));
-        (1..8).contains(&reads) && !wrote && last_read && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
+        let last_inspection=calls.iter().any(|call|call.get("id").and_then(Value::as_str)==last.tool_call_id.as_deref()&&inspection(call));
+        (1..8).contains(&reads) && !wrote && last_inspection && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
     } else {false};
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
@@ -650,6 +650,8 @@ mod native_turn_tool_policy_tests {
         let mut pending=r.clone();assert!(apply_native_turn_tool_policy(&mut pending));assert_eq!(pending.tool_choice,Some(json!("required")));
         let mut reading=r.clone();reading.messages.push(assistant("read2","read_file"));reading.messages.push(result("read2"));
         assert!(apply_native_turn_tool_policy(&mut reading));assert_eq!(reading.tool_choice,Some(json!("required")));
+        let mut diagnostics=r.clone();diagnostics.messages.push(assistant("check","get_errors"));diagnostics.messages.push(result("check"));
+        assert!(apply_native_turn_tool_policy(&mut diagnostics));assert_eq!(diagnostics.tool_choice,Some(json!("required")));
         let mut bounded=r.clone();for i in 2..=8 {let id=format!("read{i}");bounded.messages.push(assistant(&id,"read_file"));bounded.messages.push(result(&id));}
         assert!(apply_native_turn_tool_policy(&mut bounded));assert_eq!(bounded.tool_choice,None);
         let mut failed=r.clone();failed.messages.push(assistant("bad","replace_string_in_file"));let mut failure=result("bad");failure.content=json!("String replacement failed: source mismatch");failed.messages.push(failure);failed.messages.push(assistant("read2","read_file"));failed.messages.push(result("read2"));
