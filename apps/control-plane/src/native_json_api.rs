@@ -105,14 +105,20 @@ fn explicit_read_url(payload: &Value) -> Option<String> {
     {
         return None;
     }
+    // VS Code may serialize a pasted URL as [label](destination). Extract the
+    // destination rather than sending Markdown delimiters as part of the path.
+    // Complex/ambiguous links keep the normal planning path.
+    let markdown=regex::Regex::new(r"\[[^\[\]\r\n]*\]\((https?://[^()\s<>]+)\)").ok()?;
+    let text=markdown.replace_all(text,"$1");
     let pattern = regex::Regex::new(r#"https?://[^\s<>"']+"#).ok()?;
-    let values: Vec<_> = pattern.find_iter(text).collect();
+    let values: Vec<_> = pattern.find_iter(&text).collect();
     if values.len() != 1 {
         return None;
     }
     let address = values[0]
         .as_str()
         .trim_end_matches([',', '.', ';', ')', ']']);
+    if address.contains("](") {return None;}
     let url = url::Url::parse(address).ok()?;
     if !url.username().is_empty()
         || url.password().is_some()
@@ -1310,6 +1316,23 @@ mod tests {
         ));
         assert!(!read_intent("what is an API?"));
         assert!(!read_intent("show code for the API"));
+    }
+    #[test]
+    fn markdown_api_links_are_destinations_not_literal_request_paths() {
+        for text in [
+            "Using the API [http://localhost:3000/api/students](http://localhost:3000/api/students), find age for id 105.",
+            "Using the API [students](http://localhost:3000/api/students), find age for id 105.",
+            "Using the API <http://localhost:3000/api/students>, find age for id 105.",
+        ] {
+            let mut p=fixture("Windows");
+            p["messages"][0]["content"]=json!(format!("<userRequest>{text}</userRequest>"));
+            assert_eq!(explicit_read_url(&p).as_deref(),Some("http://localhost:3000/api/students"));
+        }
+        let mut p=fixture("Windows");
+        p["messages"][0]["content"]=json!("<userRequest>Using API [one](http://localhost:3000/a) and [two](http://localhost:3000/b), find age.</userRequest>");
+        assert!(explicit_read_url(&p).is_none());
+        p["messages"][0]["content"]=json!("<userRequest>Using API http://[::1]:3000/students find age.</userRequest>");
+        assert_eq!(explicit_read_url(&p).as_deref(),Some("http://[::1]:3000/students"));
     }
     #[test]
     fn batched_old_lookups_are_not_executed_or_confused_with_a_current_missing_id() {
