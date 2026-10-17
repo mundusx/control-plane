@@ -200,6 +200,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
             && call.pointer("/function/name").and_then(Value::as_str)==Some("read_file"));
         reads==1 && !wrote && last_read && last.content.as_str().is_some_and(|value|!value.trim().is_empty()&&!value.trim_start().to_ascii_lowercase().starts_with("error"))
     } else {false};
+    let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
     if !continuation || pending_after_first_read { request.tool_choice = Some(json!("required")); }
     if coding && !request.messages.iter().any(|message| message.name.as_deref()==Some("mundusx_native_coding_policy")) {
@@ -207,6 +208,11 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         request.messages.insert(index, crate::contracts::ChatMessage {role:"system".into(),
             content:json!("Use the supplied registered tools and exact argument types. Perform ONE file operation per assistant turn, then stop and wait for its result. Keep file contents concise; use separate modules for separate responsibilities. Do not generate redundant variants of lists, dependency entries, patterns or code. Complete every tool argument and close the call. Read an existing file before changing it, using the exact requested range, or a useful initial chunk. A partial read does not establish the file ends there; request later ranges when the relevant code is not present. After observing relevant code, apply a small targeted patch rather than repeatedly restating plans or rereading unchanged ranges. Use replace_string_in_file with exact observed old text for existing-file edits. Use create_file for a new file; its parent folders are handled by that tool. Do not recreate existing files or perform unrelated edits. Interpret diagnostic messages rather than assuming every <compileError> tag is a syntax failure. Editor extensions can report duplication, style or security advisories in that tag. Do not change already-correct syntax to address unrelated advisories; stay within the requested repair scope and report remaining advisories separately. Before claiming a project works, check that imports match declared dependencies and that database APIs match the selected driver. A syntax-only check does not establish runtime correctness. After the requested changes are observed complete, report the result briefly and stop; do not reprint entire files unless the user requested that. Do not force further tool calls merely because tools remain available."),
             tool_calls:None,tool_call_id:None,name:Some("mundusx_native_coding_policy".into())});
+    }
+    if advisory_context {
+        request.messages.push(crate::contracts::ChatMessage {role:"system".into(),
+            content:json!("The latest editor diagnostics contain only recognized style/duplication/security advisories, not a syntax failure. Unless the user specifically requested these advisory changes, leave them alone and continue the unfinished original task. Do not divert project creation into unrelated advisory repairs."),
+            tool_calls:None,tool_call_id:None,name:Some("mundusx_diagnostic_scope".into())});
     }
     true
 }
@@ -533,6 +539,18 @@ mod native_turn_tool_policy_tests {
         assert!(native_git_shortcut(&r,"test",1,"model").is_none());r.tool_choice=None;
         r.messages[1].content=json!("<environment_info>The user's current OS is: Linux</environment_info>");
         assert!(native_git_shortcut(&r,"test",1,"model").is_none());
+    }
+    #[test]
+    fn advisory_only_results_keep_the_original_coding_task_in_scope() {
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!(r"<userRequest>Update the project in D:\sample. Do not run commands.</userRequest>");
+        r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"diagnostics","function":{"name":"get_errors","arguments":"{}"}}])),tool_call_id:None,name:None});
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("<compileError>Prefer `node:path` over `path`.</compileError>"),tool_calls:None,tool_call_id:Some("diagnostics".into()),name:None});
+        let mut unknown=r.clone();unknown.messages.last_mut().unwrap().content=json!("<compileError>Unexpected token</compileError>");
+        assert!(apply_native_turn_tool_policy(&mut r));
+        assert_eq!(r.messages.last().unwrap().name.as_deref(),Some("mundusx_diagnostic_scope"));
+        assert!(apply_native_turn_tool_policy(&mut unknown));
+        assert!(!unknown.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_diagnostic_scope")));
     }
     #[test]
     fn native_initial_read_honors_explicit_later_line_ranges() {
