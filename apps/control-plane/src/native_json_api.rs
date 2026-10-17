@@ -1,9 +1,12 @@
 //! Private read/query plans are compiled into registered client tools or
 //! grounded final answers. No network request executes on the control plane.
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 pub const FETCH: &str = "__mundusx_fetch_json";
 pub const QUERY: &str = "__mundusx_query_observed_json";
 const GOAL: &str = "Fetch JSON for grounded API lookup";
+const FRAME: &str = "__MUNDUSX_JSON_B64_V1__";
+const END: &str = "__MUNDUSX_JSON_B64_END__";
 
 fn current(payload: &Value) -> Option<(&[Value], usize, &str)> {
     let messages = payload["messages"].as_array()?;
@@ -194,7 +197,7 @@ fn windows(payload: &Value) -> Option<bool> {
             }
         })
 }
-fn fetch_result(payload: &Value) -> Option<(&str, &str)> {
+fn fetch_wire_result(payload: &Value) -> Option<(&str, &str)> {
     let (messages, start, _) = current(payload)?;
     let last = messages.last()?;
     if last["role"] != "tool" {
@@ -215,6 +218,45 @@ fn fetch_result(payload: &Value) -> Option<(&str, &str)> {
     let raw = last["content"].as_str()?;
     Some((last["tool_call_id"].as_str()?, raw))
 }
+fn decode_wire(raw: &str) -> Option<String> {
+    if raw.len() > 2_000_000 {
+        return None;
+    }
+    let legacy = raw.trim().trim_start_matches('\u{feff}');
+    if serde_json::from_str::<Value>(legacy).is_ok() {
+        return Some(legacy.to_owned());
+    }
+    let compact = raw
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect::<String>();
+    if !compact.contains(FRAME) {
+        return None;
+    }
+    if compact.matches(FRAME).count() != 1 || compact.matches(END).count() != 1 {
+        return None;
+    }
+    let content = compact.split_once(FRAME)?.1.split_once(END)?.0;
+    let (size, encoded) = content.split_once(':')?;
+    let size: usize = size.parse().ok()?;
+    if size > 1_000_000 {
+        return None;
+    }
+    let bytes = STANDARD.decode(encoded).ok()?;
+    if bytes.len() != size {
+        return None;
+    }
+    Some(
+        String::from_utf8(bytes)
+            .ok()?
+            .trim_start_matches('\u{feff}')
+            .to_owned(),
+    )
+}
+fn fetch_result(payload: &Value) -> Option<(&str, String)> {
+    let (id, wire) = fetch_wire_result(payload)?;
+    Some((id, decode_wire(wire)?))
+}
 fn observed(payload: &Value) -> Option<(&str, Value)> {
     let (id, raw) = fetch_result(payload)?;
     if raw.len() > 1_000_000 {
@@ -230,7 +272,7 @@ pub fn failure_completion(
     model: &str,
 ) -> Option<Value> {
     let payload = serde_json::to_value(request).ok()?;
-    let (_, raw) = fetch_result(&payload)?;
+    let (_, raw) = fetch_wire_result(&payload)?;
     if observed(&payload).is_some() {
         return None;
     }
@@ -433,6 +475,11 @@ pub fn prepare(payload: Value) -> Value {
             .map(|(_, m)| m.clone())
             .collect();
         out["messages"] = json!(kept);
+        if let Some(last) = out["messages"].as_array_mut().unwrap().last_mut() {
+            if last["role"] == "tool" {
+                last["content"] = json!(data.to_string());
+            }
+        }
     }
     let mut tools = vec![tool];
     if source.is_none() && explicit_read_url(&payload).is_none() {
@@ -535,7 +582,7 @@ fn fetch_args(args: &Value, win: bool) -> Result<Value, String> {
             .map(|(k, v)| format!("{}={}", quote(k, true), quote(v, true)))
             .collect::<Vec<_>>()
             .join(";");
-        format!("$ErrorActionPreference = 'Stop'; $mundusxResponse = Invoke-WebRequest -UseBasicParsing -Uri {} -Method Get -Headers @{{{headers}}} -TimeoutSec 30; Write-Output ([Text.Encoding]::UTF8.GetString($mundusxResponse.RawContentStream.ToArray()).TrimStart([char]0xfeff))",quote(address,true))
+        format!("$ErrorActionPreference = 'Stop'; $mundusxResponse = Invoke-WebRequest -UseBasicParsing -Uri {} -Method Get -Headers @{{{headers}}} -TimeoutSec 30; $mundusxBytes = $mundusxResponse.RawContentStream.ToArray(); Write-Output ('{FRAME}' + $mundusxBytes.Length + ':' + [Convert]::ToBase64String($mundusxBytes) + '{END}')",quote(address,true))
     } else {
         let flags = headers
             .iter()
@@ -543,8 +590,8 @@ fn fetch_args(args: &Value, win: bool) -> Result<Value, String> {
             .collect::<String>();
         // curl returns JSON bytes directly; model/query code parses them.
         // Never require jq. Fallback uses Python's standard library only.
-        let py=format!("import urllib.request; r=urllib.request.Request({},headers={}); print(urllib.request.urlopen(r,timeout=30).read().decode('utf-8'))",json!(address),serde_json::to_string(&headers.iter().copied().collect::<std::collections::BTreeMap<_,_>>()).unwrap());
-        format!("if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 30{flags} -- {}; elif command -v python3 >/dev/null 2>&1; then python3 -c {}; else printf '%s\\n' 'No HTTP client available: curl and python3 are missing' >&2; exit 127; fi",quote(address,false),quote(&py,false))
+        let py=format!("import base64,urllib.request; r=urllib.request.Request({},headers={}); raw=urllib.request.urlopen(r,timeout=30).read(); print('{FRAME}'+str(len(raw))+':'+base64.b64encode(raw).decode('ascii')+'{END}')",json!(address),serde_json::to_string(&headers.iter().copied().collect::<std::collections::BTreeMap<_,_>>()).unwrap());
+        format!("( if command -v curl >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1 && command -v mktemp >/dev/null 2>&1 && command -v wc >/dev/null 2>&1; then mundusx_tmp=$(mktemp) || exit 1; trap 'rm -f -- \"$mundusx_tmp\"' 0; if ! curl -fsS --max-time 30{flags} -o \"$mundusx_tmp\" -- {}; then exit 1; fi; printf '%s%s:' '{FRAME}' \"$(wc -c < \"$mundusx_tmp\")\"; if base64 < \"$mundusx_tmp\"; then printf '%s\\n' '{END}'; else exit 1; fi; elif command -v python3 >/dev/null 2>&1; then python3 -c {}; else printf '%s\\n' 'No framed HTTP client available: require curl plus base64 or python3' >&2; exit 127; fi )",quote(address,false),quote(&py,false))
     };
     Ok(
         json!({"command":command,"goal":GOAL,"explanation":"Fetch the actual JSON response without filtering or mutating records.","mode":"sync"}),
@@ -1103,6 +1150,45 @@ mod tests {
         assert!(data.to_string().contains("18446744073709551617001"));
     }
     #[test]
+    fn framed_bytes_survive_terminal_wrapping_without_modifying_json_keys_or_ids() {
+        let raw = r#"{"results":[{"编号":"学生-001","资料":{"年龄":26}},{"编号":"学生-002","资料":{"年龄":32}}],"legitimate key space":"A B  C"}"#;
+        let frame = format!(
+            "{FRAME}{}:{}{END}",
+            raw.len(),
+            STANDARD.encode(raw.as_bytes())
+        );
+        let wrapped = frame
+            .as_bytes()
+            .chunks(7)
+            .map(|s| std::str::from_utf8(s).unwrap())
+            .collect::<Vec<_>>()
+            .join(" \r\n");
+        assert_eq!(decode_wire(&wrapped).unwrap(), raw);
+        assert!(decode_wire(&frame.replace(&format!("{}:", raw.len()), "1:")).is_none());
+        assert!(decode_wire(&frame.replace(END, "")).is_none());
+        assert!(
+            decode_wire(&format!("{FRAME}1:/w=={END}")).is_none(),
+            "Invalid UTF-8 must not become replacement characters"
+        );
+        let mut p = fetched(&wrapped);
+        p["messages"][0]["content"] = json!(p["messages"][0]["content"].as_str().unwrap().replace(
+            "whats the age of David? pls find it in api",
+            "Using API, find 年龄 for 编号 学生-002."
+        ));
+        let prepared = prepare(p.clone());
+        let last = prepared["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(last["content"].as_str().unwrap()).unwrap(),
+            serde_json::from_str::<Value>(raw).unwrap()
+        );
+        let request: crate::contracts::ChatCompletionRequest = serde_json::from_value(p).unwrap();
+        assert_eq!(
+            observed_completion(&request, "id", 1, "model").unwrap()["choices"][0]["message"]
+                ["content"],
+            "32"
+        );
+    }
+    #[test]
     fn observed_bindings_resolve_unrelated_schemas_without_entity_or_field_templates() {
         for (data, text, expected) in [
             (
@@ -1338,8 +1424,7 @@ mod tests {
             "Domain fields named error or success do not establish HTTP failure"
         );
     }
-    #[cfg(windows)]
-    fn powershell_fetch_fixture(expected: Value) {
+    fn client_fetch_fixture(expected: Value, win: bool) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1371,38 +1456,49 @@ mod tests {
                 }
             }
         });
-        let args = fetch_args(&json!({"url":format!("http://{address}/records")}), true).unwrap();
-        let script = std::env::temp_dir().join(format!(
-            "ehda-json-fetch-{}-{}.ps1",
-            std::process::id(),
-            address.port()
-        ));
-        std::fs::write(
-            &script,
-            format!(
-                "\u{feff}[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; {}",
-                args["command"].as_str().unwrap()
-            ),
-        )
-        .unwrap();
-        let output = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-File"])
-            .arg(&script)
-            .output()
+        let args = fetch_args(&json!({"url":format!("http://{address}/records")}), win).unwrap();
+        let output = if win {
+            let script = std::env::temp_dir().join(format!(
+                "ehda-json-fetch-{}-{}.ps1",
+                std::process::id(),
+                address.port()
+            ));
+            std::fs::write(
+                &script,
+                format!(
+                    "\u{feff}[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; {}",
+                    args["command"].as_str().unwrap()
+                ),
+            )
             .unwrap();
-        let _ = std::fs::remove_file(script);
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-File"])
+                .arg(&script)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(script);
+            output
+        } else {
+            let shell = if cfg!(windows) {
+                "C:/Program Files/Git/bin/bash.exe"
+            } else {
+                "sh"
+            };
+            std::process::Command::new(shell)
+                .arg("-c")
+                .arg(args["command"].as_str().unwrap())
+                .output()
+                .unwrap()
+        };
         server.join().unwrap();
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let value: Value = serde_json::from_str(
-            String::from_utf8_lossy(&output.stdout)
-                .trim_start_matches('\u{feff}')
-                .trim(),
-        )
-        .unwrap();
+        let decoded = decode_wire(&String::from_utf8_lossy(&output.stdout))
+            .expect("Complete framed JSON response");
+        let value: Value = serde_json::from_str(&decoded).unwrap();
         assert_eq!(value, expected);
     }
     #[cfg(windows)]
@@ -1414,7 +1510,18 @@ mod tests {
             json!({"data":{"items":[{"key":"x-3","date":"2026-10-17T12:00:00Z"}]}}),
             json!([{"key":"001","名字":"李明","active":false,"value":null},{"key":12,"value":40}]),
         ] {
-            powershell_fetch_fixture(value);
+            client_fetch_fixture(value, true);
         }
+    }
+    #[test]
+    fn actual_posix_curl_framing_preserves_unicode_and_does_not_need_jq() {
+        if cfg!(windows) && !std::path::Path::new("C:/Program Files/Git/bin/bash.exe").exists() {
+            eprintln!("POSIX fixture requires Git Bash on Windows");
+            return;
+        }
+        client_fetch_fixture(
+            json!({"results":[{"编号":"学生-002","资料":{"年龄":32}}],"space key":"A B  C"}),
+            false,
+        );
     }
 }
