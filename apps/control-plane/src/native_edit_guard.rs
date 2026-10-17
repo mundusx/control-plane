@@ -109,6 +109,9 @@ pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(
         } else {
             let old=args["oldString"].as_str().filter(|s|!s.is_empty())
                 .ok_or("native edit precondition failed: oldString must be nonempty")?;
+            if args["newString"].as_str().is_some_and(|new|new.replace("\r\n","\n")==old.replace("\r\n","\n")) {
+                return Err("native edit precondition failed: oldString and newString are identical; the edit changes nothing. Propose an actual correction using observed source, or report that verification remains incomplete".into());
+            }
             if !observed.is_some_and(|text|text.replace("\r\n","\n").contains(&old.replace("\r\n","\n"))) {
                 return Err("native edit precondition failed: read the exact target and use its observed oldString before replacing it".into());
             }
@@ -271,6 +274,13 @@ mod tests {
         assert!(validate(&p,&edit("d:/sample/routes/studentRoutes.js")).is_ok());
         p["messages"][1]["tool_calls"][0]["function"]["arguments"]=serde_json::json!("{\"filePath\":\"D:/sample/models/Student.js\"}");
         assert!(validate(&p,&edit("D:/sample/models/Student.js")).unwrap_err().contains("outside the explicit files"));
+    }
+    #[test]
+    fn unchanged_replacement_is_not_a_successful_repair() {
+        let p=payload();let mut m=edit("D:/sample/routes/studentRoutes.js");
+        let mut args:serde_json::Value=serde_json::from_str(m["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        args["newString"]=args["oldString"].clone();m["tool_calls"][0]["function"]["arguments"]=serde_json::json!(args.to_string());
+        assert!(validate(&p,&m).unwrap_err().contains("identical"));
     }
     #[test]
     fn negative_path_mentions_do_not_expand_scope_and_quoted_paths_work() {
