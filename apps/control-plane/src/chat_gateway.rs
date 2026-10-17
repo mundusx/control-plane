@@ -182,11 +182,15 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         return false;
     }
     let no_commands = ["do not run commands", "don't run commands", "do not run terminal commands", "use file tools only", "do not use terminal", "no terminal commands"].iter().any(|phrase| text.contains(phrase));
-    let allowed = |name: &str| match name {
+    let known_http_endpoint=http_action && request.messages.iter().filter(|m|matches!(m.role.as_str(),"user"|"tool")).any(|m|m.content.as_str().is_some_and(|text|regex::Regex::new(r#"https?://(?:localhost|127\.0\.0\.1|[a-zA-Z0-9][a-zA-Z0-9.-]*)(?::[0-9]+)?(?:/[^\s<>"]*)?"#).is_ok_and(|r|r.is_match(text))));
+    let allowed = |name: &str| if http_action {
+        matches!(name,"run_in_terminal"|"get_terminal_output"|"send_to_terminal"|"kill_terminal") && !no_commands
+            || !known_http_endpoint && matches!(name,"read_file"|"list_dir"|"file_search"|"grep_search")
+    } else {match name {
         "list_dir" | "read_file" | "file_search" | "grep_search" => true,
         name if native_terminal_tool(name) => (coding || git_alias) && !no_commands,
         name => coding && native_coding_tool(name),
-    };
+    }};
     if tools.iter().any(|tool| {
         let name = tool.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
         !name.is_empty() && !allowed(name) && text.contains(&name.to_ascii_lowercase())
@@ -253,7 +257,8 @@ fn native_workspace_action(text: &str) -> bool {
 fn native_http_command_action(text:&str)->bool {
     let client=text.split(|c:char|!c.is_alphanumeric()).any(|w|matches!(w,"curl"|"restmethod"))
         || text.contains("invoke-restmethod") || text.contains("invoke-webrequest");
-    client && regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|create|add|update|delete|send|test|check|verify|get|post|fetch|request)\b")
+    let api_call=["trigger the api", "call the api", "using the api", "via the api", "through the api"].iter().any(|phrase|text.contains(phrase));
+    (client || api_call) && regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|create|add|update|delete|send|test|check|verify|get|post|fetch|request)\b")
         .is_ok_and(|r|r.is_match(text))
 }
 
@@ -499,7 +504,7 @@ mod native_turn_tool_policy_tests {
     }
     #[test]
     fn api_curl_actions_use_focused_tools_without_source_mutation_policy() {
-        for text in ["create one more new record of student using curl","please send a POST using curl.exe","check the API using Invoke-RestMethod"] {
+        for text in ["create one more new record of student using curl","please send a POST using curl.exe","check the API using Invoke-RestMethod","create one more new record of student trigger the api pls","create a record using the API"] {
             let mut r=project_execution_request(text);assert!(apply_native_turn_tool_policy(&mut r),"{text}");
             assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="run_in_terminal"));
             assert!(!r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="appmod-create-migration-summary"));
@@ -507,6 +512,30 @@ mod native_turn_tool_policy_tests {
             assert!(!r.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_native_coding_policy")));
         }
         let mut r=project_execution_request("Explain curl and HTTP POST");let before=serde_json::to_value(&r).unwrap();assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
+    }
+    #[test]
+    fn known_http_endpoint_keeps_only_terminal_lifecycle_schemas() {
+        let mut r=project_execution_request("create a record using the API at http://localhost:3000/api/students");
+        let original=r.tools.clone().unwrap();
+        assert!(apply_native_turn_tool_policy(&mut r));
+        let selected=r.tools.as_ref().unwrap().as_array().unwrap();
+        assert!(!selected.is_empty());
+        assert!(selected.iter().all(|t|matches!(t["function"]["name"].as_str(),Some("run_in_terminal"|"get_terminal_output"|"send_to_terminal"|"kill_terminal"))));
+        for tool in selected {assert!(original.as_array().unwrap().contains(tool));}
+        assert!(!selected.iter().any(|t|t["function"]["name"]=="read_file"));
+    }
+    #[test]
+    fn unknown_http_endpoint_retains_inspection_but_not_source_edits() {
+        let mut r=project_execution_request("create one more new record of student trigger the api pls");
+        assert!(apply_native_turn_tool_policy(&mut r));
+        let selected=r.tools.as_ref().unwrap().as_array().unwrap();
+        assert!(selected.iter().any(|t|t["function"]["name"]=="read_file"));
+        assert!(selected.iter().any(|t|t["function"]["name"]=="run_in_terminal"));
+        assert!(!selected.iter().any(|t|matches!(t["function"]["name"].as_str(),Some("create_file"|"replace_string_in_file"|"manage_todo_list"))));
+        for text in ["create an API project", "explain how to create records using the API", "show an example using the API"] {
+            let mut request=project_execution_request(text);let before=serde_json::to_value(&request).unwrap();
+            assert!(!apply_native_turn_tool_policy(&mut request));assert_eq!(serde_json::to_value(&request).unwrap(),before);
+        }
     }
     #[test]
     fn completed_tool_turns_do_not_force_another_action() {
