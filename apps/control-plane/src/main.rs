@@ -9490,6 +9490,7 @@ fn handle_connection_with_streams(
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
                     if let Some(completion) = chat_gateway::native_http_shortcut(&request_body, &completion_id, created, public_model)
+                        .or_else(||chat_gateway::native_http_result_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_git_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_inspection_shortcut(&request_body, &completion_id, created, public_model))
                         .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model))
