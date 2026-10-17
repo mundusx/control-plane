@@ -112,7 +112,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
             .and_then(|message| message.tool_calls.as_ref()).and_then(Value::as_array)
             .is_some_and(|calls| calls.iter().any(|call| {
                 call.get("id").and_then(Value::as_str) == last.tool_call_id.as_deref()
-                    && matches!(call.pointer("/function/name").and_then(Value::as_str), Some("list_dir" | "read_file" | "file_search" | "grep_search" | "create_file" | "create_directory" | "replace_string_in_file" | "get_errors" | "run_in_terminal"))
+                    && call.pointer("/function/name").and_then(Value::as_str).is_some_and(native_coding_tool)
             }));
         if !matched { return false; }
         let Some(user) = request.messages.iter().rev().find(|message| message.role == "user") else { return false };
@@ -161,8 +161,10 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         && action.split_whitespace().any(|word| word == "here" || word == "workspace")
         && action.split(|c:char| !c.is_alphanumeric()).any(|word|
             matches!(word,"program" | "project" | "application" | "app" | "api"));
-    let coding = (explicit_path || project_creation) && native_workspace_root(request).is_some()
-        && ["create ","update ","fix ","edit ","add ","repair ","continue "].iter().any(|prefix| action.starts_with(prefix))
+    let workspace_action = native_workspace_action(&text);
+    let coding = native_workspace_root(request).is_some()
+        && (workspace_action || ((explicit_path || project_creation)
+        && ["create ","update ","fix ","edit ","add ","repair ","continue "].iter().any(|prefix| action.starts_with(prefix))))
         && !["do not create", "don't create", "do not edit", "don't edit", "pretend"].iter().any(|term| text.contains(term));
     // A file path does not make browser, notebook, repository, or other
     // explicitly requested capabilities irrelevant. Defer these mixed tasks
@@ -178,9 +180,8 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let no_commands = ["do not run commands", "don't run commands", "do not run terminal commands", "use file tools only", "do not use terminal", "no terminal commands"].iter().any(|phrase| text.contains(phrase));
     let allowed = |name: &str| match name {
         "list_dir" | "read_file" | "file_search" | "grep_search" => true,
-        "create_file" | "create_directory" | "replace_string_in_file" | "get_errors" => coding,
-        "run_in_terminal" => (coding || git_alias) && !no_commands,
-        _ => false,
+        name if native_terminal_tool(name) => (coding || git_alias) && !no_commands,
+        name => coding && native_coding_tool(name),
     };
     if tools.iter().any(|tool| {
         let name = tool.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
@@ -217,6 +218,27 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
             tool_calls:None,tool_call_id:None,name:Some("mundusx_diagnostic_scope".into())});
     }
     true
+}
+
+// Keep the host's schemas unchanged. Terminal execution is a lifecycle, not a
+// single call: background servers need output, input and cleanup tools too.
+fn native_terminal_tool(name: &str) -> bool {
+    matches!(name,"run_in_terminal" | "get_terminal_output" | "send_to_terminal" | "kill_terminal"
+        | "terminal_last_command" | "terminal_selection" | "create_and_run_task" | "get_task_output")
+}
+
+fn native_coding_tool(name: &str) -> bool {
+    native_terminal_tool(name) || matches!(name,"list_dir" | "read_file" | "file_search" | "grep_search"
+        | "create_file" | "create_directory" | "replace_string_in_file" | "insert_edit_into_file" | "get_errors"
+        | "vscode_listCodeUsages" | "vscode_renameSymbol" | "testFailure" | "manage_todo_list" | "vscode_askQuestions")
+}
+
+// Recognize ordinary workspace actions without requiring the user to repeat
+// an absolute path. Explanation requests, examples and ambiguous "run it"
+// keep the original catalog. Specialized capabilities are handled above.
+fn native_workspace_action(text: &str) -> bool {
+    regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|start|build|test|debug|fix|repair|update|edit|create|continue)\s+(?:the\s+|this\s+|our\s+|my\s+)?(?:proj|project|app|application|workspace)\b")
+        .is_ok_and(|pattern| pattern.is_match(text))
 }
 
 fn native_workspace_root(request: &ChatCompletionRequest) -> Option<String> {
@@ -409,6 +431,54 @@ mod native_turn_tool_policy_tests {
         for choice in [json!("none"), json!("required"), json!({"type":"function","function":{"name":"read_file"}})] {
             let mut r = request("Hello"); r.tool_choice = Some(choice);
             let before = serde_json::to_value(&r).unwrap(); assert!(!apply_native_turn_tool_policy(&mut r)); assert_eq!(serde_json::to_value(r).unwrap(), before);
+        }
+    }
+    fn project_execution_request(text:&str)->ChatCompletionRequest {
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{text}</userRequest>"));
+        for name in ["get_terminal_output","send_to_terminal","kill_terminal","terminal_last_command","terminal_selection","create_and_run_task","get_task_output","insert_edit_into_file","get_errors","vscode_listCodeUsages","vscode_renameSymbol","testFailure","manage_todo_list","vscode_askQuestions","open_browser_page","appmod-create-migration-summary","mcp_github_create_issue"] {
+            r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"type":"function","function":{"name":name,"parameters":{"type":"object","properties":{"original":{"type":"string"}},"required":["original"]}}}));
+        }
+        r
+    }
+    #[test]
+    fn ordinary_project_actions_keep_execution_lifecycle_and_original_contracts() {
+        for text in ["run this proj","run this project","start the app","build this project","test our application","debug my workspace","fix this project","ok pls run this proj","can u run the project?","please run this project"] {
+            let mut r=project_execution_request(text);
+            let original=r.tools.clone().unwrap();let messages=serde_json::to_value(&r.messages).unwrap();
+            assert!(apply_native_turn_tool_policy(&mut r),"{text}");
+            let tools=r.tools.as_ref().unwrap().as_array().unwrap();
+            for name in ["run_in_terminal","get_terminal_output","send_to_terminal","kill_terminal","create_and_run_task","get_task_output","get_errors"] {
+                let expected=original.as_array().unwrap().iter().find(|t|t["function"]["name"]==name).unwrap();
+                assert!(tools.contains(expected),"{text}: missing original {name}");
+            }
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="appmod-create-migration-summary"));
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="open_browser_page"));
+            assert_eq!(serde_json::to_value(r.messages.iter().filter(|m|m.name.as_deref()!=Some("mundusx_native_coding_policy")).collect::<Vec<_>>()).unwrap(),messages);
+        }
+    }
+    #[test]
+    fn project_action_terminals_stay_bounded_after_background_tool_results() {
+        for name in ["run_in_terminal","get_terminal_output","send_to_terminal","kill_terminal","create_and_run_task","get_task_output"] {
+            let mut r=project_execution_request("run this proj");
+            r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"background1","type":"function","function":{"name":name,"arguments":"{}"}}])),tool_call_id:None,name:None});
+            r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("Observed host result"),tool_calls:None,tool_call_id:Some("background1".into()),name:None});
+            assert!(apply_native_turn_tool_policy(&mut r),"{name}");assert_eq!(r.tool_choice,None);
+            assert!(!r.tools.unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="appmod-create-migration-summary"));
+        }
+    }
+    #[test]
+    fn project_actions_respect_command_restrictions_and_specialized_workflows() {
+        let mut r=project_execution_request("run this proj. Do not run terminal commands; use file tools only");
+        assert!(apply_native_turn_tool_policy(&mut r));
+        assert!(!r.tools.unwrap().as_array().unwrap().iter().any(|t|native_terminal_tool(t["function"]["name"].as_str().unwrap())));
+        for text in ["Explain how to run this project","run it","run this project in the browser","start this app using Docker","test this project using notebook cells","can u run the project with open_browser_page"] {
+            let mut r=project_execution_request(text);let before=serde_json::to_value(&r).unwrap();
+            assert!(!apply_native_turn_tool_policy(&mut r),"{text}");assert_eq!(serde_json::to_value(&r).unwrap(),before);
+        }
+        for choice in [json!("none"),json!("required"),json!({"type":"function","function":{"name":"run_in_terminal"}})] {
+            let mut r=project_execution_request("run this proj");r.tool_choice=Some(choice);let before=serde_json::to_value(&r).unwrap();
+            assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
     }
     #[test]
