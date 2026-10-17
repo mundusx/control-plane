@@ -32,6 +32,14 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
             "content":"Follow the user's requested task and the host's instructions. Opening, focusing, selecting, or browsing an editor file is context only, not authorization to edit it or to change the task's target. Keep each planned mutation bound to its explicit file path; re-read that same path before an existing-file edit and use exact observed old text. Never substitute the currently focused file for a planned target. Use create_file only for a new path. If it reports that the file already exists, read it and make a targeted edit only when the current task requires it; do not recreate or replace its full contents. Preserve unrelated completed files and user edits. For syntax-only repairs, preserve existing behavior and registrations: correct the malformed statement in place rather than deleting it to silence diagnostics. Do not claim a write succeeded unless its tool result confirms success. Use get_errors on all changed files before reporting completion; read the actual source around each actionable error and repair it. When command execution is permitted, use the project build/typecheck and tests for its language, including a startup or functional check where relevant. If commands are forbidden or unavailable, state that runtime verification was not performed. Never treat empty/stale diagnostics as proof of runtime correctness."
         }));
     }
+    let terminal = request.tools.as_ref().and_then(Value::as_array).is_some_and(|tools|
+        tools.iter().any(|tool| tool["function"]["name"]=="run_in_terminal"));
+    if terminal {
+        payload["messages"].as_array_mut().expect("messages array").insert(0,json!({
+            "role":"system","name":"mundusx_terminal_result_recovery",
+            "content":"Use the actual client shell, not the server OS. For Windows JSON APIs prefer assigning the parsed response first: $records = Invoke-RestMethod -Uri 'URL' -Method Get; then filter $records. Windows PowerShell 5.1 ConvertFrom-Json may emit a JSON array as one pipeline object: assign it to a variable before piping its records to Where-Object. Inspect the actual JSON shape before selecting properties; unwrap data only when observed. After a parsing/filtering failure, fetch the raw response without filtering before another attempt. Never repeat an unchanged failed command. Do not assume jq, curl.exe, Python or other optional clients exist: check Get-Command on PowerShell or command -v on POSIX before switching dependencies. When curl.exe is unavailable on Windows, use Invoke-RestMethod. If the observed response already answers the question, answer and stop. Do not replay successful mutations."
+        }));
+    }
     payload
 }
 
@@ -276,6 +284,60 @@ fn native_workspace_root(request: &ChatCompletionRequest) -> Option<String> {
     let absolute = root.starts_with('/') || (bytes.first().is_some_and(u8::is_ascii_alphabetic)
         && bytes.get(1) == Some(&b':') && matches!(bytes.get(2), Some(b'/' | b'\\')));
     (absolute && root.len() <= 1024 && !root.chars().any(char::is_control)).then(|| root.to_string())
+}
+
+/// Stop identical failed terminal retries before another inference/execution.
+/// Only matched current-turn results count; successful or pending calls reset it.
+pub fn native_terminal_failure_stop(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
+    let last=request.messages.last()?;
+    if last.role!="tool" {return None;}
+    let start=request.messages.iter().rposition(|m|m.role=="user")?;
+    let mut previous=None;let mut repeats=0;
+    for message in &request.messages[start+1..] {
+        if message.role!="tool" {continue;}
+        let call=request.messages[start+1..].iter().filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten()
+            .find(|c|c["id"].as_str()==message.tool_call_id.as_deref())?;
+        if call["function"]["name"]!="run_in_terminal" {previous=None;repeats=0;continue;}
+        let args:Value=serde_json::from_str(call["function"]["arguments"].as_str()?).ok()?;
+        let command=args["command"].as_str()?.trim().to_owned();
+        let output=message.content.as_str()?.to_ascii_lowercase();
+        let failed=output.contains("exit code 1") || output.contains("exit code: 1")
+            || output.contains("expandpropertynotfound") || output.contains("commandnotfoundexception");
+        if !failed {previous=None;repeats=0;continue;}
+        repeats=if previous.as_ref()==Some(&command) {repeats+1}else{1};previous=Some(command);
+    }
+    if repeats<2 {return None;}
+    Some(json!({"id":id,"object":"chat.completion","created":created,"model":model,
+        "choices":[{"index":0,"message":{"role":"assistant","content":"The terminal command failed twice without progress, so I stopped repeating it. The requested result is not verified. Inspect the raw command response and error before trying a different approach."},"finish_reason":"stop"}],
+        "mundusx":{"routing":"repeated-terminal-failure-stop","inference_used":false}}))
+}
+
+#[cfg(test)]
+mod terminal_failure_stop_tests {
+    use super::*;
+    fn request(outputs:&[(&str,&str)])->ChatCompletionRequest {
+        let mut messages=vec![json!({"role":"user","content":"Find a record via the API"})];
+        for (index,(command,output)) in outputs.iter().enumerate() {
+            let id=format!("call-{index}");
+            messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":id,"type":"function","function":{"name":"run_in_terminal","arguments":json!({"command":command}).to_string()}}]}));
+            messages.push(json!({"role":"tool","tool_call_id":id,"content":output}));
+        }
+        serde_json::from_value(json!({"messages":messages})).unwrap()
+    }
+    #[test] fn repeated_observed_failure_stops_without_inference() {
+        let r=request(&[("curl | parse","ExpandPropertyNotFound"),("curl | parse","ExpandPropertyNotFound")]);
+        let result=native_terminal_failure_stop(&r,"id",1,"model").unwrap();
+        assert_eq!(result["choices"][0]["finish_reason"],"stop");
+        assert_eq!(result["mundusx"]["inference_used"],false);
+    }
+    #[test] fn changed_command_success_and_new_user_do_not_trigger_stop() {
+        for outputs in [vec![("a","exit code 1"),("b","exit code 1")],vec![("a","exit code 1"),("a","40")],vec![("a","exit code 1")]] {
+            assert!(native_terminal_failure_stop(&request(&outputs),"id",1,"model").is_none());
+        }
+        let mut r=request(&[("a","exit code 1"),("a","exit code 1")]);
+        r.messages.push(serde_json::from_value(json!({"role":"user","content":"Try a different request"})).unwrap());
+        assert!(native_terminal_failure_stop(&r,"id",1,"model").is_none());
+    }
 }
 
 /// A fully specified HTTP request needs no model turn to choose its host tool.
