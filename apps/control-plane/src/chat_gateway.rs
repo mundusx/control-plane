@@ -287,6 +287,7 @@ pub fn native_git_shortcut(request: &ChatCompletionRequest, id: &str, created: u
 }
 
 pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
+    if let Some(completion)=native_diagnostics_shortcut(request,id,created,model) {return Some(completion);}
     if let Some(completion) = native_directory_shortcut(request,id,created,model) { return Some(completion); }
     if request.tool_choice.as_ref().is_some_and(|choice| choice.as_str() != Some("auto")) { return None; }
     let last = request.messages.last()?;
@@ -339,6 +340,27 @@ pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, cre
     }else if lower.contains("lines ") || lower.contains("line ") {return None;}
     else {(1,200)};
     Some(native_shortcut_completion("read_file",json!({"filePath":path,"startLine":start,"endLine":end}),id,created,model))
+}
+
+/// An explicit request to begin a project repair with host diagnostics need
+/// not spend an inference turn choosing that already requested read-only tool.
+fn native_diagnostics_shortcut(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|c|c.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;if last.role!="user" {return None;}
+    let content=last.content.as_str()?;
+    let text=content.split_once("<userRequest>")?.1.split_once("</userRequest>")?.0.trim().to_ascii_lowercase().replace('\\',"/");
+    if !["repair ","fix ","update ","continue "].iter().any(|p|text.starts_with(p)) || !text.contains("use get_errors")
+        || ["do not use get_errors","don't use get_errors"].iter().any(|p|text.contains(p)) {return None;}
+    let root=native_workspace_root(request)?;
+    let normalized=root.to_ascii_lowercase().replace('\\',"/");
+    if !text.contains(&format!("project in {normalized}.")) {return None;}
+    let tools=request.tools.as_ref()?.as_array()?;
+    if !["read_file","list_dir"].iter().all(|name|tools.iter().any(|t|t["function"]["name"].as_str()==Some(name))) {return None;}
+    let tool=tools.iter().find(|t|t["function"]["name"]=="get_errors")?;
+    if tool.pointer("/function/parameters/properties/filePaths/type")?.as_str()? != "array" {return None;}
+    let result=native_shortcut_completion("get_errors",json!({"filePaths":[root]}),id,created,model);
+    crate::native_edit_guard::validate(&native_tool_payload(request),&result["choices"][0]["message"]).ok()?;
+    Some(result)
 }
 
 #[cfg(test)]
@@ -543,6 +565,20 @@ mod native_turn_tool_policy_tests {
         let mut r=directory_request(r"- D:\sample");
         r.messages.last_mut().unwrap().content=json!("<userRequest>Continue explaining this example</userRequest>");
         assert!(!apply_native_turn_tool_policy(&mut r));
+    }
+    #[test]
+    fn explicit_project_diagnostics_hands_off_only_the_registered_requested_scope() {
+        let mut r=directory_request(r"- D:\sample");
+        r.tools.as_mut().unwrap().as_array_mut().unwrap().push(json!({"function":{"name":"get_errors","parameters":{"type":"object","properties":{"filePaths":{"type":"array","items":{"type":"string"}}}}}}));
+        r.messages.last_mut().unwrap().content=json!(r"<userRequest>Repair the project in D:\sample. Use get_errors first.</userRequest>");
+        let answer=native_diagnostics_shortcut(&r,"id",1,"model").unwrap();
+        let call=&answer["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["function"]["name"],"get_errors");
+        assert_eq!(serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap(),json!({"filePaths":[r"D:\sample"]}));
+        for text in [r"Repair the project in D:\outside. Use get_errors first.",r"Explain get_errors for the project in D:\sample.",r"Repair the project in D:\sample. Do not use get_errors."] {
+            r.messages.last_mut().unwrap().content=json!(format!("<userRequest>{text}</userRequest>"));
+            assert!(native_diagnostics_shortcut(&r,"id",1,"model").is_none());
+        }
     }
     #[test]
     fn exact_windows_git_requests_preserve_the_registered_terminal_contract() {
