@@ -1,0 +1,83 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "<environment_info>The user's current OS is: Windows</environment_info>"
+    },
+    {
+      "role": "user",
+      "content": "<userRequest>\nPOST http://localhost:3000/api/students with JSON {\"name\":\"EHDA UI Check\",\"email\":\"ehda.ui.1792244803656@example.com\",\"age\":20} using curl. Report only created ID. Do not edit files.\n</userRequest>"
+    },
+    {
+      "content": "",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"command\":\"$ErrorActionPreference = 'Stop'; $mundusxPayload = [IO.Path]::GetTempFileName(); [IO.File]::WriteAllBytes($mundusxPayload,[byte[]]@(123,34,97,103,101,34,58,50,48,44,34,101,109,97,105,108,34,58,34,101,104,100,97,46,117,105,46,49,55,57,50,50,52,52,56,48,51,54,53,54,64,101,120,97,109,112,108,101,46,99,111,109,34,44,34,110,97,109,101,34,58,34,69,72,68,65,32,85,73,32,67,104,101,99,107,34,125)); try { curl.exe -sS --fail-with-body --request POST 'http://localhost:3000/api/students' -H 'Content-Type: application/json' --data-binary ('@' + $mundusxPayload); if ($LASTEXITCODE -ne 0) { throw ('curl exited with code ' + $LASTEXITCODE) } } finally { Remove-Item -LiteralPath $mundusxPayload -ErrorAction SilentlyContinue }\",\"explanation\":\"Execute the explicitly specified HTTP operation and return its actual result.\",\"goal\":\"Send requested POST request\",\"mode\":\"sync\"}",
+            "name": "run_in_terminal"
+          },
+          "id": "call_chatcmpl-daa34b6dfb1a4d3fb54aecaabad750ed",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"id\":107,\"age\":20,\"email\":\"ehda.ui.1792244803656@example.com\",\"name\":\"EHDA UI Check\"}",
+      "role": "tool",
+      "tool_call_id": "call_chatcmpl-daa34b6dfb1a4d3fb54aecaabad750ed"
+    }
+  ],
+  "tools": [
+    {
+      "function": {
+        "description": "This tool allows you to execute Windows PowerShell 5.1 commands in a persistent terminal session, preserving environment variables, working directory, and other context across multiple commands.\n\nCommand Execution:\n- Use semicolons ; to chain commands on one line, NEVER use && even when asked explicitly\n- Prefer pipelines | for object-based data flow\n- Never create a sub-shell (eg. powershell -c \"command\") unless explicitly asked\n\nDirectory Management:\n- Prefer relative paths when navigating directories, only use absolute when the path is far away or the current cwd is not expected\n- By default (mode=sync), shell and cwd are reused by subsequent sync commands\n- Use $PWD or Get-Location for current directory\n- Use Push-Location/Pop-Location for directory stack\n\nProgram Execution:\n- Supports .NET, Python, Node.js, and other executables\n- Install modules via Install-Module, Install-Package\n- Use Get-Command to verify cmdlet/function availability\n\nExecution Mode:\n- For ALL one-shot commands (builds, tests, installs, compilation, linting, downloads, scripts), use mode=sync and omit timeout. The tool waits for the command to complete and returns full output inline. This is the default and strongly preferred mode.\n- Use mode=async ONLY for processes that must keep running indefinitely while you do other work (servers, watchers, dev daemons). Async waits for an initial idle/output signal, then returns a terminal ID and output snapshot while the process continues running.\n- In sync mode, the full output is returned when the command completes \u2014 you do NOT need to call get_terminal_output afterward. Only use get_terminal_output if the tool result explicitly says the command was moved to background, timed out, or needs input.\n- Returns a terminal ID for checking status and runtime later\n- Use Start-Job for background PowerShell jobs\n\nUse send_to_terminal to send commands or input to a terminal session.\n\nOutput Management:\n- Output exceeding 20KB is saved to a temp file; the result includes the file path so you can read the full output with readFile or search it with grep\n- Use Select-Object, Where-Object, Format-Table to filter output\n- Use -First/-Last parameters to limit results\n- For pager commands, add | Out-String or | Format-List\n\nBest Practices:\n- Use proper cmdlet names instead of aliases in scripts\n- Quote paths with spaces: \"C:\\Path With Spaces\"\n- Prefer PowerShell cmdlets over external commands when available\n- Prefer idiomatic PowerShell like Get-ChildItem instead of dir or ls for file listings\n- Use Test-Path to check file/directory existence\n- Be specific with Select-Object properties to avoid excessive output\n- Avoid printing credentials unless absolutely required\n- Avoid commands that trigger an interactive elevation prompt, such as Start-Process -Verb RunAs or runas.exe. They block on a UAC/password prompt that cannot be answered in this mode, and secrets must never be routed through the model. If elevated privileges are required, tell the user to run the command themselves and stop \u2014 do NOT retry the command with variations.\n- NEVER run Start-Sleep or similar wait commands. You will be automatically notified on your next turn when async terminal commands or timed-out sync commands complete or need input. Do NOT poll for completion.\n- NEVER pipe interactive commands through Select-Object, Where-Object, or other filters \u2014 this hides prompts and prevents the terminal from detecting when input is needed. Run interactive commands without pipes.\n\nInteractive Input Handling:\n- When a terminal command is waiting for interactive input, do NOT suggest alternatives or ask the user whether to proceed. Instead, use the vscode_askQuestions tool to collect the needed values from the user, then send them.\n- NEVER use vscode_askQuestions to request sensitive input such as passwords, passphrases, API keys, tokens, or other secrets \u2014 answers to that tool are sent through the model. If the prompt requires a secret, tell the user to type it directly into the terminal and stop; do not call vscode_askQuestions or send_to_terminal for that prompt.\n- Send exactly one answer per prompt using send_to_terminal. Never send multiple answers in a single send.\n- After each send, call get_terminal_output to read the next prompt before sending the next answer.\n- Continue one prompt at a time until the command finishes.\n\nExecution mode:\n- mode='sync' (strongly preferred): waits for the command to complete and returns full output inline. Use for ALL one-shot commands (builds, tests, installs, compilation, scripts). Omit timeout to let the command run to completion \u2014 the tool handles idle detection and input prompts automatically.\n- mode='async': waits for an initial idle/output signal from the command, then returns a terminal ID and output snapshot while the process continues running. Use ONLY for processes that must keep running indefinitely (servers, watchers, daemons). Timeout caps how long to wait for the initial idle/output signal.\n\nTimeout parameter: Usually omit timeout entirely for sync commands \u2014 the tool returns automatically on completion, input-needed, or cancellation. Only set a timeout as a safety net for commands you suspect might hang. Use 0 to explicitly indicate no timeout.\n\nSync output is final: When a sync command completes, the full output is returned inline \u2014 do NOT call get_terminal_output afterward. Only use get_terminal_output if the tool result explicitly indicates the command was moved to background, timed out, or needs input. Do NOT tell the user to check the terminal panel \u2014 all command output is already included in the tool result.\n\nTerminal notifications: When an async command finishes or a sync command times out, you will be automatically notified on your next turn with the exit code and terminal output. You will also be notified if the terminal needs input. Do NOT poll or sleep to wait for completion.",
+        "name": "run_in_terminal",
+        "parameters": {
+          "properties": {
+            "command": {
+              "description": "The command to run in the terminal.",
+              "type": "string"
+            },
+            "explanation": {
+              "description": "A one-sentence description of what the command does. This will be shown to the user before the command is run.",
+              "type": "string"
+            },
+            "goal": {
+              "description": "A short description of the goal or purpose of the command (e.g., \"Install dependencies\", \"Start development server\").",
+              "type": "string"
+            },
+            "isBackground": {
+              "description": "Legacy execution mode flag. Deprecated in favor of \"mode\". If true, equivalent to mode=async. If false, equivalent to mode=sync.",
+              "type": "boolean"
+            },
+            "mode": {
+              "description": "Execution mode for this command. Use sync (default) for nearly all commands.",
+              "enum": [
+                "sync",
+                "async"
+              ],
+              "enumDescriptions": [
+                "Wait for command completion and return full output inline. Strongly preferred for all one-shot commands (builds, tests, installs, scripts).",
+                "Wait for an initial idle/output signal, then return a terminal ID and output snapshot while the process continues running. Timeout caps how long to wait for the initial signal. Use ONLY for processes that must keep running indefinitely (servers, watchers, daemons)."
+              ],
+              "type": "string"
+            },
+            "timeout": {
+              "description": "Optional. Usually omit entirely for sync commands \u2014 the tool waits for completion automatically. Only set a timeout (in milliseconds) as a safety net if you suspect the command might hang. If the timeout elapses, the command continues in the background and you get a terminal ID to check output later. Use 0 to explicitly indicate no timeout.",
+              "type": "number"
+            }
+          },
+          "required": [
+            "command",
+            "explanation",
+            "goal",
+            "mode"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

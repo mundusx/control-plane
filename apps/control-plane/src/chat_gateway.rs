@@ -2350,4 +2350,10 @@ mod native_http_shortcut_tests {
   let mut r=observed_request(text,json!({"id":7,"name":"Record"}));r.messages[2].tool_calls.as_mut().unwrap()[0]["function"]["arguments"]=json!("{\"command\":\"different command\"}");assert!(native_http_result_shortcut(&r,"id",1,"model").is_none());
  }
 
+ #[test] fn actual_vscode_terminal_result_contract_projects_the_observed_id() {
+  let r:ChatCompletionRequest=serde_json::from_str(include_str!("../testdata/native-http-post-result.json")).unwrap();
+  let result=native_http_result_shortcut(&r,"real-contract",1,"model").unwrap();
+  assert_eq!(result["choices"][0]["message"]["content"],"107");assert_eq!(result["mundusx"]["inference_used"],false);
+ }
+
 }
