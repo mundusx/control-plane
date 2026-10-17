@@ -30,11 +30,26 @@ Versioned execution contracts:
 
 ### Control-plane administrator login
 
-Set `MUNDUSX_ADMIN_LOGIN_ENABLED=true` on the control-plane service to enable Google admin login. All dashboard views and operational read APIs remain public; edits, admission-policy changes, node blocking/contribution changes, and operator actions require an admin session or server-side operator credential. Normal inference submission and signed worker job polling/completion remain available. Set `MUNDUSX_ADMIN_EMAILS` to a comma-separated list of approved Google email addresses. An empty list denies all browser administrators; removing an address revokes its existing sessions on their next request.
+Set `MUNDUSX_ADMIN_LOGIN_ENABLED=true` to enable browser administrator sessions at `/auth/login`. Administrators can sign in with Google, a configured username/password, or either method when both are configured.
 
-Set the same random secret (at least 32 characters) as `MUNDUSX_ADMIN_SSO_SECRET` on both Chat and the control plane. The control plane uses `MUNDUSX_ADMIN_PUBLIC_ORIGIN` (default `https://control.mundusx.ai`) and `MUNDUSX_ADMIN_CHAT_ORIGIN` (default `https://chat.mundusx.ai`); Chat's `MUNDUSX_CONTROL_PLANE_URL` must match the public origin exactly. Origins must use HTTPS. Chat reuses its existing Google callback, so no new Google callback URL is needed.
+Job lists, job details, event logs, credit records, the dashboard and request-flow pages require an administrator session or trusted server-side operator credential. Their raw JSON routes are protected too. A full `/health` snapshot requires the same access; compact health, public fleet availability, inference submission, and signed worker polling/completion remain available. `MUNDUSX_AUTH_DISABLED` never makes log-bearing routes public. Chat services must retain their server-side operator token to retrieve job results for their own users.
 
-The browser receives an opaque Secure/HttpOnly cookie, never an operator token. Admin sessions expire after eight hours, are revoked on logout, and are held in process memory (a control-plane restart requires sign-in again; use one control-plane replica). Cookie-authenticated writes require a matching Origin. Public pages show read-only forms and an Admin sign-in link. Existing operator bearer tokens and verified device polling remain supported. `MUNDUSX_AUTH_DISABLED` does not bypass the administrative-write gate when admin login is enabled. Conversation storage and internal harness APIs retain their existing service authentication.
+For Google, set `MUNDUSX_ADMIN_EMAILS` to approved Google addresses, and the same random `MUNDUSX_ADMIN_SSO_SECRET` (at least 32 characters) on Chat and the control plane. An empty email list denies Google administrators. The control plane uses `MUNDUSX_ADMIN_PUBLIC_ORIGIN` (default `https://control.mundusx.ai`) and `MUNDUSX_ADMIN_CHAT_ORIGIN` (default `https://chat.mundusx.ai`); Chat's `MUNDUSX_CONTROL_PLANE_URL` must match the public origin. Chat reuses its existing Google callback.
+
+For password login, set `MUNDUSX_ADMIN_USERNAME` and `MUNDUSX_ADMIN_PASSWORD_HASH` on the control plane. Use an Argon2id PHC hash, never a plaintext password. Generate one with the `admin-password-hash` Cargo example below. Five attempts across all usernames are allowed per 15 minutes per process; further attempts return 429. Removing the username or hash revokes password sessions. Changing a password does not invalidate existing sessions; restart the single control-plane replica to revoke all sessions after a rotation.
+
+Sessions use opaque Secure/HttpOnly cookies, expire after eight hours, and are revoked on logout. Sessions and throttling state are held in process memory; use one replica. Password submissions and cookie-authenticated writes require the exact configured HTTPS Origin. No operator token is sent to browsers. Operator bearer tokens remain supported for trusted service calls, not as end-user API keys. Conversation storage and internal harness APIs keep their existing authentication.
+
+Secure hash generation in PowerShell (only the generated hash is printed):
+
+```powershell
+$adminSecret = Read-Host 'New administrator password (at least 12 characters)' -AsSecureString
+$adminCredential = [System.Net.NetworkCredential]::new('', $adminSecret)
+$adminCredential.Password | cargo run --quiet -p opengpu-control-plane --example admin-password-hash
+Remove-Variable adminSecret, adminCredential
+```
+
+For the existing MundusX Railway production service, `./scripts/set-admin-password.ps1 -Username admin1` prompts securely, uploads only the hash through stdin, and stages variables without triggering a deployment. Google settings are preserved. Alternatively, copy the hash into the hosting platform's secret-variable editor; do not commit it. Enable/configure both login methods before deploying the access restriction. Existing unauthenticated clients that read raw job records must switch to their authenticated application path.
 
 | Variable | Required | Description |
 |---|---|---|
@@ -47,7 +62,7 @@ The browser receives an opaque Secure/HttpOnly cookie, never an operator token. 
 | `MUNDUSX_ENABLE_LEGACY_SUPABASE` | No | Explicit rollback-only switch for the legacy Supabase/PostgREST runtime (`true`, `1`, `yes`, or `on`). Old Supabase variables alone no longer select this backend. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Legacy Supabase mode only | Supabase service role key. Find it in Supabase -> Settings -> API -> `service_role`. |
 | `SUPABASE_URL` | Legacy Supabase mode only | Supabase project URL (e.g. `https://xxx.supabase.co`). Derived automatically from `DATABASE_URL` if omitted. |
-| `MUNDUSX_OPERATOR_TOKEN` | **Strongly recommended** | Bearer token protecting the dashboard (`/`), status, nodes, jobs, credits, and job-submit endpoints. If unset, those endpoints are publicly accessible with no authentication. |
+| `MUNDUSX_OPERATOR_TOKEN` | **Strongly recommended** | Bearer token protecting the dashboard (`/`), status, nodes, jobs, credits, and job-submit endpoints. Log-bearing routes remain denied when this token and an admin session are absent. |
 | `OPENGPU_OPERATOR_TOKEN` | Deprecated | Legacy alias for `MUNDUSX_OPERATOR_TOKEN`. It still protects operator routes when the canonical variable is absent, but startup logs warn operators to rename it. |
 | `MUNDUSX_ENVIRONMENT` | **Yes in shared deployments** | Environment classification for auth guardrails. Use `local`, `dev`, `development`, `test`, `uat`, or `production`. Defaults to `local` when unset for local development. |
 | `MUNDUSX_AUTH_DISABLED` | Local/UAT only | Set to `true`, `1`, `yes`, or `on` to deliberately disable operator authentication even when `MUNDUSX_OPERATOR_TOKEN` is present. Startup rejects this flag unless `MUNDUSX_ENVIRONMENT` is `local`, `dev`, `development`, `test`, or `uat`. |

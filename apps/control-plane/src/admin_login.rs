@@ -1,3 +1,4 @@
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -16,6 +17,7 @@ const LEGACY_PUBLIC_ORIGIN: &str = "https://mundusx.ai";
 struct LoginState {
     challenges: BTreeMap<String, u64>,
     sessions: BTreeMap<String, (String, u64)>,
+    password_attempts: Vec<u64>,
 }
 
 fn state() -> &'static Mutex<LoginState> {
@@ -66,11 +68,61 @@ fn valid_origin(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-.:/".contains(&b))
 }
-fn configured() -> bool {
+fn google_configured() -> bool {
     valid_origin(&origin())
         && valid_origin(&chat_origin())
         && std::env::var("MUNDUSX_ADMIN_SSO_SECRET").is_ok_and(|s| s.len() >= 32)
 }
+fn password_account() -> Option<(String,String)> {
+    let username=std::env::var("MUNDUSX_ADMIN_USERNAME").ok()?;
+    let hash=std::env::var("MUNDUSX_ADMIN_PASSWORD_HASH").ok()?;
+    if username.is_empty() || username.len()>128 || !username.bytes().all(|b|b.is_ascii_alphanumeric()||b"@._-".contains(&b)) { return None; }
+    let parsed=PasswordHash::new(&hash).ok()?;
+    if parsed.algorithm.as_str()!="argon2id" { return None; }
+    Some((username,hash))
+}
+fn configured() -> bool {
+    valid_origin(&origin()) && (google_configured() || password_account().is_some())
+}
+fn session_identity_allowed(identity:&str)->bool {
+    if let Some(username)=identity.strip_prefix("password:") {
+        password_account().is_some_and(|(configured,_)|configured==username)
+    } else { allowed(identity) }
+}
+
+/// Log-bearing pages and raw records are private, including direct job URLs.
+pub fn log_read(method:&str,path:&str)->bool {
+    matches!(method,"GET"|"HEAD") && (matches!(path,"/"|"/jobs"|"/flow"|"/credits"|"/v1/jobs"|"/v1/job-events"|"/v1/status"|"/v1/credits")
+      || path.starts_with("/jobs/")
+      || (path.starts_with("/v1/jobs/") && path!="/v1/jobs/next"))
+}
+
+fn password_login(headers:&BTreeMap<String,String>,body:&str)->String {
+    if super::header_value(headers,"origin")!=Some(origin().as_str()) || body.len()>4096 {
+        return response("403 Forbidden","Invalid sign-in request.","");
+    }
+    // Global bounded limit also covers unknown usernames and distributed guesses.
+    {
+        let mut state=state().lock().expect("password attempts");
+        state.password_attempts.retain(|at|*at+900>now());
+        if state.password_attempts.len()>=5 {return response("429 Too Many Requests","Too many sign-in attempts. Try again in 15 minutes.","");}
+        state.password_attempts.push(now());
+    }
+    let field=|key|super::query_param(Some(body),key).and_then(|v|super::decode_path_segment(&v.replace('+'," ")));
+    let username=field("username").unwrap_or_default();
+    let password=field("password").unwrap_or_default();
+    let Some((expected,hash))=password_account() else {return response("403 Forbidden","Invalid username or password.","");};
+    let valid=PasswordHash::new(&hash).ok().is_some_and(|parsed|Argon2::default().verify_password(password.as_bytes(),&parsed).is_ok());
+    if !valid || username!=expected {return response("403 Forbidden","Invalid username or password.","");}
+    let mut state=state().lock().expect("password session");
+    state.sessions.retain(|_,(_,expiry)|*expiry>now());
+    if state.sessions.len()>=MAX_ENTRIES {return response("429 Too Many Requests","Please try again shortly.","");}
+    if let Some(old)=cookie(headers,SESSION_COOKIE){state.sessions.remove(old);}
+    let session=random_token();
+    state.sessions.insert(session.clone(),(format!("password:{expected}"),now()+SESSION_SECONDS));
+    redirect("/",&set_cookie(SESSION_COOKIE,&session,SESSION_SECONDS))
+}
+
 fn cookie<'a>(headers: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
     super::header_value(headers, "cookie")?
         .split(';')
@@ -95,8 +147,10 @@ fn redirect(location: &str, cookies: &str) -> String {
     )
 }
 fn login_page(message: &str) -> String {
+    let password_form=if password_account().is_some() { r#"<form method="post" action="/auth/password"><p><label>Username<input name="username" autocomplete="username" required maxlength="128"></label></p><p><label>Password<input type="password" name="password" autocomplete="current-password" required maxlength="1024"></label></p><button type="submit">Sign in</button></form>"# } else { "" };
+    let google=if google_configured(){r#"<a href="/auth/start">Continue with Google</a>"#}else{""};
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin sign-in · MundusX</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&amp;display=swap"><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#071019;color:#f6fbff;font-family:"Space Grotesk",system-ui,sans-serif}}main{{box-sizing:border-box;width:min(420px,calc(100% - 32px));padding:32px;border:1px solid #26303b;border-radius:16px;background:#0b1420}}h1{{margin:0 0 12px;font-size:26px}}p{{color:#b4bbc4;line-height:1.6}}a{{display:block;text-align:center;padding:13px;border-radius:9px;background:#2459df;color:white;text-decoration:none;font-weight:700}}small{{display:block;margin-top:20px;color:#b4bbc4}}</style></head><body><main><h1>Control plane</h1><p>{message}</p><a href="/auth/start">Continue with Google</a><small>Access is restricted to approved administrators.</small></main></body></html>"#
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin sign-in · MundusX</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&amp;display=swap"><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#071019;color:#f6fbff;font-family:"Space Grotesk",system-ui,sans-serif}}main{{box-sizing:border-box;width:min(420px,calc(100% - 32px));padding:32px;border:1px solid #26303b;border-radius:16px;background:#0b1420}}h1{{margin:0 0 12px;font-size:26px}}p{{color:#b4bbc4;line-height:1.6}}a{{display:block;text-align:center;padding:13px;border-radius:9px;background:#2459df;color:white;text-decoration:none;font-weight:700}}small{{display:block;margin-top:20px;color:#b4bbc4}}</style></head><body><main><h1>Control plane</h1><p>{message}</p>{google}{password_form}<small>Access is restricted to approved administrators.</small></main></body></html>"#
     )
 }
 
@@ -149,7 +203,7 @@ pub fn session_authorized(method: &str, headers: &BTreeMap<String, String>) -> b
     state
         .sessions
         .get(token)
-        .is_some_and(|(email, _)| allowed(email))
+        .is_some_and(|(email, _)| session_identity_allowed(email))
 }
 
 pub fn browser_page(method: &str, path: &str) -> bool {
@@ -168,9 +222,9 @@ pub fn admin_mutation(method: &str, path: &str) -> bool {
 }
 
 pub fn public_request(method: &str, path: &str) -> bool {
-    // Viewing operations and submitting inference are public. Conversation
-    // storage and internal harness APIs retain their existing service auth.
-    browser_page(method, path)
+    // Fleet availability and inference submission remain public; log-bearing
+    // pages and records require an admin session or trusted service token.
+    !log_read(method,path) && (browser_page(method, path)
         || (method == "GET"
             && matches!(
                 path,
@@ -184,7 +238,7 @@ pub fn public_request(method: &str, path: &str) -> bool {
                     | "/v1/credits"
             ))
         || (method == "GET" && path.starts_with("/v1/jobs/"))
-        || (method == "POST" && path == "/v1/jobs")
+        || (method == "POST" && path == "/v1/jobs"))
 }
 
 pub fn handle(
@@ -193,6 +247,10 @@ pub fn handle(
     query: Option<&str>,
     headers: &BTreeMap<String, String>,
 ) -> Option<String> {
+    handle_with_body(method,path,query,headers,"")
+}
+
+pub fn handle_with_body(method:&str,path:&str,query:Option<&str>,headers:&BTreeMap<String,String>,body:&str)->Option<String> {
     if !enabled() || !path.starts_with("/auth/") {
         return None;
     }
@@ -204,12 +262,13 @@ pub fn handle(
         ));
     }
     match (method, path) {
+        ("POST","/auth/password") => Some(password_login(headers,body)),
         ("GET", "/auth/login") => Some(response(
             "200 OK",
-            &login_page("Sign in with your approved Google account."),
+            &login_page("Sign in with your approved administrator account."),
             "",
         )),
-        ("GET", "/auth/start") => {
+        ("GET", "/auth/start") if google_configured() => {
             let nonce = random_token();
             let mut state = state().lock().expect("admin challenges");
             state.challenges.retain(|_, expiry| *expiry > now());
@@ -341,6 +400,50 @@ mod tests {
         format!("{body}.{}", hex::encode(mac.finalize().into_bytes()))
     }
     #[test]
+    fn password_login_and_log_access() {
+        if std::env::var("MUNDUSX_PASSWORD_TEST_CHILD").is_err() {
+            use argon2::{PasswordHasher,password_hash::SaltString};
+            let salt=SaltString::encode_b64(b"test-only-salt-123").unwrap();
+            let hash=Argon2::default().hash_password(b"test-only-password!",&salt).unwrap().to_string();
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","admin_login::tests::password_login_and_log_access"])
+                .env("MUNDUSX_PASSWORD_TEST_CHILD","1")
+                .env("MUNDUSX_ADMIN_LOGIN_ENABLED","true")
+                .env("MUNDUSX_ADMIN_PUBLIC_ORIGIN","https://control.mundusx.ai")
+                .env("MUNDUSX_ADMIN_USERNAME","testadmin")
+                .env("MUNDUSX_ADMIN_PASSWORD_HASH",hash)
+                .env("MUNDUSX_AUTH_DISABLED","true")
+                .env("MUNDUSX_OPERATOR_TOKEN","service-test-token")
+                .status().unwrap().success());
+            return;
+        }
+        let mut headers=BTreeMap::new();
+        for path in ["/","/jobs","/jobs/secret","/v1/jobs","/v1/jobs/secret","/v1/job-events","/v1/status","/v1/credits"] {
+            assert!(!public_request("GET",path));
+            assert!(super::super::authorize_operator_request("GET",path,&headers).is_err(),"{path}");
+        }
+        assert!(!log_read("GET","/v1/jobs/next"));
+        assert!(public_request("GET","/nodes"));
+        assert!(public_request("POST","/v1/jobs"));
+        let body="username=testadmin&password=test-only-password%21";
+        assert!(password_login(&headers,body).starts_with("HTTP/1.1 403"));
+        headers.insert("origin".into(),origin());
+        assert!(password_login(&headers,"username=testadmin&password=wrong").starts_with("HTTP/1.1 403"));
+        let result=password_login(&headers,body);
+        assert!(result.starts_with("HTTP/1.1 303"));
+        assert!(result.contains("Secure; HttpOnly; SameSite=Lax"));
+        assert!(!result.contains("test-only-password"));
+        let cookie=result.lines().find(|line|line.starts_with("Set-Cookie:")).unwrap().trim_start_matches("Set-Cookie: ").split(';').next().unwrap();
+        headers.insert("cookie".into(),cookie.into());
+        assert!(session_authorized("GET",&headers));
+        assert!(super::super::authorize_operator_request("GET","/v1/job-events",&headers).is_ok());
+        assert!(handle("POST","/auth/logout",None,&headers).unwrap().starts_with("HTTP/1.1 303"));
+        assert!(!session_authorized("GET",&headers));
+        for _ in 0..3 {let _=password_login(&headers,"username=unknown&password=wrong");}
+        assert!(password_login(&headers,body).starts_with("HTTP/1.1 429"));
+    }
+
+    #[test]
     fn verifies_signature_audience_nonce_and_expiry() {
         let secret = "test-secret-that-is-at-least-32-characters";
         let value = serde_json::json!({"kind":"mundusx-admin-login-v1","email":"admin@example.com","nonce":"challenge","audience":"https://control.mundusx.ai","expires":1060});
@@ -447,14 +550,14 @@ mod tests {
         }
         let mut headers = BTreeMap::new();
         for path in [
-            "/",
             "/settings",
             "/nodes/node1",
-            "/v1/status",
-            "/v1/jobs",
-            "/v1/jobs/job1",
+
         ] {
             assert!(super::super::authorize_operator_request("GET", path, &headers).is_ok());
+        }
+        for path in ["/","/jobs","/jobs/job1","/v1/jobs","/v1/jobs/job1","/v1/job-events","/v1/status","/v1/credits"] {
+            assert!(super::super::authorize_operator_request("GET",path,&headers).is_err(),"{path}");
         }
         for path in [
             "/v1/jobs",
