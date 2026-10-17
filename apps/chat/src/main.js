@@ -7146,6 +7146,36 @@ export async function submitOpenAiChatCompletion(body, config = configFromEnv(),
     throw httpError(400, "messages must be a non-empty array");
   }
 
+  // Native API clients own tool execution and the full tool-result history.
+  // The browser-chat adapter below intentionally flattens text, so it cannot
+  // handle these requests without silently dropping their tool protocol.
+  if ((Array.isArray(body.tools) && body.tools.length > 0)
+      || body.messages.some((entry) => entry?.role === "tool" || entry?.tool_call_id
+        || (Array.isArray(entry?.tool_calls) && entry.tool_calls.length > 0))) {
+    const upstreamBody = { ...body, stream: false };
+    if (config.modelOverride) upstreamBody.model = config.modelOverride;
+    else delete upstreamBody.model;
+    const latestUser = body.messages.findLast((entry) => entry?.role === "user");
+    const timeoutSeconds = inferChatRequestTimeoutSeconds(openAiMessageText(latestUser?.content),
+      body.timeout_seconds, config.defaultTimeoutSeconds, body.execution_mode ?? "auto");
+    const upstream = await fetchImpl(`${config.controlPlaneUrl}/v1/chat/completions`, {
+      method: "POST",
+      signal: AbortSignal.timeout(timeoutSeconds * 1000),
+      headers: { "Content-Type": "application/json", Accept: "application/json",
+        ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}) },
+      body: JSON.stringify(upstreamBody),
+    });
+    if (!upstream.ok) {
+      const text = await upstream.text();
+      throw httpError(upstream.status, text.trim().slice(0, 240) || `control plane returned ${upstream.status}`);
+    }
+    const completion = await upstream.json();
+    if (!Array.isArray(completion?.choices) || !completion.choices.length) {
+      throw httpError(502, "Control plane returned no native completion choices");
+    }
+    return { ...completion, model: PUBLIC_MODEL_ID };
+  }
+
   const messages = body.messages
     .map((entry) => ({ role: normalizeOpenAiRole(entry?.role), content: openAiMessageText(entry?.content) }))
     .filter((entry) => entry.content);
