@@ -29,7 +29,7 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
         // the client continues an existing task. It is not a new user request.
         payload["messages"].as_array_mut().expect("messages array").insert(0, json!({
             "role":"system", "name":"mundusx_workspace_edit_boundaries",
-            "content":"Follow the user's requested task and the host's instructions. Opening, focusing, selecting, or browsing an editor file is context only, not authorization to edit it or to change the task's target. Keep each planned mutation bound to its explicit file path; re-read that same path before an existing-file edit and use exact observed old text. Never substitute the currently focused file for a planned target. Use create_file only for a new path. If it reports that the file already exists, read it and make a targeted edit only when the current task requires it; do not recreate or replace its full contents. Preserve unrelated completed files and user edits. For syntax-only repairs, preserve existing behavior and registrations: correct the malformed statement in place rather than deleting it to silence diagnostics. Do not claim a write succeeded unless its tool result confirms success. Check changed code for syntax errors before reporting completion."
+            "content":"Follow the user's requested task and the host's instructions. Opening, focusing, selecting, or browsing an editor file is context only, not authorization to edit it or to change the task's target. Keep each planned mutation bound to its explicit file path; re-read that same path before an existing-file edit and use exact observed old text. Never substitute the currently focused file for a planned target. Use create_file only for a new path. If it reports that the file already exists, read it and make a targeted edit only when the current task requires it; do not recreate or replace its full contents. Preserve unrelated completed files and user edits. For syntax-only repairs, preserve existing behavior and registrations: correct the malformed statement in place rather than deleting it to silence diagnostics. Do not claim a write succeeded unless its tool result confirms success. Use get_errors on all changed files before reporting completion; read the actual source around each actionable error and repair it. When command execution is permitted, use the project build/typecheck and tests for its language, including a startup or functional check where relevant. If commands are forbidden or unavailable, state that runtime verification was not performed. Never treat empty/stale diagnostics as proof of runtime correctness."
         }));
     }
     payload
@@ -175,7 +175,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         || ["don't read", "do not read", "don't list", "do not list", "don't search", "do not search", "create ", "delete ", "update ", "replace ", "example", "explain", "pretend"].iter().any(|term| text.contains(term))) {
         return false;
     }
-    let no_commands = ["do not run commands", "don't run commands", "do not use terminal", "no terminal commands"].iter().any(|phrase| text.contains(phrase));
+    let no_commands = ["do not run commands", "don't run commands", "do not run terminal commands", "use file tools only", "do not use terminal", "no terminal commands"].iter().any(|phrase| text.contains(phrase));
     let allowed = |name: &str| match name {
         "list_dir" | "read_file" | "file_search" | "grep_search" => true,
         "create_file" | "create_directory" | "replace_string_in_file" | "get_errors" => coding,
@@ -1351,6 +1351,16 @@ pub fn sse_terminal(payload: &str) -> String {
     format!("{}{}0\r\n\r\n", sse_frame(payload), sse_frame("data: [DONE]\n\n"))
 }
 
+/// Generic OpenAI clients may ignore an error-only SSE frame and then report
+/// "no choices". Preserve a machine-readable failure and a visible terminal
+/// choice, without claiming the request or its validation succeeded.
+pub fn native_failure_stream(id:&str,created:u64,model:&str,error:&str,code:&str)->String {
+    let chunk=json!({"id":id,"object":"chat.completion.chunk","created":created,"model":model,
+        "choices":[{"index":0,"delta":{"role":"assistant","content":format!("Request failed; verification is incomplete. {error}")},"finish_reason":null}],
+        "mundusx":{"status":"failed","verification":"incomplete","error":{"code":code,"message":error}}});
+    format!("{}{}",sse_frame(&format!("data: {chunk}\n\n")),sse_end(id,created,model,"stop"))
+}
+
 pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
     let chunk = json!({
         "id": id,
@@ -2018,5 +2028,17 @@ mod tests {
         assert_eq!(timeout_for_max_tokens(configured, Some(512)).as_secs(), 600);
         assert_eq!(timeout_for_max_tokens(configured, Some(12_288)).as_secs(), 1_656);
         assert_eq!(timeout_for_max_tokens(configured, Some(32_768)).as_secs(), 1_800);
+    }
+}
+
+#[cfg(test)]
+mod native_failure_tests {
+    #[test]
+    fn generic_stream_client_receives_a_choice_and_explicit_failed_metadata() {
+        let wire=super::native_failure_stream("chatcmpl-test",1,"model","edit rejected","native_edit_rejected");
+        assert!(wire.contains("Request failed; verification is incomplete"));
+        assert!(wire.contains(r#""choices""#));
+        assert!(wire.contains("native_edit_rejected"));
+        assert!(wire.contains("[DONE]"));
     }
 }
