@@ -9837,8 +9837,7 @@ fn handle_connection_with_streams(
                             }
                             if wants_stream {
                                 if native_tool_turn {
-                                    let event = serde_json::json!({"error":{"message":error,"type":"native_stream_error"}});
-                                    let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
+                                    let _ = stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"native_stream_error").as_bytes());
                                     return;
                                 }
                                 let event = serde_json::json!({"error":{"message":error,"type":"upstream_stream_error"}});
@@ -9870,8 +9869,7 @@ fn handle_connection_with_streams(
                         if let Err(error)=native_edit_guard::validate(&payload,&completion["choices"][0]["message"]) {
                             if live_stream_job {live_streams.lock().expect("live stream registry lock").remove(&record.job_id);}
                             if wants_stream {
-                                let event=serde_json::json!({"error":{"message":error,"type":"native_response_validation_failed","code":"native_response_validation_failed"}});
-                                let _=stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
+                                let _=stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"native_response_validation_failed").as_bytes());
                                 return;
                             }
                             return write_chat_error(&mut stream,"502 Bad Gateway",&error);
@@ -9884,8 +9882,7 @@ fn handle_connection_with_streams(
                                 .expect("live stream registry lock")
                                 .remove(&record.job_id);
                             if native_tool_turn && completed.status != JobStatus::Completed {
-                                let event = serde_json::json!({"error":{"message":"native tool generation failed before completion","type":"native_stream_error"}});
-                                let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
+                                let _ = stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,"native tool generation failed before completion","native_stream_error").as_bytes());
                             } else if native_tool_turn {
                                 match native_stream.remainder(&completion["choices"][0]["message"]) {
                                     Ok(delta) => {
@@ -9899,8 +9896,7 @@ fn handle_connection_with_streams(
                                         let _ = stream.write_all(chat_gateway::sse_end(&completion_id, created, public_model, reason).as_bytes());
                                     }
                                     Err(error) => {
-                                        let event = serde_json::json!({"error":{"message":error,"type":"stream_reconciliation_error"}});
-                                        let _ = stream.write_all(chat_gateway::sse_terminal(&format!("data: {event}\n\n")).as_bytes());
+                                        let _ = stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"stream_reconciliation_error").as_bytes());
                                     }
                                 }
                             } else if let Ok(remainder) =
