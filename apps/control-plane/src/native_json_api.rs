@@ -543,6 +543,167 @@ fn mentions(text: &str, value: &Value) -> bool {
     ))
     .is_ok_and(|r| r.is_match(text))
 }
+fn requested_binding(data: &Value, text: &str) -> Option<Value> {
+    let (roots, fields) = observed_paths(data);
+    if roots.len() != 1 {
+        return None;
+    }
+    let root = &roots[0];
+    let records = data.pointer(root)?;
+    let rows = records
+        .as_array()
+        .map(|r| r.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![records]);
+    let mut explicit = std::collections::BTreeMap::new();
+    let mut mentioned = std::collections::BTreeMap::new();
+    let leaf = |p: &str| {
+        p.rsplit('/')
+            .next()
+            .unwrap_or("")
+            .replace("~1", "/")
+            .replace("~0", "~")
+    };
+    for path in fields.iter().filter(|p| !p.is_empty()) {
+        let values: Vec<&Value> = rows
+            .iter()
+            .filter_map(|r| r.pointer(path))
+            .filter(|v| !v.is_object() && !v.is_array())
+            .collect();
+        for value in &values {
+            if mentions(text, value) {
+                mentioned.insert(
+                    format!("{path}:{}", value),
+                    (path.clone(), (*value).clone()),
+                );
+            }
+        }
+        if values.is_empty() {
+            continue;
+        }
+        let key = leaf(path);
+        let pattern = format!(
+            r#"(?iu)(?:^|[^\p{{L}}\p{{N}}_]){}\s*(?:(?:=|:|equals\b|is\b)\s*)?(?:"((?:\\.|[^"\\])*)"|'([^']*)'|([\p{{L}}\p{{N}}_-]+))(?:[.,;?]?(?:\s|$))"#,
+            regex::escape(&key)
+        );
+        let re = regex::Regex::new(&pattern).ok()?;
+        for found in re.captures_iter(text) {
+            let quoted = found.get(1).or_else(|| found.get(2));
+            let raw = quoted.or_else(|| found.get(3))?.as_str();
+            if quoted.is_none()
+                && ["of", "for", "with", "the", "and", "in", "from", "is"]
+                    .contains(&raw.to_lowercase().as_str())
+            {
+                continue;
+            }
+            let all_string = values.iter().all(|v| v.is_string());
+            let all_number = values.iter().all(|v| v.is_number());
+            let numeric = text
+                .to_lowercase()
+                .contains(&format!("numeric {}", key.to_lowercase()));
+            let string = text
+                .to_lowercase()
+                .contains(&format!("string {}", key.to_lowercase()));
+            let value = if found.get(1).is_some() {
+                let Ok(v) = serde_json::from_str::<Value>(&format!("\"{raw}\"")) else {
+                    continue;
+                };
+                v
+            } else if quoted.is_some() || string || all_string && !numeric {
+                json!(raw)
+            } else if all_number || numeric {
+                let Ok(v) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                if !v.is_number() {
+                    continue;
+                }
+                v
+            } else {
+                let Ok(v) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                if v.is_object() || v.is_array() {
+                    continue;
+                }
+                v
+            };
+            explicit.insert(format!("{path}:{value}"), (path.clone(), value));
+        }
+    }
+    let candidates = if !explicit.is_empty() {
+        explicit
+    } else {
+        mentioned
+    };
+    if candidates.len() != 1 {
+        return None;
+    }
+    let (_, (match_path, match_value)) = candidates.into_iter().next()?;
+    let selected: Vec<&String> = fields
+        .iter()
+        .filter(|p| {
+            !p.is_empty()
+                && **p != match_path
+                && mentions(&text.to_lowercase(), &json!(leaf(p).to_lowercase()))
+        })
+        .collect();
+    let select = if selected.len() == 1 {
+        selected[0].clone()
+    } else if selected.is_empty()
+        && regex::Regex::new(r"(?i)\b(record|details|object)\b")
+            .ok()?
+            .is_match(text)
+    {
+        String::new()
+    } else {
+        return None;
+    };
+    Some(
+        json!({"records_pointer":root,"match_pointer":match_path,"match_value":match_value,"select_pointer":select}),
+    )
+}
+fn answer(result: &Value) -> String {
+    if result["matches"] == 1
+        && result["missing_selected_fields"] == 0
+        && result["truncated"] == false
+    {
+        let v = &result["values"][0];
+        v.as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| v.to_string())
+    } else if result["matches"] == 0 {
+        "No matching record was found in the fetched response.".to_owned()
+    } else if result["matches"] == 1 && result["missing_selected_fields"] == 1 {
+        "The matching record does not contain the requested field.".to_owned()
+    } else {
+        format!("API lookup result: {result}")
+    }
+}
+pub fn observed_completion(
+    request: &crate::contracts::ChatCompletionRequest,
+    id: &str,
+    created: u64,
+    model: &str,
+) -> Option<Value> {
+    if request
+        .tool_choice
+        .as_ref()
+        .is_some_and(|c| c.as_str() != Some("auto"))
+    {
+        return None;
+    }
+    let payload = serde_json::to_value(request).ok()?;
+    let (_, data) = observed(&payload)?;
+    let (_, _, text) = current(&payload)?;
+    if !read_intent(text) {
+        return None;
+    }
+    let binding = requested_binding(&data, text)?;
+    let result = query(&data, &binding).ok()?;
+    Some(
+        json!({"id":id,"created":created,"model":model,"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":answer(&result)},"finish_reason":"stop"}],"mundusx":{"routing":"observed-json-binding","inference_used":false}}),
+    )
+}
 pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Value, String> {
     let Some(calls) = message["tool_calls"].as_array() else {
         return Ok(message.clone());
@@ -637,22 +798,7 @@ pub fn compile(original: &Value, prepared: &Value, message: &Value) -> Result<Va
             Ok(v) => v,
             Err(e) => json!({"error":e,"scope":"observed response only"}),
         };
-        let content = if result["matches"] == 1
-            && result["missing_selected_fields"] == 0
-            && result["truncated"] == false
-        {
-            let value = &result["values"][0];
-            value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.to_string())
-        } else if result["matches"] == 0 {
-            "No matching record was found in the fetched response.".to_owned()
-        } else if result["matches"] == 1 && result["missing_selected_fields"] == 1 {
-            "The matching record does not contain the requested field.".to_owned()
-        } else {
-            format!("API lookup result: {result}")
-        };
+        let content = answer(&result);
         Ok(json!({"role":"assistant","content":content}))
     }
 }
@@ -873,6 +1019,80 @@ mod tests {
         let args:Value=serde_json::from_str(r#"{"records_pointer":"","match_pointer":"/id","match_value":18446744073709551617001,"select_pointer":"/value"}"#).unwrap();
         assert_eq!(query(&data, &args).unwrap()["values"], json!(["exact"]));
         assert!(data.to_string().contains("18446744073709551617001"));
+    }
+    #[test]
+    fn observed_bindings_resolve_unrelated_schemas_without_entity_or_field_templates() {
+        for (data, text, expected) in [
+            (
+                json!([{"person":"David","age":40}]),
+                "Using API, whats the age of David?",
+                json!([40]),
+            ),
+            (
+                json!([{"id":105,"name":"John Doe"}]),
+                "Using API, what is the name for numeric id 105?",
+                json!(["John Doe"]),
+            ),
+            (
+                json!({"payload":{"records":[{"recordKey":"STU-007","metrics":{"score":91}}]}}),
+                "Using API, find score for recordKey STU-007.",
+                json!([91]),
+            ),
+            (
+                json!({"payload":{"records":[{"recordKey":"STU-007","metrics":{"score":91}}]}}),
+                "Using API, find score for recordKey STU-999. Report if no match.",
+                json!([]),
+            ),
+            (
+                json!([{"customer_ref":"C-12","balance":99}]),
+                "Using API, find balance for customer_ref C-12.",
+                json!([99]),
+            ),
+            (
+                json!([{"key":"A\"B","score":9}]),
+                r#"Using API, find score for key "A\"B"."#,
+                json!([9]),
+            ),
+            (
+                json!([{"key":"001","enabled":false}]),
+                "Using API, find enabled for key 001.",
+                json!([false]),
+            ),
+            (
+                json!([{"编号":"学生-002","资料":{"年龄":32}}]),
+                "Using API, find 年龄 for 编号 学生-002.",
+                json!([32]),
+            ),
+        ] {
+            let binding =
+                requested_binding(&data, text).unwrap_or_else(|| panic!("No binding for {text}"));
+            assert_eq!(
+                query(&data, &binding).unwrap()["values"],
+                expected,
+                "{text}"
+            );
+        }
+        assert!(requested_binding(
+            &json!([{"a":1,"b":1,"value":20}]),
+            "Using API, what value for 1?"
+        )
+        .is_none());
+    }
+    #[test]
+    fn observed_missing_identifier_finishes_without_another_model_call() {
+        let mut p =
+            fetched(r#"{"payload":{"records":[{"recordKey":"STU-007","metrics":{"score":91}}]}}"#);
+        p["messages"][0]["content"] = json!(p["messages"][0]["content"].as_str().unwrap().replace(
+            "whats the age of David? pls find it in api",
+            "Using API, find score for recordKey STU-999. Report if no match."
+        ));
+        let request: crate::contracts::ChatCompletionRequest = serde_json::from_value(p).unwrap();
+        let result = observed_completion(&request, "id", 1, "model").unwrap();
+        assert_eq!(
+            result["choices"][0]["message"]["content"],
+            "No matching record was found in the fetched response."
+        );
+        assert_eq!(result["mundusx"]["inference_used"], false);
     }
     #[test]
     fn batched_old_lookups_are_not_executed_or_confused_with_a_current_missing_id() {
