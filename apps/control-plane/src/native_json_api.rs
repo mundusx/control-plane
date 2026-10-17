@@ -59,7 +59,7 @@ fn read_intent(text: &str) -> bool {
     ]
     .iter()
     .any(|s| instruction_text.contains(s));
-    let mutation=regex::Regex::new(r"(?i)(?:^(?:(?:please|pls|can you|could you|would you|ok|okay)\s+)*|\b(?:and|then|please|pls|you|u)\s+)(?:create|post|put|patch|delete|update|build|implement|fix|write|generate|edit|change|modify|remove|execute)\b").unwrap().is_match(&instruction_text);
+    let mutation=regex::Regex::new(r"(?i)(?:^(?:(?:please|pls|can you|could you|would you|ok|okay)\s+)*(?:i\s+(?:need|want)\s+(?:(?:you|u)\s+)?to\s+)?|\b(?:and|then|please|pls|you|u)\s+)(?:add|register|install|configure|refactor|test|create|post|put|patch|delete|update|build|implement|fix|write|generate|edit|change|modify|remove|execute)\b").unwrap().is_match(&instruction_text);
     let conceptual=regex::Regex::new(r"(?i)^(?:explain\b|(?:what is|what's|whats)\s+(?:(?:an?|the)\s+)?api[?.! ]*$)|\b(?:get|find|show|give|generate)\s+(?:me\s+)?(?:some\s+|a\s+)?code\b").unwrap().is_match(&instruction_text);
     api && !denied
         && !abstain
@@ -390,6 +390,9 @@ fn prune_old_failed_commands(messages: &[Value], start: usize) -> Vec<Value> {
         .collect()
 }
 pub fn prepare(payload: Value) -> Value {
+    // A coding turn can mention API tests and GET/DELETE operations without
+    // asking to retrieve JSON. Never replace its registered programming tools.
+    if payload["messages"].as_array().is_some_and(|messages|messages.iter().any(|m|m["name"]=="mundusx_native_coding_policy")) {return payload;}
     let Some((_, _, text)) = current(&payload) else {
         return payload;
     };
@@ -1333,6 +1336,24 @@ mod tests {
         assert!(explicit_read_url(&p).is_none());
         p["messages"][0]["content"]=json!("<userRequest>Using API http://[::1]:3000/students find age.</userRequest>");
         assert_eq!(explicit_read_url(&p).as_deref(),Some("http://[::1]:3000/students"));
+    }
+    #[test]
+    fn api_implementation_and_test_plans_do_not_become_json_lookups() {
+        for text in [
+            "Add course CRUD API to this project. Run checks covering create, list, get by id, update and delete.",
+            "I need to add course CRUD API with get and delete tests in this project.",
+            "Please configure an API then get the tests running.",
+            "Test the API project including get and delete handlers.",
+        ] {
+            assert!(!read_intent(text),"{text}");
+            let mut p=fixture("Windows");p["messages"][0]["content"]=json!(format!("<userRequest>{text}</userRequest>"));
+            assert_eq!(prepare(p.clone()),p);
+        }
+        // Even an ambiguous retrieval-sounding implementation step must keep
+        // the coding planner's catalog once that turn has been classified.
+        let mut p=fixture("Windows");p["messages"].as_array_mut().unwrap().insert(0,json!({"role":"system","name":"mundusx_native_coding_policy","content":"Implement the current feature using the registered tools"}));
+        assert_eq!(prepare(p.clone()),p);
+        assert!(read_intent("Using the API http://localhost:3000/api/students, find age for id 105."));
     }
     #[test]
     fn batched_old_lookups_are_not_executed_or_confused_with_a_current_missing_id() {
