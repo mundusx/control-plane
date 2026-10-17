@@ -204,13 +204,14 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         return false;
     }
     let no_commands = ["do not run commands", "don't run commands", "do not run terminal commands", "use file tools only", "do not use terminal", "no terminal commands"].iter().any(|phrase| text.contains(phrase));
+    let feature_edit_phase=coding && !http_action && !text.contains("http://") && !text.contains("https://") && native_feature_source_creation(&text) && !native_current_source_write(request);
     let known_http_endpoint=http_action && request.messages.iter().filter(|m|matches!(m.role.as_str(),"user"|"tool")).any(|m|m.content.as_str().is_some_and(|text|regex::Regex::new(r#"https?://(?:localhost|127\.0\.0\.1|[a-zA-Z0-9][a-zA-Z0-9.-]*)(?::[0-9]+)?(?:/[^\s<>"]*)?"#).is_ok_and(|r|r.is_match(text))));
     let allowed = |name: &str| if http_action {
         matches!(name,"run_in_terminal"|"get_terminal_output"|"send_to_terminal"|"kill_terminal") && !no_commands
             || !known_http_endpoint && matches!(name,"read_file"|"list_dir"|"file_search"|"grep_search")
     } else {match name {
         "list_dir" | "read_file" | "file_search" | "grep_search" => true,
-        name if native_terminal_tool(name) => (coding || git_alias) && !no_commands,
+        name if native_terminal_tool(name) => (coding || git_alias) && !no_commands && !feature_edit_phase,
         name => coding && native_coding_tool(name),
     }};
     if tools.iter().any(|tool| {
@@ -236,6 +237,10 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
     if !continuation || pending_after_read { request.tool_choice = Some(json!("required")); }
+    if feature_edit_phase && !request.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_feature_edit_phase")) {
+        request.messages.push(crate::contracts::ChatMessage {role:"system".into(),name:Some("mundusx_feature_edit_phase".into()),tool_calls:None,tool_call_id:None,
+            content:json!("This feature task is in the source inspection/implementation phase. Read relevant existing source and manifests, then implement the requested source changes with the supplied file tools. Execution tools become available automatically after a confirmed source write, for compilation and tests. Terminal execution is not globally forbidden. Do not reinstall existing dependencies or claim tests have run. Continue the requested implementation rather than waiting for execution tools before making the first needed source change.")});
+    }
     if inspection && !coding && !git_alias && !request.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_current_inspection_scope")) {
         request.messages.push(crate::contracts::ChatMessage {role:"system".into(),
             content:json!("Complete only the latest userRequest. This is an inspection task, not authorization to resume earlier unfinished coding work. Preserve persistent user preferences, but do not continue an older feature request after answering this inspection question. Use the registered read tools only as needed for the latest question. When observed source answers it, return that answer and stop. Do not create files, edit files, run commands, or explore unrelated paths for an older task."),
@@ -281,6 +286,23 @@ fn native_workspace_action(text: &str) -> bool {
         .is_ok_and(|pattern| pattern.is_match(text))
         || regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:(?:can|could|would)\s+(?:you|u)\s+)|(?:i\s+(?:need|want)\s+(?:(?:you|u)\s+)?to\s+))?(?:(?:please|pls)\s+)?(?:add|implement|update|fix|repair|remove|delete)\s+[^\n]*\b(?:this|our|my|the|existing)\s+(?:project|workspace|app|application)\b")
             .is_ok_and(|pattern|pattern.is_match(text))
+}
+
+fn native_feature_source_creation(text:&str)->bool {
+    let pattern=regex::Regex::new(r"(?i)^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:(?:can|could|would)\s+(?:you|u)\s+)|(?:i\s+(?:need|want)\s+(?:(?:you|u)\s+)?to\s+))?(?:(?:please|pls)\s+)?(?:add|implement)\s+(.+)").unwrap();
+    let Some(captures)=pattern.captures(text) else {return false;};
+    let object=captures[1].split(['.',';','\n']).next().unwrap_or("");
+    !regex::Regex::new(r"(?i)\b(?:dependencies|dependency|packages?|libraries|library|sdk)\b").unwrap().is_match(object)
+}
+
+fn native_current_source_write(request:&ChatCompletionRequest)->bool {
+    let start=request.messages.iter().rposition(|m|m.role=="user"&&m.content.as_str().is_some_and(|s|s.contains("<userRequest>"))).map_or(0,|i|i+1);
+    request.messages[start..].iter().filter(|m|m.role=="tool").any(|result| {
+        let Some(id)=result.tool_call_id.as_deref().filter(|id|!id.is_empty()) else {return false;};
+        let success=result.content.as_str().is_some_and(|s|!s.trim().is_empty()&&! ["error","failed","tool execution failed","string replacement failed"].iter().any(|p|s.trim_start().to_ascii_lowercase().starts_with(p)));
+        success && request.messages[start..].iter().filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().any(|call|
+            call["id"].as_str()==Some(id)&&matches!(call["function"]["name"].as_str(),Some("create_file"|"replace_string_in_file"|"insert_edit_into_file")))
+    })
 }
 
 fn native_http_command_action(text:&str)->bool {
@@ -692,7 +714,7 @@ mod native_turn_tool_policy_tests {
             let mut r=project_execution_request(text);let original=r.tools.clone().unwrap();
             assert!(apply_native_turn_tool_policy(&mut r),"{text}");
             let tools=r.tools.as_ref().unwrap().as_array().unwrap();
-            for name in ["read_file","list_dir","create_file","run_in_terminal","get_errors"] {
+            for name in ["read_file","list_dir","create_file","get_errors"] {
                 assert!(tools.contains(original.as_array().unwrap().iter().find(|t|t["function"]["name"]==name).unwrap()));
             }
             assert!(!tools.iter().any(|t|t["function"]["name"]=="mcp_github_create_issue"));
@@ -713,6 +735,26 @@ mod native_turn_tool_policy_tests {
         let payload=native_tool_payload(&r);
         assert!(payload["tools"].as_array().unwrap().iter().any(|t|t["function"]["name"]=="create_file"));
         assert!(!payload["tools"].as_array().unwrap().iter().any(|t|t["function"]["name"]==crate::native_json_api::FETCH));
+    }
+    #[test]
+    fn feature_execution_opens_after_observed_source_writes_not_claims_or_failures() {
+        let text="Add course CRUD API to this project";
+        let mut initial=project_execution_request(text);let original=initial.tools.clone().unwrap();
+        assert!(apply_native_turn_tool_policy(&mut initial));
+        assert!(initial.tools.as_ref().unwrap().as_array().unwrap().iter().all(|t|!native_terminal_tool(t["function"]["name"].as_str().unwrap())));
+        assert!(initial.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_feature_edit_phase")));
+        for (content,opens) in [("Created file",true),("Error: file already exists",false),("String replacement failed: no match",false)] {
+            let mut r=project_execution_request(text);
+            r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:json!("I changed the source"),tool_calls:Some(json!([{"id":"write1","type":"function","function":{"name":"create_file","arguments":"{}"}}])),tool_call_id:None,name:None});
+            r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!(content),tool_calls:None,tool_call_id:Some("write1".into()),name:None});
+            assert!(apply_native_turn_tool_policy(&mut r));
+            let terminal=original.as_array().unwrap().iter().find(|t|t["function"]["name"]=="run_in_terminal").unwrap();
+            assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap().contains(terminal),opens);
+        }
+        for text in ["run this project","test our application","Add a package to this project","Add express package to this project","Add dependencies to this project","Add a record at http://localhost:3000/api/courses"] {
+            let mut r=project_execution_request(text);assert!(apply_native_turn_tool_policy(&mut r));
+            assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="run_in_terminal"),"{text}");
+        }
     }
     #[test]
     fn project_action_terminals_stay_bounded_after_background_tool_results() {
