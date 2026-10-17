@@ -170,7 +170,10 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     // explicitly requested capabilities irrelevant. Defer these mixed tasks
     // to the original client catalog rather than silently hiding their tools.
     if coding && text.split(|c: char| !c.is_alphanumeric()).any(|word|
-        matches!(word,"browser" | "webpage" | "screenshot" | "notebook" | "github" | "docker" | "memory" | "extension" | "extensions" | "parallel" | "subagent")) {
+        matches!(word,"browser" | "web" | "webpage" | "screenshot" | "notebook" | "jupyter" | "github"
+            | "docker" | "container" | "containers" | "memory" | "session" | "extension" | "extensions"
+            | "parallel" | "subagent" | "migration" | "migrate" | "appmod" | "assessment" | "cve" | "cwe"
+            | "sonarqube" | "sonar" | "pylance" | "jdk" | "maven" | "image" | "playwright")) {
         return false;
     }
     if !coding && (!inspection || !explicit_path || text.contains("\n") || text.contains("?")
@@ -472,7 +475,7 @@ mod native_turn_tool_policy_tests {
         let mut r=project_execution_request("run this proj. Do not run terminal commands; use file tools only");
         assert!(apply_native_turn_tool_policy(&mut r));
         assert!(!r.tools.unwrap().as_array().unwrap().iter().any(|t|native_terminal_tool(t["function"]["name"].as_str().unwrap())));
-        for text in ["Explain how to run this project","run it","run this project in the browser","start this app using Docker","test this project using notebook cells","can u run the project with open_browser_page"] {
+        for text in ["Explain how to run this project","run it","run this project in the browser","start this app using Docker","test this project using notebook cells","can u run the project with open_browser_page", "test this project with SonarQube", "update this project for migration assessment", "run this project and use Pylance", "build this project with Maven"] {
             let mut r=project_execution_request(text);let before=serde_json::to_value(&r).unwrap();
             assert!(!apply_native_turn_tool_policy(&mut r),"{text}");assert_eq!(serde_json::to_value(&r).unwrap(),before);
         }
