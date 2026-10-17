@@ -138,6 +138,12 @@ pub fn before_validation(mut delta:serde_json::Value)->serde_json::Value {
 /// Ask the client's registered diagnostics tool after an observed mutation.
 /// This is a deterministic tool handoff, not another inference/planning job.
 pub fn diagnostics_shortcut(request:&crate::contracts::ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<serde_json::Value> {
+    // Do not interleave every project write with an editor-lint repair loop.
+    // The native host/model can request diagnostics and runtime tests normally.
+    // Keep the deterministic verification handoff for explicit syntax repairs.
+    let user=request.messages.iter().rev().find(|m|m.role=="user")?.content.as_str()?;
+    let text=user.split_once("<userRequest>")?.1.split_once("</userRequest>")?.0.trim();
+    if !regex::Regex::new(r"(?i)^(?:fix|repair)\s+.+\bsyntax\b").ok()?.is_match(text) {return None;}
     if request.tool_choice.as_ref().is_some_and(|c|c.as_str()!=Some("auto")) {return None;}
     let tools=request.tools.as_ref()?.as_array()?;
     if !["read_file","list_dir"].iter().all(|name|tools.iter().any(|t|t["function"]["name"].as_str()==Some(name))) {return None;}
@@ -287,6 +293,19 @@ mod tests {
             let (old_words,old_members)=syntax_references(old);let (new_words,new_members)=syntax_references(new);
             assert!(old_words.is_subset(&new_words));assert!(old_members.iter().all(|(key,count)|new_members.get(key).copied().unwrap_or(0)>=*count));
         }
+    }
+    #[test]
+    fn project_writes_are_not_forced_into_intermediate_lint_repairs() {
+        let mut p=payload();
+        p["tools"].as_array_mut().unwrap().push(serde_json::json!({"function":{"name":"get_errors","parameters":{"type":"object","properties":{"filePaths":{"type":"array","items":{"type":"string"}}}}}}));
+        let mut call=edit("D:/sample/routes/studentRoutes.js");call["tool_calls"][0]["id"]=serde_json::json!("write");
+        p["messages"].as_array_mut().unwrap().push(call);
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"tool","tool_call_id":"write","content":"Successfully edited"}));
+        let syntax:crate::contracts::ChatCompletionRequest=serde_json::from_value(p.clone()).unwrap();
+        assert!(diagnostics_shortcut(&syntax,"id",1,"model").is_some());
+        p["messages"][0]["content"]=serde_json::json!("<userRequest>Update the project in D:/sample with models, controllers and routes.</userRequest>");
+        let project:crate::contracts::ChatCompletionRequest=serde_json::from_value(p).unwrap();
+        assert!(diagnostics_shortcut(&project,"id",1,"model").is_none());
     }
     #[test]
     fn advisory_detection_does_not_hide_syntax_or_unknown_diagnostics() {
