@@ -4,6 +4,7 @@ pub fn task_index<'a>(messages:impl DoubleEndedIterator<Item=(usize,&'a str,Opti
     for (i,role,content) in messages.rev() {
         if role!="user" {continue;}
         latest_user.get_or_insert(i);
+        if content.is_some_and(crate::native_checkpoint::is_compaction_text) {return Some(i);}
         let Some(text)=content.and_then(|s|s.split_once("<userRequest>")?.1.split_once("</userRequest>").map(|p|p.0)) else {continue;};
         latest.get_or_insert(i);
         let text=text.trim().trim_end_matches(['.','!','?']).trim().to_ascii_lowercase();
