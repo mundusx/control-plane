@@ -127,11 +127,11 @@ mod tests {
     }
     #[test] fn checkpoint_keeps_the_machine_readable_task_boundary_for_exact_continuation() {
         let output=completion(&request(),"id",1,"m").unwrap();
-        let mut next:ChatCompletionRequest=serde_json::from_value(json!({"messages":[{"role":"user","content":output["choices"][0]["message"]["content"]},{"role":"user","content":"<userRequest>Continue</userRequest>"}]})).unwrap();
+        let mut next:ChatCompletionRequest=serde_json::from_value(json!({"messages":[{"role":"user","content":output["choices"][0]["message"]["content"]},{"role":"user","content":"<userRequest>\n\n</userRequest>"},{"role":"user","content":"<userRequest>Continue</userRequest>"}]})).unwrap();
         normalize_request(&mut next);
         assert_eq!(crate::native_edit_guard::current_request_index(&next),Some(0));
         next.messages.push(serde_json::from_value(json!({"role":"user","content":"<userRequest>hello</userRequest>"})).unwrap());
-        assert_eq!(crate::native_edit_guard::current_request_index(&next),Some(2));
+        assert_eq!(crate::native_edit_guard::current_request_index(&next),Some(3));
     }
     #[test] fn background_client_extraction_round_trips_html_and_exact_active_requirements() {
         let task="Implement <details><summary>Title</summary></details>. Preserve &lt;literal&gt;, quotes \"x\" and backslashes \\path. Run real tests. Finish only after they pass.";

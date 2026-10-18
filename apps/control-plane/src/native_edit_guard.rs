@@ -6,6 +6,9 @@ pub fn task_index<'a>(messages:impl DoubleEndedIterator<Item=(usize,&'a str,Opti
         latest_user.get_or_insert(i);
         if content.is_some_and(crate::native_checkpoint::is_compaction_text) {return Some(i);}
         let Some(text)=content.and_then(|s|s.split_once("<userRequest>")?.1.split_once("</userRequest>").map(|p|p.0)) else {continue;};
+        // VS Code inserts an empty request after a compacted checkpoint. It
+        // carries no new intent and must not break a following continuation.
+        if text.trim().is_empty() {continue;}
         latest.get_or_insert(i);
         let text=text.trim().trim_end_matches(['.','!','?']).trim().to_ascii_lowercase();
         if !matches!(text.as_str(),"continue"|"resume"|"continue the task"|"continue this task"|"continue the same task"|"resume the task") {return Some(i);}
