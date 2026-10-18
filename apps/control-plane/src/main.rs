@@ -9476,6 +9476,7 @@ fn handle_connection_with_streams(
                     if let Err(error) = chat_gateway::validate_request(&request_body) {
                         return write_chat_error(&mut stream, "400 Bad Request", &error);
                     }
+                    native_checkpoint::normalize_request(&mut request_body);
                     let environment = control_plane_environment_from_env(
                         std::env::var(CONTROL_PLANE_ENVIRONMENT_ENV).ok().as_deref(),
                     );
