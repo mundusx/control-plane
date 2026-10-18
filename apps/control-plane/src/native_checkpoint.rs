@@ -28,14 +28,20 @@ pub fn is_compaction_text(text: &str) -> bool {
         && text.contains("Your task is to create a comprehensive, detailed summary of the entire conversation")
         && !text.contains("<userRequest>")
 }
+pub fn is_compaction_request(request:&ChatCompletionRequest)->bool {
+    let Some(last)=request.messages.last().filter(|m|m.role=="user").and_then(|m|m.content.as_str()) else {return false;};
+    is_compaction_text(last) || (!last.contains("<userRequest>")
+        &&last.trim_start().starts_with("Summarize the conversation history so far,")
+        &&last.contains("Structure your summary using the enhanced format provided in the system message.")
+        &&request.messages.iter().any(|m|m.role=="system"&&m.content.as_str().is_some_and(|s|s.trim_start().starts_with("Your task is to create a comprehensive, detailed summary of the entire conversation")&&s.contains("This summary will be used to compact the conversation"))))
+}
 
 fn bounded(text: &str, limit: usize) -> Value {
     json!({"text":text.chars().take(limit).collect::<String>(),"truncated":text.chars().count()>limit})
 }
 
 pub fn completion(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
-    let last = request.messages.last()?;
-    if last.role != "user" || !is_compaction_text(last.content.as_str()?) { return None; }
+    if !is_compaction_request(request) { return None; }
     if request.tool_choice.as_ref().is_some_and(|v|!matches!(v.as_str(),Some("auto"|"none"))) { return None; }
     let mut original = request.clone();
     original.messages.pop();
@@ -97,6 +103,22 @@ mod tests {
     use super::*;
     const SUMMARY:&str="The conversation has grown too large for the context window and must be compacted now.\n\nYour task is to create a comprehensive, detailed summary of the entire conversation that captures all essential information.";
     fn request()->ChatCompletionRequest {serde_json::from_value(json!({"messages":[{"role":"user","content":"<userRequest>Implement CRUD. Preserve students. Run real tests; do not weaken assertions.</userRequest>"},{"role":"assistant","content":null,"tool_calls":[{"id":"test1","function":{"name":"run_in_terminal","arguments":"{\"command\":\"node --test api.js\",\"mode\":\"sync\"}"}}]},{"role":"tool","tool_call_id":"test1","content":"AssertionError: expected 404, received 200\nCommand exited with code 1"},{"role":"user","content":SUMMARY}],"tools":[{"function":{"name":"run_in_terminal"}},{"function":{"name":"replace_string_in_file"}}]})).unwrap()}
+    fn simple_request()->ChatCompletionRequest {
+        let mut p=request();p.messages.insert(0,serde_json::from_value(json!({"role":"system","content":"Your task is to create a comprehensive, detailed summary of the entire conversation. This summary will be used to compact the conversation while preserving critical technical details, decisions, and progress."})).unwrap());
+        p.messages.last_mut().unwrap().content=json!("Summarize the conversation history so far, paying special attention to the most recent agent commands and tool results that triggered this summarization. Structure your summary using the enhanced format provided in the system message.");p
+    }
+    #[test] fn manual_simple_compaction_preserves_the_task_without_inference_or_tools() {
+        let mut p=simple_request();assert!(is_compaction_request(&p));assert_eq!(crate::native_edit_guard::current_request_index(&p),Some(p.messages.len()-1));
+        let out=completion(&p,"simple",1,"public").unwrap();assert!(out["choices"][0]["message"]["tool_calls"].is_null());assert_eq!(out["mundusx"]["inference"],false);
+        p.messages=vec![serde_json::from_value(json!({"role":"user","content":out["choices"][0]["message"]["content"]})).unwrap(),serde_json::from_value(json!({"role":"user","content":"<userRequest>Continue</userRequest>"})).unwrap()];normalize_request(&mut p);
+        assert_eq!(crate::native_edit_guard::current_request_index(&p),Some(0));assert!(p.messages[0].content.as_str().unwrap().contains("Implement CRUD. Preserve students. Run real tests; do not weaken assertions."));
+    }
+    #[test] fn simple_summary_requires_its_system_template_and_fallback_is_tool_free() {
+        let mut p=simple_request();p.messages[1].content=json!(format!("<userRequest>{}</userRequest>","x".repeat(16001)));
+        assert!(completion(&p,"id",1,"m").is_none());assert!(crate::chat_gateway::apply_native_turn_tool_policy(&mut p));assert_eq!(p.tool_choice,Some(json!("none")));assert_eq!(p.tools,Some(json!([])));
+        let mut ordinary=simple_request();ordinary.messages.remove(0);assert!(!is_compaction_request(&ordinary));
+        let mut quoted=simple_request();quoted.messages.last_mut().unwrap().content=json!("<userRequest>Summarize the conversation history so far, using this code</userRequest>");assert!(!is_compaction_request(&quoted));
+    }
     #[test] fn checkpoint_preserves_requirements_and_actual_failure_without_an_action() {
         let r=completion(&request(),"checkpoint1",123,"public").unwrap();let m=&r["choices"][0]["message"];
         assert!(m["tool_calls"].is_null());let text=m["content"].as_str().unwrap();

@@ -34,7 +34,7 @@ pub fn native_tool_payload(request: &ChatCompletionRequest) -> serde_json::Value
     payload.as_object_mut().expect("request object").retain(|_, value| !value.is_null());
     payload["stream"] = serde_json::json!(false);
     payload["max_tokens"] = serde_json::json!(request.max_tokens.unwrap_or(3_072));
-    if request.messages.last().is_some_and(|m|m.role=="user"&&m.content.as_str().is_some_and(crate::native_checkpoint::is_compaction_text))
+    if crate::native_checkpoint::is_compaction_request(request)
         && request.tool_choice.as_ref().is_none_or(|v|matches!(v.as_str(),Some("auto"|"none"))) {
         payload["tools"]=json!([]);payload["tool_choice"]=json!("none");
         return payload;
@@ -153,7 +153,7 @@ pub fn is_native_tool_turn(request: &ChatCompletionRequest) -> bool {
 /// choices and all messages. Inspection continuations retain the same catalog
 /// without requiring another action, keeping their prompt prefix reusable.
 pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> bool {
-    if request.messages.last().is_some_and(|m|m.role=="user"&&m.content.as_str().is_some_and(crate::native_checkpoint::is_compaction_text))
+    if crate::native_checkpoint::is_compaction_request(request)
         && request.tool_choice.as_ref().is_none_or(|v|matches!(v.as_str(),Some("auto"|"none"))) {
         request.tools=Some(json!([]));request.tool_choice=Some(json!("none"));
         return true;
