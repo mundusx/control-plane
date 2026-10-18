@@ -9647,6 +9647,23 @@ fn handle_connection_with_streams(
                             note_supabase_failure(&sync_status, error);
                         }
                     }
+                    let retain_disconnect=header_value(&request.headers,"x-mundusx-retain-on-disconnect").is_some_and(|s|s.eq_ignore_ascii_case("true"));
+                    let cancel_native_request=|reason:&str| {
+                        if !chat_gateway::cancel_native_disconnect(native_tool_turn,retain_disconnect,reason) {return false;}
+                        let cancelled={
+                            let mut guard=state.lock().expect("state lock");
+                            let Ok(cancelled)=guard.cancel_job(&record.job_id,now_unix_seconds()) else {return false;};
+                            let event=guard.record_job_event(None,Some(record.job_id.clone()),"chat_completion_disconnected",serde_json::json!({"job_id":record.job_id,"reason":reason}),now_unix_seconds());
+                            if let Err(error)=save_state(&guard) {eprintln!("failed to persist disconnected native job: {error}");}
+                            (cancelled,event)
+                        };
+                        if let Some(db)=supabase.as_ref() {
+                            if let Err(error)=db.record_job(&cancelled.0) {note_supabase_failure(&sync_status,error);}
+                            if let Err(error)=db.record_job_event(&cancelled.1) {note_supabase_failure(&sync_status,error);}
+                        }
+                        live_streams.lock().expect("live stream registry lock").remove(&record.job_id);
+                        true
+                    };
                     let admission_weight = chat_gateway::graph_admission_weight(&record);
                     if wants_stream {
                         if let Err(error) = stream.write_all(
@@ -9660,6 +9677,7 @@ fn handle_connection_with_streams(
                             .as_bytes(),
                         ) {
                             eprintln!("failed to start chat stream: {error}");
+                            if cancel_native_request(&format!("chat stream disconnected: {error}")) {return;}
                             activate_held_chat_job(
                                 Arc::clone(&chat_admission),
                                 Arc::clone(&state),
@@ -9734,6 +9752,7 @@ fn handle_connection_with_streams(
                     let mut admission_permit = match permit_result {
                         Ok(permit) => Some(permit),
                         Err(error) => {
+                            cancel_native_request(&error);
                             return write_chat_error(
                                 &mut stream,
                                 "503 Service Unavailable",
@@ -9827,6 +9846,7 @@ fn handle_connection_with_streams(
                     let completed = match completed_result {
                         Ok(job) => job,
                         Err(error) => {
+                            cancel_native_request(&error);
                             if let Some(permit) = admission_permit.take() {
                                 chat_gateway::release_permit_after_job_terminal(
                                     permit,
@@ -11031,6 +11051,28 @@ mod tests {
         assert!(job.assigned_node_id.is_none());
     }
 
+    #[test]
+    fn disconnected_native_http_stream_cancels_its_assignment() {
+        let mut initial=ControlPlaneState::default();register_ready_node(&mut initial,"disconnect-node","disconnect-host","1");
+        let state=Arc::new(Mutex::new(initial));let handler_state=Arc::clone(&state);
+        let sync=Arc::new(Mutex::new(SupabaseSyncStatus::disabled(StorageSource::LocalJsonOnly)));
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+        let handler=thread::spawn(move || {let (stream,_)=listener.accept().unwrap();handle_connection(stream,handler_state,sync,None,StorageSource::LocalJsonOnly);});
+        let body=serde_json::json!({"messages":[{"role":"user","content":"<userRequest>Fix the project in D:/disconnect-test</userRequest>"}],"stream":true,"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}},{"type":"function","function":{"name":"list_dir","parameters":{"type":"object"}}},{"type":"function","function":{"name":"replace_string_in_file","parameters":{"type":"object"}}}]}).to_string();
+        let mut client=TcpStream::connect(address).unwrap();client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).unwrap();
+        let mut headers=[0u8;4096];let count=client.read(&mut headers).unwrap();assert!(String::from_utf8_lossy(&headers[..count]).contains("200 OK"));
+        let id={let mut guard=state.lock().unwrap();let job=guard.jobs.values_mut().next().unwrap();job.status=JobStatus::Assigned;job.assigned_node_id=Some("disconnect-node".into());job.assigned_at=Some(now_unix_seconds());let id=job.job_id.clone();guard.nodes.get_mut("disconnect-node").unwrap().reported_state=crate::contracts::AgentState::Busy;id};
+        client.shutdown(std::net::Shutdown::Both).unwrap();drop(client);
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(35);
+        let cancelled=loop {
+            if state.lock().unwrap().jobs[&id].error.as_deref()==Some("cancelled by client") {break true;}
+            if std::time::Instant::now()>=deadline {let _=state.lock().unwrap().cancel_job(&id,now_unix_seconds());break false;}
+            thread::sleep(std::time::Duration::from_millis(50));
+        };
+        handler.join().unwrap();assert!(cancelled,"native disconnect must cancel without a custom cancel API call");
+        let guard=state.lock().unwrap();assert!(guard.jobs[&id].assigned_node_id.is_none());assert_eq!(guard.nodes["disconnect-node"].reported_state,crate::contracts::AgentState::Ready);
+    }
     #[test]
     fn streaming_search_requests_reach_inference_without_gateway_tools() {
         let state = Arc::new(Mutex::new(ControlPlaneState::default()));

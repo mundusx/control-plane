@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 
 pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]";
 
+pub fn cancel_native_disconnect(native:bool,retain:bool,error:&str)->bool {
+    native&&!retain&&(error.starts_with("chat stream disconnected:")||error.starts_with("chat stream disconnected while queued:"))
+}
+
 fn normalize_native_read_results(payload:&mut Value) {
     let Some(messages)=payload["messages"].as_array_mut() else {return;};let mut reads=BTreeMap::new();
     for m in messages {
@@ -2262,6 +2266,7 @@ pub fn validate_request(request: &ChatCompletionRequest) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
+        cancel_native_disconnect,
         completion_response, history_contains_sensitive_data, is_openwebui_metadata_request,
         models_response, output_hit_generation_limit, public_model_id, sse_finish, sse_start,
         strip_generation_limit_marker, timeout_for_max_tokens, validate_model,
@@ -2351,6 +2356,16 @@ mod tests {
         assert_eq!(admission.snapshot().active, 1);
         assert_eq!(admission.snapshot().queued, 0);
         drop(active);
+    }
+    #[test]
+    fn native_disconnect_cancels_by_default_without_changing_resumable_chat() {
+        for error in ["chat stream disconnected: broken pipe","chat stream disconnected while queued: reset"] {
+            assert!(cancel_native_disconnect(true,false,error));
+            assert!(!cancel_native_disconnect(false,false,error));
+            assert!(!cancel_native_disconnect(true,true,error));
+        }
+        assert!(!cancel_native_disconnect(true,false,"native tool validation failed"));
+        assert!(!cancel_native_disconnect(true,false,"chat completion timed out after 600 seconds"));
     }
 
     #[test]
