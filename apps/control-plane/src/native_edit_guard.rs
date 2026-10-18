@@ -16,6 +16,7 @@ fn request_index(messages:&[serde_json::Value])->Option<usize> {
     task_index(messages.iter().enumerate().map(|(i,m)|(i,m["role"].as_str().unwrap_or(""),m["content"].as_str())))
 }
 pub fn current_request_index(request:&crate::contracts::ChatCompletionRequest)->Option<usize> {
+    if crate::native_checkpoint::is_compaction_request(request) {return request.messages.len().checked_sub(1);}
     task_index(request.messages.iter().enumerate().map(|(i,m)|(i,m.role.as_str(),m.content.as_str())))
 }
 fn validate_native_tool_schema(payload:&serde_json::Value,message:&serde_json::Value)->Result<(),String> {
