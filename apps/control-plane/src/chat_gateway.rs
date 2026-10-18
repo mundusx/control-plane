@@ -222,7 +222,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         && action.split(|c:char| !c.is_alphanumeric()).any(|word|
             matches!(word,"program" | "project" | "application" | "app" | "api"));
     let http_action = native_http_command_action(&text);
-    let workspace_action = native_workspace_action(&text) || http_action;
+    let workspace_action = native_workspace_action(&text) || native_named_file_action(&text) || http_action;
     let coding = native_workspace_root(request).is_some()
         && (workspace_action || ((explicit_path || project_creation)
         && ["create ","update ","fix ","edit ","add ","repair ","continue "].iter().any(|prefix| action.starts_with(prefix))))
@@ -320,6 +320,11 @@ fn native_coding_tool(name: &str) -> bool {
 // Recognize ordinary workspace actions without requiring the user to repeat
 // an absolute path. Explanation requests, examples and ambiguous "run it"
 // keep the original catalog. Specialized capabilities are handled above.
+fn native_named_file_action(text:&str)->bool {
+    regex::Regex::new(r#"^(?:(?:first|then|please|pls)\s+)*(?:repair|replace|edit|update|fix|create|delete|remove)\s+(?:the\s+)?(?:(?:test|source|config|configuration)\s+)?(?:file\s*:?\s+)?[`'"]?[\p{L}\p{N}_./\\:+-]+\.[a-z0-9_]+(?:[`'"]|[\s.,;:]|$)"#)
+        .is_ok_and(|pattern|pattern.is_match(text))
+}
+
 fn native_workspace_action(text: &str) -> bool {
     regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:finish|complete)\s+[^\n]*\b(?:project|workspace|application|api|crud|code|tests?)\b").is_ok_and(|pattern|pattern.is_match(text))
         || regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|start|build|test|debug|fix|repair|update|edit|create|continue)\s+(?:the\s+|this\s+|our\s+|my\s+)?(?:proj|project|app|application|workspace)\b")
@@ -792,6 +797,24 @@ mod native_turn_tool_policy_tests {
         for text in ["Explain how to add courses to this project","Do not add courses to this project","Show an example of adding Rust code to this project"] {
             let mut r=project_execution_request(text);let before=serde_json::to_value(&r).unwrap();
             assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
+        }
+    }
+    #[test]
+    fn explicit_relative_file_repairs_use_coding_tools_without_an_absolute_path() {
+        for text in ["First repair the test file: test-course-api.js. Replace the entire file. Read exports before writing.","First replace the source file: src/lib.rs.","Edit StudentController.java", "Update src/model.py", "Fix parser.cpp", "Please repair src/student.cs"] {
+            let mut r=project_execution_request(text);
+            r.tools.as_mut().unwrap().as_array_mut().unwrap().extend([
+                json!({"type":"function","function":{"name":"appmod-python-orchestrate-code-migration","parameters":{"required":["kbId"]}}}),
+                json!({"type":"function","function":{"name":"replace_string_in_file","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"oldString":{"type":"string"},"newString":{"type":"string"}},"required":["filePath","oldString","newString"]}}})]);
+            assert!(apply_native_turn_tool_policy(&mut r),"{text}");
+            let tools=r.tools.as_ref().unwrap().as_array().unwrap();
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="appmod-python-orchestrate-code-migration"));
+            assert!(tools.iter().any(|t|t["function"]["name"]=="read_file"));assert!(tools.iter().any(|t|t["function"]["name"]=="replace_string_in_file"));
+            assert!(!tools.iter().any(|t|t["function"]["name"]=="open_browser_page"));
+            if text.starts_with("First") {assert!(!tools.iter().any(|t|t["function"]["name"]=="run_in_terminal"));}
+        }
+        for text in ["Explain how to fix parser.cpp", "Show an example of editing model.py", "Do not edit model.py"] {
+            let mut r=project_execution_request(text);let before=r.tools.clone();assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(r.tools,before);
         }
     }
     #[test]
