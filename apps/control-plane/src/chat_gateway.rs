@@ -302,7 +302,8 @@ fn native_coding_tool(name: &str) -> bool {
 // an absolute path. Explanation requests, examples and ambiguous "run it"
 // keep the original catalog. Specialized capabilities are handled above.
 fn native_workspace_action(text: &str) -> bool {
-    regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|start|build|test|debug|fix|repair|update|edit|create|continue)\s+(?:the\s+|this\s+|our\s+|my\s+)?(?:proj|project|app|application|workspace)\b")
+    regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:finish|complete)\s+[^\n]*\b(?:project|workspace|application|api|crud|code|tests?)\b").is_ok_and(|pattern|pattern.is_match(text))
+        || regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:can|could|would)\s+(?:you|u)\s+)?(?:(?:please|pls)\s+)?(?:run|start|build|test|debug|fix|repair|update|edit|create|continue)\s+(?:the\s+|this\s+|our\s+|my\s+)?(?:proj|project|app|application|workspace)\b")
         .is_ok_and(|pattern| pattern.is_match(text))
         || regex::Regex::new(r"^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:(?:can|could|would)\s+(?:you|u)\s+)|(?:i\s+(?:need|want)\s+(?:(?:you|u)\s+)?to\s+))?(?:(?:please|pls)\s+)?(?:add|implement|update|fix|repair|remove|delete)\s+[^\n]*\b(?:this|our|my|the|existing)\s+(?:project|workspace|app|application)\b")
             .is_ok_and(|pattern|pattern.is_match(text))
@@ -312,6 +313,7 @@ fn native_feature_source_creation(text:&str)->bool {
     // Explicit preflight execution is part of the requested implementation
     // workflow, even before its first write. Tool narrowing is not permission.
     if regex::Regex::new(r"(?i)\bfirst\s+(?:run|execute|test|check|verify)\b").unwrap().is_match(text) {return false;}
+    if regex::Regex::new(r"(?i)\bfirst\s+(?:repair|replace|edit|create|write)\s+(?:the\s+)?(?:test|source|file)\b").unwrap().is_match(text) {return true;}
     let pattern=regex::Regex::new(r"(?i)^(?:(?:ok|okay|then|please|pls)\s*[,!.]?\s+)*(?:(?:(?:can|could|would)\s+(?:you|u)\s+)|(?:i\s+(?:need|want)\s+(?:(?:you|u)\s+)?to\s+))?(?:(?:please|pls)\s+)?(?:add|implement)\s+(.+)").unwrap();
     let Some(captures)=pattern.captures(text) else {return false;};
     let object=captures[1].split(['.',';','\n']).next().unwrap_or("");
@@ -746,6 +748,20 @@ mod native_turn_tool_policy_tests {
         for text in ["Explain how to add courses to this project","Do not add courses to this project","Show an example of adding Rust code to this project"] {
             let mut r=project_execution_request(text);let before=serde_json::to_value(&r).unwrap();
             assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(serde_json::to_value(&r).unwrap(),before);
+        }
+    }
+    #[test]
+    fn finish_coding_tasks_keep_core_tools_and_honor_source_first_ordering() {
+        for text in ["Finish the course CRUD task with automated HTTP tests. First repair the test file.","Complete the Rust API with automated tests","Finish and verify the course API in this workspace"] {
+            let mut r=project_execution_request(text);
+            r.tools.as_mut().unwrap().as_array_mut().unwrap().extend([json!({"type":"function","function":{"name":"appmod-python-run-test"}}),json!({"type":"function","function":{"name":"GetSymbolInfo_CppTools"}})]);
+            assert!(apply_native_turn_tool_policy(&mut r));
+            let tools=r.tools.as_ref().unwrap().as_array().unwrap();assert!(tools.iter().any(|t|t["function"]["name"]=="insert_edit_into_file"));
+            assert!(!tools.iter().any(|t|matches!(t["function"]["name"].as_str(),Some("appmod-python-run-test"|"GetSymbolInfo_CppTools"))));
+            if text.contains("First repair") {assert!(!tools.iter().any(|t|t["function"]["name"]=="run_in_terminal"));}
+        }
+        for text in ["Finish the poem","Complete the browser screenshot task in this project","Complete the Python migration in this project"] {
+            let mut r=project_execution_request(text);let before=r.tools.clone();assert!(!apply_native_turn_tool_policy(&mut r));assert_eq!(r.tools,before);
         }
     }
     #[test]
