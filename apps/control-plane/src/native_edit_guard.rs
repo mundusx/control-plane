@@ -1,4 +1,22 @@
 // File-tool preconditions also run at the gateway so older agents cannot bypass them.
+pub fn task_index<'a>(messages:impl DoubleEndedIterator<Item=(usize,&'a str,Option<&'a str>)>)->Option<usize> {
+    let mut latest=None;let mut latest_user=None;
+    for (i,role,content) in messages.rev() {
+        if role!="user" {continue;}
+        latest_user.get_or_insert(i);
+        let Some(text)=content.and_then(|s|s.split_once("<userRequest>")?.1.split_once("</userRequest>").map(|p|p.0)) else {continue;};
+        latest.get_or_insert(i);
+        let text=text.trim().trim_end_matches(['.','!','?']).trim().to_ascii_lowercase();
+        if !matches!(text.as_str(),"continue"|"resume"|"continue the task"|"continue this task"|"continue the same task"|"resume the task") {return Some(i);}
+    }
+    latest.or(latest_user)
+}
+fn request_index(messages:&[serde_json::Value])->Option<usize> {
+    task_index(messages.iter().enumerate().map(|(i,m)|(i,m["role"].as_str().unwrap_or(""),m["content"].as_str())))
+}
+pub fn current_request_index(request:&crate::contracts::ChatCompletionRequest)->Option<usize> {
+    task_index(request.messages.iter().enumerate().map(|(i,m)|(i,m.role.as_str(),m.content.as_str())))
+}
 fn validate_native_tool_schema(payload:&serde_json::Value,message:&serde_json::Value)->Result<(),String> {
     fn check(value:&serde_json::Value,schema:&serde_json::Value,path:&str,depth:usize)->Result<(),String> {
         if depth>16 {return Err(format!("{path}: schema depth exceeded"));}
@@ -60,7 +78,7 @@ pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(
     validate_native_tool_schema(payload,message)?;
     let Some(calls)=message["tool_calls"].as_array() else {return Ok(())};
     let messages=payload["messages"].as_array().ok_or("native edit precondition failed: missing history")?;
-    let start=messages.iter().rposition(|m|m["role"]=="user" && m["content"].as_str().is_some_and(|s|s.contains("<userRequest>"))).map_or(0,|i|i+1);
+    let start=request_index(messages).map_or(0,|i|i+1);
     // Mentioning a path in a negative instruction must not grant edit scope.
     let scoped_files:Vec<String>=start.checked_sub(1).and_then(|i|messages[i]["content"].as_str())
         .and_then(|s|s.split_once("<userRequest>")?.1.split_once("</userRequest>").map(|(s,_)|s.trim()))
@@ -175,7 +193,7 @@ pub fn verification_loop_stop(request:&crate::contracts::ChatCompletionRequest,i
     let tools=request.tools.as_ref()?.as_array()?;
     if !["read_file","list_dir","get_errors"].iter().all(|name|tools.iter().any(|t|t["function"]["name"].as_str()==Some(name))) {return None;}
     let history=serde_json::to_value(&request.messages).ok()?;let messages=history.as_array()?;
-    let start=messages.iter().rposition(|m|m["role"]=="user" && m["content"].as_str().is_some_and(|s|s.contains("<userRequest>")))?+1;
+    let start=request_index(messages)?+1;
     let call_for=|index:usize|->Option<&serde_json::Value> {
         let result=&messages[index];if result["role"]!="tool" {return None;}
         let call_id=result["tool_call_id"].as_str()?;
@@ -248,7 +266,7 @@ pub fn diagnostics_read(request:&crate::contracts::ChatCompletionRequest,id:&str
     let args:serde_json::Value=serde_json::from_str(call["function"]["arguments"].as_str()?).ok()?;
     let paths=args["filePaths"].as_array()?;if paths.len()!=1 {return None;}
     let path=paths[0].as_str()?;let key=observed_file_key(path)?;
-    let start=request.messages.iter().rposition(|m|m.role=="user").map_or(0,|i|i+1);
+    let start=current_request_index(request).map_or(0,|i|i+1);
     let mutation=request.messages[start..].iter().rev().filter_map(|m|m.tool_calls.as_ref()?.as_array())
         .flatten().find(|c|matches!(c["function"]["name"].as_str(),Some("create_file"|"replace_string_in_file")))?;
     let changed:serde_json::Value=serde_json::from_str(mutation["function"]["arguments"].as_str()?).ok()?;
@@ -271,6 +289,18 @@ mod tests {
         {"role":"assistant","content":null,"tool_calls":[{"id":"read1","function":{"name":"read_file","arguments":"{\"filePath\":\"D:/sample/routes/studentRoutes.js\"}"}}]},
         {"role":"tool","tool_call_id":"read1","content":"router.delete/:id', controller.delete);"}]})}
     fn edit(path:&str)->serde_json::Value {serde_json::json!({"role":"assistant","content":null,"tool_calls":[{"id":"edit1","type":"function","function":{"name":"replace_string_in_file","arguments":serde_json::json!({"filePath":path,"oldString":"router.delete/:id', controller.delete);","newString":"router.delete('/:id', controller.delete);"}).to_string()}}]})}
+    #[test]
+    fn exact_resume_keeps_grounding_and_scope_but_new_requests_reset_it() {
+        let mut p=payload();
+        for text in ["Continue!","resume the task"] {
+            p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"user","content":format!("<userRequest>{text}</userRequest>")}));
+            assert!(validate(&p,&edit("D:/sample/routes/studentRoutes.js")).is_ok());
+            assert!(validate(&p,&edit("D:/sample/models/Student.js")).unwrap_err().contains("outside the explicit files"));
+        }
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"user","content":"<userRequest>hello</userRequest>"}));
+        p["messages"].as_array_mut().unwrap().push(serde_json::json!({"role":"user","content":"<userRequest>continue</userRequest>"}));assert_eq!(request_index(p["messages"].as_array().unwrap()),Some(5));
+        assert!(validate(&p,&edit("D:/sample/routes/studentRoutes.js")).is_err());
+    }
     #[test]
     fn focus_does_not_authorize_a_different_file_even_after_reading_it() {
         let mut p=payload();

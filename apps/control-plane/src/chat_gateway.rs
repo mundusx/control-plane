@@ -162,6 +162,9 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         if last.role != "user" || last.tool_call_id.is_some() { return false; }
         last
     };
+    let task_index=crate::native_edit_guard::current_request_index(request);
+    let resumed=task_index.is_some_and(|i|request.messages.get(i).is_some_and(|m|!std::ptr::eq(m,user)));
+    let user=task_index.and_then(|i|request.messages.get(i)).unwrap_or(user);
     let Some(content) = user.content.as_str() else { return false };
     let Some((_, tail)) = content.split_once("<userRequest>") else { return false };
     let Some((user_request, remainder)) = tail.split_once("</userRequest>") else { return false };
@@ -243,7 +246,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
         if directory_alias { name == Some("list_dir") } else if git_alias { name == Some("run_in_terminal") } else { name.is_some_and(allowed) }
     }).cloned().collect();
     let pending_after_read = if continuation && coding && !http_action && !text.starts_with("create ") {
-        let user_index=request.messages.iter().rposition(|m|m.role=="user").unwrap_or(0);
+        let user_index=crate::native_edit_guard::current_request_index(request).unwrap_or(0);
         let calls:Vec<&Value>=request.messages[user_index+1..].iter().filter(|m|m.role=="assistant")
             .filter_map(|m|m.tool_calls.as_ref().and_then(Value::as_array)).flatten().collect();
         let inspection=|call:&Value|matches!(call.pointer("/function/name").and_then(Value::as_str),Some("read_file"|"list_dir"|"file_search"|"grep_search"|"get_errors"));
@@ -256,7 +259,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     } else {false};
     let advisory_context=coding && last.role=="tool" && last.content.as_str().is_some_and(crate::native_edit_guard::advisory_only);
     request.tools = Some(Value::Array(selected));
-    if !continuation || pending_after_read { request.tool_choice = Some(json!("required")); }
+    if (!continuation && !resumed) || pending_after_read { request.tool_choice = Some(json!("required")); }
     if feature_edit_phase && !request.messages.iter().any(|m|m.name.as_deref()==Some("mundusx_feature_edit_phase")) {
         request.messages.push(crate::contracts::ChatMessage {role:"system".into(),name:Some("mundusx_feature_edit_phase".into()),tool_calls:None,tool_call_id:None,
             content:json!("This feature task is in the source inspection/implementation phase. Read relevant existing source and manifests, then implement the requested source changes with the supplied file tools. Execution tools become available automatically after a confirmed source write, for compilation and tests. Terminal execution is not globally forbidden. Do not reinstall existing dependencies or claim tests have run. Continue the requested implementation rather than waiting for execution tools before making the first needed source change.")});
@@ -321,7 +324,7 @@ fn native_feature_source_creation(text:&str)->bool {
 }
 
 fn native_current_source_write(request:&ChatCompletionRequest)->bool {
-    let start=request.messages.iter().rposition(|m|m.role=="user"&&m.content.as_str().is_some_and(|s|s.contains("<userRequest>"))).map_or(0,|i|i+1);
+    let start=crate::native_edit_guard::current_request_index(request).map_or(0,|i|i+1);
     request.messages[start..].iter().filter(|m|m.role=="tool").any(|result| {
         let Some(id)=result.tool_call_id.as_deref().filter(|id|!id.is_empty()) else {return false;};
         let success=result.content.as_str().is_some_and(|s|!s.trim().is_empty()&&! ["error","failed","tool execution failed","string replacement failed"].iter().any(|p|s.trim_start().to_ascii_lowercase().starts_with(p)));
@@ -1063,6 +1066,18 @@ mod native_turn_tool_policy_tests {
         let mut r=directory_request(r"- D:\sample");
         r.messages.last_mut().unwrap().content=json!("<userRequest>Continue explaining this example</userRequest>");
         assert!(!apply_native_turn_tool_policy(&mut r));
+    }
+    #[test]
+    fn exact_task_resume_reuses_source_phase_without_forcing_an_extra_call() {
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!("<userRequest>Finish the course CRUD API in this workspace. First repair the test file: test.js.</userRequest>");
+        r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"write1","function":{"name":"replace_string_in_file","arguments":"{}"}}])),tool_call_id:None,name:None});
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!("Applied edit"),tool_calls:None,tool_call_id:Some("write1".into()),name:None});
+        r.messages.push(crate::contracts::ChatMessage {role:"user".into(),content:json!("<userRequest>Continue!</userRequest>"),tool_calls:None,tool_call_id:None,name:None});
+        assert!(native_current_source_write(&r));assert!(apply_native_turn_tool_policy(&mut r));
+        assert!(r.tools.as_ref().unwrap().as_array().unwrap().iter().any(|t|t["function"]["name"]=="run_in_terminal"));assert_eq!(r.tool_choice,None);
+        r.messages.push(crate::contracts::ChatMessage {role:"user".into(),content:json!("<userRequest>hello</userRequest>"),tool_calls:None,tool_call_id:None,name:None});
+        assert!(!native_current_source_write(&r));assert!(apply_native_turn_tool_policy(&mut r));assert_eq!(r.tools,Some(json!([])));
     }
     #[test]
     fn explicit_project_diagnostics_hands_off_only_the_registered_requested_scope() {
