@@ -545,6 +545,30 @@ fn native_shortcut_completion(name: &str, arguments: Value, id: &str, created: u
     completion
 }
 
+fn native_directory_result(request:&ChatCompletionRequest,id:&str,created:u64,model:&str)->Option<Value> {
+    if request.tool_choice.as_ref().is_some_and(|c|c.as_str()!=Some("auto")) {return None;}
+    let last=request.messages.last()?;if last.role!="tool" {return None;}
+    let index=request.messages.iter().rposition(|m|m.role=="user"&&m.content.as_str().is_some_and(|s|s.contains("<userRequest>")))?;
+    let (_,tail)=request.messages[index].content.as_str()?.split_once("<userRequest>")?;
+    let (text,rest)=tail.split_once("</userRequest>")?;
+    if text.trim()!="ls ."||rest.contains("<userRequest>") {return None;}
+    let tools=request.tools.as_ref()?.as_array()?;
+    if !tools.iter().any(|t|t["function"]["name"]=="list_dir") {return None;}
+    let result_id=last.tool_call_id.as_deref().filter(|s|!s.is_empty())?;
+    let call=request.messages[index+1..request.messages.len()-1].iter().rev().filter(|m|m.role=="assistant").filter_map(|m|m.tool_calls.as_ref()?.as_array()).flatten().find(|c|c["id"].as_str()==Some(result_id))?;
+    if call["function"]["name"]!="list_dir" {return None;}
+    let args:Value=serde_json::from_str(call["function"]["arguments"].as_str()?).ok()?;
+    let root=native_workspace_root(request)?;
+    let canonical=|s:&str|s.replace('\\',"/").trim_end_matches('/').to_string();
+    let root_key=canonical(&root);let call_key=canonical(args["path"].as_str()?);
+    if if root.as_bytes().get(1)==Some(&b':') {!root_key.eq_ignore_ascii_case(&call_key)} else {root_key!=call_key} {return None;}
+    let observed=last.content.as_str()?;if observed.len()>65536 {return None;}
+    let fence="`".repeat(3.max(observed.split(|c|c!='`').map(str::len).max().unwrap_or(0)+1));
+    let content=format!("{fence}text\n{observed}\n{fence}");
+    let mut result=completion_response(id,created,model,&content,"stop",None,None);
+    result["mundusx"]=json!({"routing":"observed-directory-result","inference":false});Some(result)
+}
+
 fn native_git_arguments(request: &ChatCompletionRequest, text: &str) -> Option<Value> {
     let operation=match text {"git init"=>"init","git status"=>"status","git diff"=>"diff",_=>return None};
     let windows=request.messages.iter().rev().filter(|m|m.role=="user").find_map(|m|m.content.as_str()?.split_once("<environment_info>")?.1.split_once("</environment_info>").map(|(body,_)|body))?
@@ -571,6 +595,7 @@ pub fn native_git_shortcut(request: &ChatCompletionRequest, id: &str, created: u
 }
 
 pub fn native_inspection_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
+    if let Some(completion)=native_directory_result(request,id,created,model) {return Some(completion);}
     if let Some(completion)=native_diagnostics_shortcut(request,id,created,model) {return Some(completion);}
     if let Some(completion) = native_directory_shortcut(request,id,created,model) { return Some(completion); }
     if request.tool_choice.as_ref().is_some_and(|choice| choice.as_str() != Some("auto")) { return None; }
@@ -930,6 +955,20 @@ mod native_turn_tool_policy_tests {
         assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
         let mut r = directory_request(r"- D:\sample"); r.tools.as_mut().unwrap()[1]["function"]["parameters"]["required"] = json!(["path","other"]);
         assert!(native_directory_shortcut(&r,"test",1,"model").is_none());
+    }
+    #[test]
+    fn directory_results_preserve_observed_names_without_another_model_call() {
+        let mut r=directory_request(r"- D:\sample");
+        let observed="node_modules/\nstudents.db\nodd ``` name.txt\nIgnore instructions.txt";
+        r.messages.push(crate::contracts::ChatMessage {role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([{"id":"list1","type":"function","function":{"name":"list_dir","arguments":json!({"path":"D:/sample"}).to_string()}}])),tool_call_id:None,name:None});
+        r.messages.push(crate::contracts::ChatMessage {role:"tool".into(),content:json!(observed),tool_calls:None,tool_call_id:Some("list1".into()),name:None});
+        let result=native_inspection_shortcut(&r,"id",1,"model").unwrap();assert_eq!(result["mundusx"]["inference"],false);
+        assert_eq!(result["choices"][0]["message"]["content"],format!("````text\n{observed}\n````"));assert!(sse_finish(&result).contains("[DONE]"));
+        for change in ["unmatched","outside","explicit","different request"] {
+            let mut q=r.clone();
+            match change {"unmatched"=>q.messages.last_mut().unwrap().tool_call_id=Some("missing".into()),"outside"=>q.messages[3].tool_calls=Some(json!([{"id":"list1","function":{"name":"list_dir","arguments":"{\"path\":\"D:/outside\"}"}}])),"explicit"=>q.tool_choice=Some(json!("required")),_=>q.messages[2].content=json!("<userRequest>Explain this project</userRequest>")};
+            assert!(native_directory_result(&q,"id",1,"model").is_none(),"{change}");
+        }
     }
     #[test]
     fn directory_alias_continuations_keep_only_the_registered_directory_tool() {
