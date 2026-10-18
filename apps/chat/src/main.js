@@ -6932,7 +6932,10 @@ export function createServerApp(config = configFromEnv()) {
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const body = await readJsonBody(request, MAX_AGENT_MODEL_BODY_BYTES);
         if (body?.stream === true) {
-          return await streamOpenAiChatCompletion(response, body, config);
+          return await streamOpenAiChatCompletion(response, body, {
+            ...config,
+            retainOnDisconnect: String(request.headers["x-mundusx-retain-on-disconnect"] || "").toLowerCase() === "true",
+          });
         }
         const result = await submitOpenAiChatCompletion(body, config);
         return sendOpenAiJson(response, 200, result);
@@ -7887,6 +7890,7 @@ export async function relayControlPlaneOpenAiStream(
   const headers = {
     Accept: "text/event-stream",
     "Content-Type": "application/json",
+    ...(config.retainOnDisconnect === true ? { "X-MundusX-Retain-On-Disconnect": "true" } : {}),
     ...(config.operatorToken ? { Authorization: `Bearer ${config.operatorToken}` } : {}),
   };
   const controller = new AbortController();
@@ -14289,7 +14293,7 @@ function sendOpenAiJson(response, status, payload) {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-MundusX-Resume-Token",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-MundusX-Resume-Token, X-MundusX-Retain-On-Disconnect",
   });
   response.end(payload === null ? "" : JSON.stringify(payload));
 }
@@ -14307,7 +14311,7 @@ function startOpenAiStream(response, mode, completionId = null, resumeToken = nu
     "Keep-Alive": "timeout=900",
     "X-Accel-Buffering": "no",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-MundusX-Resume-Token",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-MundusX-Resume-Token, X-MundusX-Retain-On-Disconnect",
     "Access-Control-Expose-Headers": "X-MundusX-Stream-Mode, X-MundusX-Completion-Id, X-MundusX-Resume-Token",
     "X-MundusX-Stream-Mode": mode,
     ...(completionId ? { "X-MundusX-Completion-Id": completionId } : {}),
