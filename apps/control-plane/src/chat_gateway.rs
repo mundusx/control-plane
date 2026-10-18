@@ -186,7 +186,7 @@ pub fn apply_native_turn_tool_policy(request: &mut ChatCompletionRequest) -> boo
     let Some((user_request, remainder)) = tail.split_once("</userRequest>") else { return false };
     if user_request.contains('<') || remainder.contains("<userRequest>") { return false; }
     let text = user_request.trim().to_ascii_lowercase();
-    let directory_alias = text == "ls ." && native_workspace_root(request).is_some();
+    let directory_alias = matches!(text.as_str(),"ls"|"ls .") && native_workspace_root(request).is_some();
     let git_alias = native_git_arguments(request,&text).is_some();
     let Some(tools) = request.tools.as_ref().and_then(Value::as_array) else { return false };
     // This policy targets the known VS Code file-tool catalog, not arbitrary
@@ -540,7 +540,8 @@ pub fn native_http_result_shortcut(request:&ChatCompletionRequest,id:&str,create
     Some(json!({"id":id,"object":"chat.completion","created":created,"model":model,"choices":[{"index":0,"message":{"role":"assistant","content":answer},"finish_reason":"stop"}],"mundusx":{"routing":"observed-http-result","inference_used":false}}))
 }
 
-/// Exact `ls .` is a registered file-tool operation, never a terminal command.
+/// Exact `ls` and `ls .` list the unambiguous current workspace through its
+/// registered file tool. Flags and broader shell requests remain model turns.
 /// Return no inference job for this routing decision; the client still owns
 /// permissions/execution and submits the observed result for its final answer.
 pub fn native_directory_shortcut(request: &ChatCompletionRequest, id: &str, created: u64, model: &str) -> Option<Value> {
@@ -550,7 +551,7 @@ pub fn native_directory_shortcut(request: &ChatCompletionRequest, id: &str, crea
     let content = last.content.as_str()?;
     let (_, tail) = content.split_once("<userRequest>")?;
     let (text, remainder) = tail.split_once("</userRequest>")?;
-    if text.trim() != "ls ." || remainder.contains("<userRequest>") { return None; }
+    if !matches!(text.trim(),"ls"|"ls .") || remainder.contains("<userRequest>") { return None; }
     let tools = request.tools.as_ref()?.as_array()?;
     let tool = tools.iter().find(|tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("list_dir"))?;
     if tool.pointer("/function/parameters/type")?.as_str()? != "object"
@@ -575,7 +576,7 @@ fn native_directory_result(request:&ChatCompletionRequest,id:&str,created:u64,mo
     let index=request.messages.iter().rposition(|m|m.role=="user"&&m.content.as_str().is_some_and(|s|s.contains("<userRequest>")))?;
     let (_,tail)=request.messages[index].content.as_str()?.split_once("<userRequest>")?;
     let (text,rest)=tail.split_once("</userRequest>")?;
-    if text.trim()!="ls ."||rest.contains("<userRequest>") {return None;}
+    if !matches!(text.trim(),"ls"|"ls .")||rest.contains("<userRequest>") {return None;}
     let tools=request.tools.as_ref()?.as_array()?;
     if !tools.iter().any(|t|t["function"]["name"]=="list_dir") {return None;}
     let result_id=last.tool_call_id.as_deref().filter(|s|!s.is_empty())?;
@@ -957,6 +958,26 @@ mod native_turn_tool_policy_tests {
         r.messages.insert(1, crate::contracts::ChatMessage {role:"user".into(),content:json!(format!("<workspace_info>\nI am working in a workspace with the following folders:\n{roots}\nI am working in a workspace that has the following structure:\n</workspace_info>")),tool_calls:None,tool_call_id:None,name:None});
         r.tools.as_mut().unwrap()[1]["function"]["parameters"] = json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]});
         r
+    }
+    #[test]
+    fn plain_ls_uses_the_same_matched_workspace_result_without_dispatching_a_model_job() {
+        let mut r=directory_request(r"- D:\sample");
+        r.messages.last_mut().unwrap().content=json!("<userRequest>ls</userRequest>");
+        let completion=native_inspection_shortcut(&r,"plain-ls",1,"model").unwrap();
+        let call=completion["choices"][0]["message"]["tool_calls"][0].clone();
+        assert_eq!(call["function"]["name"],"list_dir");assert_eq!(completion["mundusx"]["inference"],false);
+        let client_request=r.clone();
+        assert!(apply_native_turn_tool_policy(&mut r));
+        assert_eq!(r.tools.as_ref().unwrap().as_array().unwrap().len(),1);
+        r=client_request;
+        r.messages.push(crate::contracts::ChatMessage{role:"assistant".into(),content:Value::Null,tool_calls:Some(json!([call.clone()])),tool_call_id:None,name:None});
+        r.messages.push(crate::contracts::ChatMessage{role:"tool".into(),content:json!("src/\nserver.js"),tool_calls:None,tool_call_id:Some(call["id"].as_str().unwrap().into()),name:None});
+        let result=native_inspection_shortcut(&r,"plain-result",1,"model").unwrap();
+        assert_eq!(result["choices"][0]["message"]["content"],"```text\nsrc/\nserver.js\n```");
+        for task in ["ls -la","ls; delete files","Explain ls","ls /private"] {
+            let mut q=directory_request(r"- D:\sample");q.messages.last_mut().unwrap().content=json!(format!("<userRequest>{task}</userRequest>"));
+            assert!(native_directory_shortcut(&q,"bad",1,"model").is_none());
+        }
     }
     #[test]
     fn exact_directory_alias_returns_a_schema_valid_file_call_and_sse() {
