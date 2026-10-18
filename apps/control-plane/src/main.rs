@@ -4,6 +4,7 @@ mod chat_api_keys;
 mod native_stream;
 mod native_edit_guard;
 mod native_json_api;
+mod native_checkpoint;
 mod qualification;
 mod vision_probe;
 mod global_skills;
@@ -9490,7 +9491,8 @@ fn handle_connection_with_streams(
                     if let Err(error)=chat_gateway::validate_image_inputs(&request_body) {
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
-                    if let Some(completion) = native_json_api::observed_completion(&request_body, &completion_id, created, public_model)
+                    if let Some(completion) = native_checkpoint::completion(&request_body, &completion_id, created, public_model)
+                        .or_else(||native_json_api::observed_completion(&request_body, &completion_id, created, public_model))
                         .or_else(||native_json_api::failure_completion(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_parse_recovery(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_terminal_failure_stop(&request_body, &completion_id, created, public_model))
