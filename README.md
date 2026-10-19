@@ -148,3 +148,21 @@ These unauthenticated routes are the stable client boundary for Open WebUI, Herm
 ### Automatic contributor concurrency
 
 Without an explicit operator parallel-job override, the control plane uses the smaller of the contributor's reported `parallel_slots`, `max_parallel_jobs`, and optional `max_num_seqs`. Capability-policy admission alone does not impose a one-slot default. Explicit operator limits take precedence; qualification, runtime readiness, MLX batch fallback, media, per-request context checks, and workload-specific limits can lower usable capacity. Dashboard occupancy and raw/effective node APIs use the same runtime ceiling. The contributor must calculate its memory budget for all advertised slots; the control plane does not infer that two arbitrary long contexts fit from a short concurrency benchmark.
+
+### Assignment expiry cap
+
+Set `MUNDUSX_ASSIGNMENT_MAX_SECONDS=600` to bound direct and graph-node
+assignment leases to ten minutes, including coding jobs. The cap measures time
+since assignment, not inactivity, and legitimate long jobs will also expire.
+Unset or invalid/zero values preserve existing lease defaults. Existing stale
+assignments expire on the next maintenance pass (GET requests and job claims
+run maintenance). Expired direct jobs are failed, release scheduler occupancy,
+and cannot be completed by late worker results. This is scheduler expiry, not
+a guarantee that remote inference computation has been interrupted.
+
+For coding traffic, use a 600-second assignment cap together with the node worker's
+300-second no-model-progress watchdog (`OPENGPU_WORKER_TIMEOUT_SECS`, default 300).
+The assignment deadline is total time since assignment; progress does not extend it.
+Queue waiting does not consume the assignment deadline. This cap does not change
+separate queue-expiry policy. Worker hard-stop timing depends on its assignment
+cancellation polling; scheduler expiry does not guarantee instantaneous GPU abort.

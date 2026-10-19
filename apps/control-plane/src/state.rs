@@ -4200,7 +4200,7 @@ fn minimum_graph_node_lease_seconds(task_type: RequestTaskType) -> u64 {
 }
 
 fn graph_node_lease_seconds_for(task_type: RequestTaskType) -> u64 {
-    graph_node_lease_seconds().max(minimum_graph_node_lease_seconds(task_type))
+    assignment_lease_cap(graph_node_lease_seconds().max(minimum_graph_node_lease_seconds(task_type)))
 }
 
 fn direct_job_lease_seconds() -> u64 {
@@ -4216,7 +4216,21 @@ fn direct_job_lease_seconds_for(task_type: RequestTaskType) -> u64 {
         RequestTaskType::Coding => CODING_DIRECT_JOB_LEASE_SECONDS,
         _ => DEFAULT_DIRECT_JOB_LEASE_SECONDS,
     };
-    direct_job_lease_seconds().max(minimum)
+    assignment_lease_cap(direct_job_lease_seconds().max(minimum))
+}
+
+/// An explicit operator cap also applies to coding jobs' longer default leases.
+fn assignment_lease_cap(lease: u64) -> u64 {
+    let cap = std::env::var("MUNDUSX_ASSIGNMENT_MAX_SECONDS")
+        .ok().and_then(|value| value.parse::<u64>().ok());
+    bounded_assignment_lease(lease, cap)
+}
+
+fn bounded_assignment_lease(lease: u64, cap: Option<u64>) -> u64 {
+    match cap {
+        Some(cap) if cap > 0 => lease.min(cap),
+        _ => lease,
+    }
 }
 
 fn queued_job_timeout_seconds() -> u64 {
@@ -12127,6 +12141,16 @@ mod tests {
             .as_deref()
             .expect("stale reason")
             .contains("heartbeat stale"));
+    }
+
+    #[test]
+    fn explicit_assignment_cap_bounds_coding_and_regular_leases() {
+        assert_eq!(super::bounded_assignment_lease(1800, Some(300)), 300);
+        assert_eq!(super::bounded_assignment_lease(1800, Some(600)), 600);
+        assert_eq!(super::bounded_assignment_lease(600, Some(300)), 300);
+        assert_eq!(super::bounded_assignment_lease(120, Some(300)), 120);
+        assert_eq!(super::bounded_assignment_lease(1800, None), 1800);
+        assert_eq!(super::bounded_assignment_lease(600, Some(0)), 600);
     }
 
     #[test]
