@@ -12146,6 +12146,7 @@ mod tests {
     #[test]
     fn explicit_assignment_cap_bounds_coding_and_regular_leases() {
         assert_eq!(super::bounded_assignment_lease(1800, Some(300)), 300);
+        assert_eq!(super::bounded_assignment_lease(1800, Some(600)), 600);
         assert_eq!(super::bounded_assignment_lease(600, Some(300)), 300);
         assert_eq!(super::bounded_assignment_lease(120, Some(300)), 120);
         assert_eq!(super::bounded_assignment_lease(1800, None), 1800);
