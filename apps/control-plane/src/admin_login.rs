@@ -167,24 +167,21 @@ pub fn admin_mutation(method: &str, path: &str) -> bool {
             || matches!(path, "/v1/admission-policy" | "/v1/tool-rewards" | "/v1/skills"))
 }
 
+// Operational pages and snapshots can contain prompts, outputs, and event logs.
+// Keep this independent of login configuration: disabling login must not expose logs.
+pub fn private_log_read(method: &str, path: &str) -> bool {
+    matches!(method, "GET" | "HEAD")
+        && (browser_page("GET", path)
+            || matches!(path, "/v1/status" | "/v1/jobs" | "/v1/job-events" | "/v1/credits")
+            || (path.starts_with("/v1/jobs/") && path != "/v1/jobs/next"))
+}
+
 pub fn public_request(method: &str, path: &str) -> bool {
-    // Viewing operations and submitting inference are public. Conversation
-    // storage and internal harness APIs retain their existing service auth.
-    browser_page(method, path)
-        || (method == "GET"
-            && matches!(
-                path,
-                "/v1/status"
-                    | "/v1/skills"
-                    | "/v1/planner/status"
-                    | "/v1/nodes"
-                    | "/v1/admission-policy"
-                    | "/v1/jobs"
-                    | "/v1/job-events"
-                    | "/v1/credits"
-            ))
-        || (method == "GET" && path.starts_with("/v1/jobs/"))
-        || (method == "POST" && path == "/v1/jobs")
+    // Submission and aggregate node availability remain public.
+    !private_log_read(method, path)
+        && ((method == "GET"
+            && matches!(path, "/v1/skills" | "/v1/planner/status" | "/v1/nodes" | "/v1/admission-policy" | "/v1/jobs/next"))
+            || (method == "POST" && path == "/v1/jobs"))
 }
 
 pub fn handle(
@@ -386,6 +383,43 @@ mod tests {
     }
 
     #[test]
+    fn disabled_login_does_not_publish_logs() {
+        if std::env::var("MUNDUSX_PRIVATE_LOG_TEST_CHILD").is_err() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "admin_login::tests::disabled_login_does_not_publish_logs"])
+                .env("MUNDUSX_PRIVATE_LOG_TEST_CHILD", "1")
+                .env("MUNDUSX_ADMIN_LOGIN_ENABLED", "false")
+                .env("MUNDUSX_AUTH_DISABLED", "true")
+                .env("MUNDUSX_OPERATOR_TOKEN", "private-log-test-token")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let mut headers = BTreeMap::new();
+        for path in ["/", "/jobs", "/v1/job-events", "/v1/status", "/v1/jobs/id"] {
+            assert!(super::super::authorize_operator_request("GET", path, &headers).is_err());
+            headers.insert("authorization".into(), "Bearer wrong-token".into());
+            assert!(super::super::authorize_operator_request("GET", path, &headers).is_err());
+            headers.insert("authorization".into(), "Bearer private-log-test-token".into());
+            assert!(super::super::authorize_operator_request("GET", path, &headers).is_ok());
+            headers.clear();
+        }
+    }
+
+    #[test]
+    fn log_routes_are_never_public() {
+        for method in ["GET", "HEAD"] {
+            for path in ["/", "/jobs", "/jobs/id", "/nodes/id", "/v1/status", "/v1/job-events", "/v1/jobs", "/v1/jobs/id", "/v1/jobs/id/candidates", "/v1/jobs/id/artifacts", "/v1/credits"] {
+                assert!(private_log_read(method, path), "{method} {path}");
+                assert!(!public_request(method, path), "{method} {path}");
+            }
+        }
+        assert!(!private_log_read("GET", "/v1/jobs/next"));
+        assert!(!private_log_read("POST", "/v1/jobs"));
+        assert!(public_request("POST", "/v1/jobs"));
+    }
+
+    #[test]
     fn public_views_disable_only_mutation_forms() {
         let page = r#"<head></head><body><div id="admin-account"></div><form method="get"><input name="filter"></form><form method="post" action="/actions/admission-policy"><input name="policy"><button>Apply</button></form></body>"#;
         let public = decorate(page.into(), None);
@@ -447,14 +481,13 @@ mod tests {
         }
         let mut headers = BTreeMap::new();
         for path in [
-            "/",
-            "/settings",
-            "/nodes/node1",
-            "/v1/status",
-            "/v1/jobs",
-            "/v1/jobs/job1",
+            "/v1/nodes",
+            "/v1/skills",
         ] {
             assert!(super::super::authorize_operator_request("GET", path, &headers).is_ok());
+        }
+        for path in ["/", "/settings", "/jobs", "/jobs/job1", "/v1/status", "/v1/jobs", "/v1/job-events", "/v1/jobs/job1", "/v1/jobs/job1/artifacts", "/v1/credits"] {
+            assert!(super::super::authorize_operator_request("GET", path, &headers).is_err(), "{path}");
         }
         for path in [
             "/v1/jobs",
@@ -526,6 +559,10 @@ mod tests {
             .unwrap();
         headers.insert("cookie".into(), session_cookie.into());
         assert!(session_authorized("GET", &headers));
+        for path in ["/", "/jobs", "/v1/job-events", "/v1/status", "/v1/jobs/job1"] {
+            assert!(super::super::authorize_operator_request("GET", path, &headers).is_ok(), "{path}");
+        }
+
         assert!(super::super::authorize_operator_request("GET", "/nodes/node1", &headers).is_ok());
         assert!(!session_authorized("POST", &headers));
         headers.insert("origin".into(), "https://evil.example".into());
