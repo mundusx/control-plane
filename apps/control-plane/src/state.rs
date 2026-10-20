@@ -9707,6 +9707,30 @@ mod tests {
     }
 
     #[test]
+    fn non_qwen_cluster_accepts_medium_coding_continuations() {
+        let mut state = capability_policy_fixture();
+        {
+            let node = state.nodes.get_mut("qualified").unwrap();
+            let health = node.worker_health.as_mut().unwrap();
+            health.runtime_mode = "contributed-cluster".into();
+            let model = &mut health.capabilities.models[0];
+            model.name = "nemotron-3.5-super-vl".into();
+            model.context_tokens = Some(1048576);
+            model.output_capacity_mode = Some("context_window".into());
+            model.task_capabilities = vec!["chat".into(), "coding".into()];
+        }
+        let request: JobRequest = serde_json::from_value(serde_json::json!({
+            "request_id":"school-continuation", "preferred_backend":"auto",
+            "prompt":"write a complete Express REST API", "system_prompt":"Continue the missing suffix of the previous response. Do not repeat the earlier files.",
+            "execution_mode":"single", "runtime_mode":"local", "stream":true, "max_tokens":4096
+        })).unwrap();
+        let job = state.submit_job_with_mode(request, Some("chat".into()), "104".into());
+        assert_eq!(job.classification.complexity, RequestComplexity::Medium);
+        assert!(ControlPlaneState::node_can_run_job(&state.nodes["qualified"], &job));
+        assert!(state.claim_job("qualified", "105".into()).job.is_some());
+    }
+
+    #[test]
     fn served_non_qwen_coding_preserves_runtime_contract_and_admin_limits() {
         for runtime in ["vllm", "contributed-cluster"] {
             let mut state = capability_policy_fixture();
@@ -9720,6 +9744,7 @@ mod tests {
             let advertised = crate::capability_policy::advertised_model(node, &raw);
             assert_eq!(advertised.context_tokens, Some(1048576));
             assert!(advertised.task_capabilities.iter().any(|task| task == "coding"));
+            assert!(advertised.task_capabilities.iter().any(|task| task == "medium_coding"));
             assert!(!advertised.task_capabilities.iter().any(|task| task == "large_coding"));
             node.trust.capability_policy = Some(crate::capability_policy::Override {
                 settings: crate::capability_policy::Settings {

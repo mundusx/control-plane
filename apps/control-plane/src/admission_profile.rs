@@ -58,7 +58,7 @@ impl AdmissionProfile {
         let limit = runtime_context.unwrap_or_else(|| model.context_tokens.unwrap_or(2048).min(context).min(memory_context).min(if family {4096} else if expert || standard || basic {16384} else {2048}));
         if expert || standard || basic || family || served_coding {
             capabilities.extend(["coding", "coding_basic", "small_coding"].map(String::from));
-            if !basic && !served_coding && limit >= 4096 { capabilities.push("medium_coding".into()); }
+            if !basic && limit >= 4096 && (!served_coding || memory >= 16384) { capabilities.push("medium_coding".into()); }
             if expert && limit >= 8192 { capabilities.push("large_coding".into()); }
         }
         Self { source:if runtime_context.is_some() {"runtime_metadata"} else {"predefined_estimate"}.into(), node_class:node_class.into(),

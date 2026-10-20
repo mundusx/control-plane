@@ -116,6 +116,12 @@ fn claims(node: &NodeRecord, model: &ModelCapability) -> BTreeSet<String> {
     }
     if tasks.contains("coding") {
         tasks.extend(["coding_basic", "small_coding"].map(String::from));
+        let profile = crate::admission_profile::AdmissionProfile::detected(node, model);
+        if profile.model_class == "coding_runtime"
+            && profile.capabilities.iter().any(|task| task == "medium_coding")
+        {
+            tasks.insert("medium_coding".into());
+        }
     }
     if model.supports_tools
         && node.worker_health.as_ref().is_some_and(|h| {
