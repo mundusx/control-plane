@@ -43,17 +43,26 @@ impl AdmissionProfile {
         // Served vLLM and llama.cpp contexts come from runtime metadata. A catalog
         // tier must not replace those bounded runtime contracts with 8K.
         let runtime_context = node.worker_health.as_ref()
-            .filter(|h| matches!(h.runtime_mode.as_str(), "mlx" | "vllm" | "cuda" | "vulkan" | "blas"))
+            .filter(|h| matches!(h.runtime_mode.as_str(), "mlx" | "vllm" | "contributed-cluster" | "cuda" | "vulkan" | "blas"))
             .filter(|_| model.output_capacity_mode.as_deref() == Some("context_window"))
             .and(model.context_tokens.filter(|n| *n >= 1024));
+        // Served clusters report their own active model and bounded context.
+        // Preserve an explicit coding claim without requiring a Qwen model name.
+        // This is routing eligibility, not a benchmark qualification or expert tier.
+        let served_coding = !(expert || standard || basic || family)
+            && runtime_context.is_some()
+            && node.worker_health.as_ref().is_some_and(|h|
+                matches!(h.runtime_mode.as_str(), "vllm" | "contributed-cluster"))
+            && (model.task_capabilities.iter().any(|task| task == "coding")
+                || model.roles.contains(&crate::contracts::NodeRole::Coding));
         let limit = runtime_context.unwrap_or_else(|| model.context_tokens.unwrap_or(2048).min(context).min(memory_context).min(if family {4096} else if expert || standard || basic {16384} else {2048}));
-        if expert || standard || basic || family {
+        if expert || standard || basic || family || served_coding {
             capabilities.extend(["coding", "coding_basic", "small_coding"].map(String::from));
-            if !basic && limit >= 4096 { capabilities.push("medium_coding".into()); }
+            if !basic && !served_coding && limit >= 4096 { capabilities.push("medium_coding".into()); }
             if expert && limit >= 8192 { capabilities.push("large_coding".into()); }
         }
         Self { source:if runtime_context.is_some() {"runtime_metadata"} else {"predefined_estimate"}.into(), node_class:node_class.into(),
-            model_class:if expert {"coding_expert"} else if family {"coding_family"} else if standard {"coding_standard"} else if basic {"coding_basic"} else {"general_chat"}.into(),
+            model_class:if expert {"coding_expert"} else if family {"coding_family"} else if standard {"coding_standard"} else if basic {"coding_basic"} else if served_coding {"coding_runtime"} else {"general_chat"}.into(),
             context_tokens:limit, estimated_model_memory_mb:weight, max_parallel_jobs:crate::state::ControlPlaneState::node_runtime_parallel_capacity(node) as u32, capabilities }
     }
 }

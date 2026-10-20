@@ -9707,6 +9707,38 @@ mod tests {
     }
 
     #[test]
+    fn served_non_qwen_coding_preserves_runtime_contract_and_admin_limits() {
+        for runtime in ["vllm", "contributed-cluster"] {
+            let mut state = capability_policy_fixture();
+            let node = state.nodes.get_mut("qualified").unwrap();
+            node.worker_health.as_mut().unwrap().runtime_mode = runtime.into();
+            let mut raw = ControlPlaneState::model_inventory(node)[0].clone();
+            raw.name = "nemotron-3.5-super-vl".into();
+            raw.context_tokens = Some(1048576);
+            raw.output_capacity_mode = Some("context_window".into());
+            raw.task_capabilities = vec!["chat".into(), "coding".into()];
+            let advertised = crate::capability_policy::advertised_model(node, &raw);
+            assert_eq!(advertised.context_tokens, Some(1048576));
+            assert!(advertised.task_capabilities.iter().any(|task| task == "coding"));
+            assert!(!advertised.task_capabilities.iter().any(|task| task == "large_coding"));
+            node.trust.capability_policy = Some(crate::capability_policy::Override {
+                settings: crate::capability_policy::Settings {
+                    max_context_tokens: Some(4096),
+                    allowed_capabilities: Some(vec!["chat".into()]),
+                    ..Default::default()
+                }, actor: "admin".into(), updated_at: "104".into(),
+            });
+            let advertised = crate::capability_policy::advertised_model(node, &raw);
+            assert_eq!(advertised.context_tokens, Some(4096));
+            assert!(!advertised.task_capabilities.iter().any(|task| task == "coding"));
+            node.trust.capability_policy = None;
+            raw.task_capabilities = vec!["chat".into()];
+            raw.roles = vec![NodeRole::Chat];
+            assert!(!crate::capability_policy::advertised_model(node, &raw).task_capabilities.iter().any(|task| task == "coding"));
+        }
+    }
+
+    #[test]
     fn llama_runtime_context_overrides_compact_estimate_but_not_admin_cap() {
         for runtime in ["cuda", "vulkan", "blas"] {
             let mut state = capability_policy_fixture();
