@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { projectCompletionGaps } from "../src/project-completion.js";
+import { apiImplementationGaps, projectCompletionGaps } from "../src/project-completion.js";
 import { configFromEnv, streamChatTurn } from "../src/main.js";
 
 const prompt = "i want a fulld nodejs code of CRUD api with swagger , carwash backend";
@@ -173,4 +173,32 @@ test("documentation-only follow-ups cannot graft restarted source onto a complet
   assert.equal(result.content.split('pub fn delete_student').length-1,1);
   assert.match(result.content,/Documentation could not be completed/);
   assert.match(requests[1].messages.find(m=>m.role==='system').content,/documentation-only/);
+});
+
+const schoolPrompt = "fast api CRUD for schoolmanagement system";
+const schemasOnly = "## app/schemas.py\n```python\nclass StudentCreate: pass\nclass StudentUpdate: pass\n```";
+const runnableRoutes = "\n## app/main.py\n```python\nfrom fastapi import FastAPI\napp = FastAPI()\n@app.get('/students')\ndef list_students(): return []\n@app.post('/students')\ndef create_student(): return {}\n@app.patch('/students/{id}')\ndef update_student(id: int): return {}\n@app.delete('/students/{id}')\ndef delete_student(id: int): return {}\n```";
+
+test("FastAPI schemas alone do not satisfy a whole CRUD API request", () => {
+  assert.equal(apiImplementationGaps(schoolPrompt, schemasOnly).length, 2);
+  assert.deepEqual(apiImplementationGaps(schoolPrompt, schemasOnly + runnableRoutes), []);
+  assert.deepEqual(apiImplementationGaps("Only give me models and schemas for FastAPI CRUD", schemasOnly), []);
+  assert.deepEqual(apiImplementationGaps("Explain FastAPI CRUD", schemasOnly), []);
+});
+
+test("a normal stop after schemas recovers missing application and routes", async () => {
+  const { result, requests } = await runReply(schoolPrompt, [schemasOnly, runnableRoutes]);
+  assert.equal(requests.length, 2);
+  assert.match(requests[1].messages.at(-1).content, /missing implementation deliverables/);
+  assert.equal(result.finishReason, "stop");
+  assert.deepEqual(apiImplementationGaps(schoolPrompt, result.content), []);
+});
+
+test("an implementation that remains missing does not publish successful stop", async () => {
+  const { result, writes, requests } = await runReply(schoolPrompt, [schemasOnly,
+    "\n# Models are now ready.\n", "\n# Schemas are now ready.\n"]);
+  assert.equal(requests.length, 3);
+  assert.equal(result.finishReason, "error");
+  assert.match(result.error, /Implementation incomplete/);
+  assert.equal((writes.match(/"finish_reason":"stop"/g) ?? []).length, 0);
 });

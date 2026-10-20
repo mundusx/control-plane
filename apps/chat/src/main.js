@@ -15,7 +15,7 @@ import { videoPage } from "./features/media/page.js";
 import { splitMarkdownCode, markdownFenceState } from "./markdown-code.js";
 import { parseChatApiKeys, authenticateChatApiKey } from "./chat-api-keys.js";
 import { ContinueFileStream, usesContinueFileProtocol } from "./continue-file-stream.js";
-import { projectCompletionGaps } from "./project-completion.js";
+import { apiImplementationGaps, projectCompletionGaps } from "./project-completion.js";
 import { webResearchRequest, fetchWebResearch } from "./web-research.js";
 import { createServer } from "node:http";
 import { MediaArtifactStore } from "./features/media/store.js";
@@ -8353,6 +8353,7 @@ export async function streamChatTurn(response, body, config = configFromEnv(), f
     // code phrasing from surfacing a truncated answer to the browser.
     continueOnLength: true,
     recoverCodeQuality: codeGenerationResponse,
+    implementationRequest: message,
     validateCompleteAnswer: codeGenerationResponse && /\b(?:node(?:\.?js)?|express)\b/i.test(codeLanguageContext) && !/\b(?:react|jsx|tsx|next\.?js)\b/i.test(codeLanguageContext)
       ? (content, { signal }) => repairJavascriptCodeBlocks(content, (code, error) =>
           requestJavascriptSyntaxRepair(code, error, config, fetchImpl, requestBody.model || PUBLIC_MODEL_ID, signal)) : undefined,
@@ -8606,6 +8607,7 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
   let requestBody = { ...body, stream: true };
   let stalledContinuationAttempts = 0;
   let documentationRepairs = 0;
+  let implementationRepairs = 0;
   let documentationRecovery = false;
   let transientStreamRecoveries = 0;
   let activeCompletionId = null;
@@ -8865,6 +8867,19 @@ async function relayProjectContinuationStream(response, body, config, fetchImpl,
       }
       const segmentMadeProgress = content.length > segmentStartLength;
       let reachedContinuationLimit = attempt + 1 >= maxSegments || content.length >= maxOutputCharacters;
+      if (attemptFinishReason === "stop" && hooks.implementationRequest && segmentMadeProgress) {
+        const gaps = apiImplementationGaps(hooks.implementationRequest, content);
+        if (gaps.length) {
+          if (implementationRepairs >= 2 || reachedContinuationLimit) {
+            throw new Error(`Implementation incomplete after bounded recovery: ${gaps.join(" ")}`);
+          }
+          implementationRepairs += 1;
+          writeResponse(": completing missing API implementation\n\n");
+          requestBody = buildContinuationRequestBody(requestBody, body.messages, content);
+          requestBody.messages.at(-1).content += `\nComplete these missing implementation deliverables only:\n${gaps.join("\n")}\nReturn the exact continuation anchor followed by the missing source files and run instructions. Do not regenerate files already supplied.`;
+          continue;
+        }
+      }
       // A normal provider stop can still omit the promised README or finish
       // inside it. Recover the missing documentation before publishing stop.
       // A rejected continuation must reach the stalled-response retry below.

@@ -1,5 +1,24 @@
 import { splitMarkdownCode } from "./markdown-code.js";
 
+// A provider stop is a transport boundary, not evidence that an API was
+// implemented. Limit this check to complete FastAPI CRUD requests; focused
+// model/schema edits and explanations do not require an entire application.
+export function apiImplementationGaps(request, value) {
+  const prompt = String(request ?? "");
+  if (!/fast\s*api/i.test(prompt) || !/\bcrud\b/i.test(prompt) ||
+      /\b(?:explain|describe|compare|review)\b/i.test(prompt) ||
+      /\b(?:only|just)\b.{0,50}\b(?:models?|schemas?)\b|\b(?:models?|schemas?)\b.{0,30}\bonly\b/i.test(prompt)) return [];
+  const code = splitMarkdownCode(value).filter(part => part.type === "code" &&
+    /^(?:python|py|[\w./-]+\.py)$/i.test(part.language)).map(part => part.value).join("\n");
+  const gaps = [];
+  if (!/\bFastAPI\s*\(/.test(code)) gaps.push("Provide the missing runnable FastAPI application entry point, including FastAPI() and router registration when separate routers are used.");
+  const methods = new Set([...code.matchAll(/@(?:[A-Za-z_]\w*\.)+(get|post|put|patch|delete)\s*\(/g)].map(match => match[1]));
+  if (!["get", "post", "delete"].every(method => methods.has(method)) || !(methods.has("put") || methods.has("patch"))) {
+    gaps.push("Provide the missing HTTP CRUD implementation: GET, POST, PUT or PATCH, and DELETE route handlers with their implementations. Models and schemas alone are not a CRUD API. Preserve the already emitted models and schemas; do not repeat them.");
+  }
+  return gaps;
+}
+
 // Check the documentation promised by a multi-file answer. This does not
 // certify that generated code works; the summary must state verification limits.
 export function projectCompletionGaps(value) {
