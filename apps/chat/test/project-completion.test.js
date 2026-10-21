@@ -212,3 +212,16 @@ test("relative and absolute local imports require emitted modules, not third-par
 test("existing focused FastAPI CRUD updates are not treated as whole-project generation", () => {
   assert.deepEqual(apiImplementationGaps("Fix the FastAPI CRUD student router", schemasOnly), []);
 });
+
+test("new missing-file recovery discards transport overlap before the file heading", async () => {
+  const initial = schemasOnly + runnableRoutes.replace("from fastapi import FastAPI", "from fastapi import FastAPI\nfrom app import crud");
+  const repair = "stale trailing text\n```\n\n## app/crud.py\n```python\ndef create_student(): return {}\n```";
+  const { result, requests } = await runReply(schoolPrompt, [initial, { text: repair, raw: true }]);
+  assert.equal(result.finishReason, "stop");
+  assert.equal(requests[1].max_tokens, 4096);
+  assert.ok(requests[1].messages.some(message => message.name === "mundusx_readonly_project_reference" && message.content.includes("<existing_project>")));
+  assert.doesNotMatch(requests[1].messages.at(-1).content, /<existing_project>/);
+  assert.doesNotMatch(result.content, /stale trailing text/);
+  assert.deepEqual(apiImplementationGaps(schoolPrompt, result.content), []);
+  assert.equal((result.content.match(/## app\/crud.py/g) ?? []).length, 1);
+});

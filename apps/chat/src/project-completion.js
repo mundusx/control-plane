@@ -21,7 +21,7 @@ export function apiImplementationGaps(request, value) {
   return gaps;
 }
 
-export function missingLocalPythonModules(value) {
+export function pythonSourceFiles(value) {
   const files = new Map();
   let filename = null;
   for (const part of splitMarkdownCode(value)) {
@@ -35,6 +35,11 @@ export function missingLocalPythonModules(value) {
       if (path) files.set(path, `${files.get(path) || ""}\n${part.value}`);
     }
   }
+  return files;
+}
+
+export function missingLocalPythonModules(value) {
+  const files = pythonSourceFiles(value);
   const paths = [...files.keys()];
   const isFile = path => paths.some(file => file === path || file.endsWith(`/${path}`));
   const isPackage = path => paths.some(file => file.startsWith(`${path}/`) || file.includes(`/${path}/`));
