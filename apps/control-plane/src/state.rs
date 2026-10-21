@@ -4661,6 +4661,20 @@ fn looks_like_application_project_prompt(lower: &str) -> bool {
         && !contains_any(lower, &["single-file", "single file", "in-memory", "in memory", "example", "demo", "prototype", "minimal", "simple"])
 }
 
+// Negative instructions constrain output; they do not request the work they name.
+// Keep the original prompt for context accounting, privacy and task detection.
+fn requested_work_scope(lower_prompt: &str) -> String {
+    lower_prompt
+        .split_inclusive(['\n', '.', ';', '!'])
+        .filter(|clause| {
+            let directive = clause.trim_start().trim_start_matches(['-', '*']).trim_start();
+            !["do not ", "don't ", "never ", "avoid "]
+                .iter().any(|prefix| directive.starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn looks_like_substantial_code_scope(lower_prompt: &str) -> bool {
     contains_any(
         lower_prompt,
@@ -6596,10 +6610,11 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
     }
     let lower = request.prompt.to_ascii_lowercase();
     let prompt_chars = request.prompt.chars().count();
-    let complete_code_prompt = looks_like_complete_code_prompt(&lower);
-    let substantial_code_scope = looks_like_substantial_code_scope(&lower);
-    let detailed_research_prompt = looks_like_detailed_research_prompt(&lower);
-    let application_project_prompt = looks_like_application_project_prompt(&lower);
+    let requested_scope = requested_work_scope(&lower);
+    let complete_code_prompt = looks_like_complete_code_prompt(&requested_scope);
+    let substantial_code_scope = looks_like_substantial_code_scope(&requested_scope);
+    let detailed_research_prompt = looks_like_detailed_research_prompt(&requested_scope);
+    let application_project_prompt = looks_like_application_project_prompt(&requested_scope);
 
     let task_type = if complete_code_prompt
         || contains_any(
@@ -6649,7 +6664,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
         || (complete_code_prompt && substantial_code_scope)
         || detailed_research_prompt
         || contains_any(
-            &lower,
+            &requested_scope,
             &[
                 "architecture",
                 "multi-step",
@@ -6663,7 +6678,7 @@ pub fn classify_job_request(request: &JobRequest) -> RequestClassification {
     } else if prompt_chars > 800
         || application_project_prompt
         || contains_any(
-            &lower,
+            &requested_scope,
             &["analyze", "compare", "implement", "plan", "debug", "design"],
         )
     {
@@ -9704,6 +9719,28 @@ mod tests {
         assert!(event.contains("queued")); assert!(event.contains("coding contributor"));
         queued.status = JobStatus::Assigned;
         assert!(crate::chat_gateway::sse_queue_status(&queued, "chatcmpl-test", 104, "mundusx-agnostic").contains("assigned"));
+    }
+
+    #[test]
+    fn negative_instructions_do_not_raise_requested_coding_scope() {
+        for constraint in [
+            "Do not repeat complete source files for this CRUD API.",
+            "Don't refactor the architecture.",
+            "Never perform a database migration.",
+            "Avoid an end-to-end security review.",
+        ] {
+            let request: JobRequest = serde_json::from_value(serde_json::json!({
+                "request_id":"scoped-repair", "preferred_backend":"auto",
+                "prompt":format!("Implement the missing Python module app/crud.py. {constraint}"),
+                "execution_mode":"single", "runtime_mode":"local", "stream":true, "max_tokens":4096
+            })).unwrap();
+            let classification = classify_job_request(&request);
+            assert_eq!(classification.task_type, RequestTaskType::Coding);
+            assert_eq!(classification.complexity, RequestComplexity::Medium, "{constraint}");
+        }
+        let scope = requested_work_scope("do not repeat the files. refactor the architecture.");
+        assert!(scope.contains("refactor the architecture"));
+        assert!(!scope.contains("repeat"));
     }
 
     #[test]
