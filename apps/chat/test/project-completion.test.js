@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { apiImplementationGaps, projectCompletionGaps } from "../src/project-completion.js";
+import { apiImplementationGaps, missingLocalPythonModules, projectCompletionGaps } from "../src/project-completion.js";
 import { configFromEnv, streamChatTurn } from "../src/main.js";
 
 const prompt = "i want a fulld nodejs code of CRUD api with swagger , carwash backend";
@@ -201,4 +201,14 @@ test("an implementation that remains missing does not publish successful stop", 
   assert.equal(result.finishReason, "error");
   assert.match(result.error, /Implementation incomplete/);
   assert.equal((writes.match(/"finish_reason":"stop"/g) ?? []).length, 0);
+});
+
+test("relative and absolute local imports require emitted modules, not third-party packages", () => {
+  const source = "## 1. app/main.py\n```python\nfrom fastapi import FastAPI\nfrom app.routers import students\n```\n## app/routers/students.py\n```python\nfrom .. import crud, schemas\nfrom app.database import SessionLocal\n```\n## app/schemas.py\n```python\nfrom pydantic import BaseModel\n```\n## app/database.py\n```python\nSessionLocal = object()\n```";
+  assert.deepEqual(missingLocalPythonModules(source), ["app/crud.py"]);
+  assert.deepEqual(missingLocalPythonModules(source + "\n## app/crud.py\n```python\ndef create_student(): return {}\n```"), []);
+});
+
+test("existing focused FastAPI CRUD updates are not treated as whole-project generation", () => {
+  assert.deepEqual(apiImplementationGaps("Fix the FastAPI CRUD student router", schemasOnly), []);
 });

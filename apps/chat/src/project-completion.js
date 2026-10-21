@@ -6,7 +6,7 @@ import { splitMarkdownCode } from "./markdown-code.js";
 export function apiImplementationGaps(request, value) {
   const prompt = String(request ?? "");
   if (!/fast\s*api/i.test(prompt) || !/\bcrud\b/i.test(prompt) ||
-      /\b(?:explain|describe|compare|review)\b/i.test(prompt) ||
+      /\b(?:explain|describe|compare|review|fix|debug|update|refactor)\b/i.test(prompt) ||
       /\b(?:only|just)\b.{0,50}\b(?:models?|schemas?)\b|\b(?:models?|schemas?)\b.{0,30}\bonly\b/i.test(prompt)) return [];
   const code = splitMarkdownCode(value).filter(part => part.type === "code" &&
     /^(?:python|py|[\w./-]+\.py)$/i.test(part.language)).map(part => part.value).join("\n");
@@ -16,7 +16,52 @@ export function apiImplementationGaps(request, value) {
   if (!["get", "post", "delete"].every(method => methods.has(method)) || !(methods.has("put") || methods.has("patch"))) {
     gaps.push("Provide the missing HTTP CRUD implementation: GET, POST, PUT or PATCH, and DELETE route handlers with their implementations. Models and schemas alone are not a CRUD API. Preserve the already emitted models and schemas; do not repeat them.");
   }
+  const missing = missingLocalPythonModules(value);
+  if (missing.length) gaps.push(`Provide the missing local Python modules imported by the emitted implementation: ${missing.join(", ")}. Include their full implementations; do not replace existing files with placeholders.`);
   return gaps;
+}
+
+export function missingLocalPythonModules(value) {
+  const files = new Map();
+  let filename = null;
+  for (const part of splitMarkdownCode(value)) {
+    if (part.type === "text") {
+      for (const line of part.value.split(/\r?\n/)) {
+        const match = line.match(/^\s*(?:#{1,6}\s+)?(?:\d+[.)]\s+)?(?:\*\*|`)?([\w./-]+\.py)(?:\*\*|`)?\s*$/);
+        if (match) filename = match[1].replace(/^\.\//, "");
+      }
+    } else if (/^(?:python|py|[\w./-]+\.py)$/i.test(part.language)) {
+      const path = /\.py$/i.test(part.language) ? part.language : filename;
+      if (path) files.set(path, `${files.get(path) || ""}\n${part.value}`);
+    }
+  }
+  const paths = [...files.keys()];
+  const isFile = path => paths.some(file => file === path || file.endsWith(`/${path}`));
+  const isPackage = path => paths.some(file => file.startsWith(`${path}/`) || file.includes(`/${path}/`));
+  const missing = new Set();
+  for (const [file, code] of files) {
+    for (const match of code.matchAll(/^\s*from\s+(\.*)([\w.]*)\s+import\s+([^\n#]+)/gm)) {
+      const [, dots, module, names] = match;
+      let base;
+      if (dots) {
+        const directory = file.split("/").slice(0, -1);
+        directory.splice(Math.max(0, directory.length - dots.length + 1));
+        base = [...directory, ...module.split(".").filter(Boolean)].join("/");
+      } else {
+        base = module.replaceAll(".", "/");
+        if (!isPackage(base.split("/")[0])) continue; // Third-party import.
+      }
+      if (module && isFile(`${base}.py`)) continue; // Imported attributes/classes.
+      if (module && !isPackage(base)) { missing.add(`${base}.py`); continue; }
+      for (const entry of names.replace(/[()]/g, "").split(",")) {
+        const name = entry.trim().split(/\s+/)[0];
+        if (!/^[a-z_]\w*$/.test(name)) continue;
+        const path = [base, name].filter(Boolean).join("/");
+        if (!isFile(`${path}.py`) && !isPackage(path)) missing.add(`${path}.py`);
+      }
+    }
+  }
+  return [...missing].sort();
 }
 
 // Check the documentation promised by a multi-file answer. This does not
