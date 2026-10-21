@@ -9707,6 +9707,19 @@ mod tests {
     }
 
     #[test]
+    fn missing_module_repair_is_not_a_high_complexity_project() {
+        let request: JobRequest = serde_json::from_value(serde_json::json!({
+            "request_id":"missing-module", "preferred_backend":"auto",
+            "prompt":"Implement these missing implementation deliverables: Python modules app/crud.py. Use the reference interfaces. Output each named module in one fenced Python code block beneath its path heading.",
+            "system_prompt":"Read-only project reference with architecture, migrations and multiple source files.",
+            "execution_mode":"single", "runtime_mode":"local", "stream":true, "max_tokens":4096
+        })).unwrap();
+        let classification = classify_job_request(&request);
+        assert_eq!(classification.task_type, RequestTaskType::Coding);
+        assert_ne!(classification.complexity, RequestComplexity::High);
+    }
+
+    #[test]
     fn non_qwen_cluster_accepts_medium_coding_continuations() {
         let mut state = capability_policy_fixture();
         {
