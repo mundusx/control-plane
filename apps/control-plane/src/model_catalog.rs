@@ -112,6 +112,16 @@ pub fn validate(entry: &Entry) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn diffusion_catalog_cannot_claim_chat_or_tools() {
+        let mut entry: Entry = serde_json::from_str(include_str!("../../../docs/dreamshaper-8-catalog-entry.json")).unwrap();
+        assert!(validate(&entry).is_ok());
+        entry.model["capabilities"]["task_capabilities"] = json!(["chat"]);
+        assert!(validate(&entry).is_err());
+        entry.model["capabilities"]["task_capabilities"] = json!(["text_to_image"]);
+        entry.model["capabilities"]["supports_tools"] = json!(true);
+        assert!(validate(&entry).is_err());
+    }
+    #[test]
     fn catalog_preserves_vision_and_excludes_disabled_models() {
         let mut catalog = Catalog::default();
         assert!(catalog.entries.iter().all(|entry| validate(entry).is_ok()));
