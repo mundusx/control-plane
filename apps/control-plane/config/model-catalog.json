@@ -970,6 +970,34 @@
           "linux"
         ]
       }
+    },
+    {
+      "id": "dreamshaper-8-sd15-windows",
+      "enabled": true,
+      "model": {
+        "name": "Lykon/dreamshaper-8",
+        "label": "DreamShaper 8 \u00b7 Image generation",
+        "notes": "SD 1.5 image model. 512x512, batch 1, 20 steps; CPU VAE/text offload. Windows desktop local test; network contribution requires a compatible image worker. License: publisher terms / CreativeML OpenRAIL-M; see publisher model card.",
+        "source_kind": "huggingface-diffusion",
+        "source_url": "https://huggingface.co/Lykon/DreamShaper/resolve/228d79cb20811466f5c5710aa91f05dabd0b8a14/DreamShaper_8_pruned.safetensors",
+        "sha256": "879db523c30d3b9017143d56705015e15a2cb5628762c11d086fed9538abd7fd",
+        "format": "sd15-safetensors",
+        "estimated_vram_mb": 2560,
+        "backend_compatibility": [
+          "vulkan"
+        ],
+        "supported_os": [
+          "windows"
+        ],
+        "capabilities": {
+          "task_capabilities": [
+            "text_to_image"
+          ],
+          "supports_vision": false,
+          "supports_tools": false,
+          "supports_embeddings": false
+        }
+      }
     }
   ]
 }

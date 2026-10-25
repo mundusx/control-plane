@@ -8,7 +8,7 @@ body{margin:0;background:#101216;color:#edf0f5;font:15px system-ui}main{max-widt
 <section><h2 id="heading">Add model variant</h2><form id="editor">
 <label for="name">Model ID</label><input id="name" required placeholder="organization/model-name">
 <label for="label">Display name</label><input id="label" required>
-<div class="grid"><div><label for="kind">Installation method</label><select id="kind"><option value="huggingface-open">Single GGUF file</option><option value="huggingface-mlx">MLX repository</option><option value="huggingface-vllm">vLLM repository</option></select></div><div><label for="format">Format</label><input id="format" placeholder="gguf / mlx / safetensors" required></div></div>
+<div class="grid"><div><label for="kind">Installation method</label><select id="kind"><option value="huggingface-open">Single GGUF file</option><option value="huggingface-diffusion">SD 1.5 image checkpoint</option><option value="huggingface-mlx">MLX repository</option><option value="huggingface-vllm">vLLM repository</option></select></div><div><label for="format">Format</label><input id="format" placeholder="gguf / mlx / safetensors" required></div></div>
 <label for="url">Public Hugging Face download / repository URL</label><input id="url" type="url" required placeholder="https://huggingface.co/…">
 <label for="sha">SHA-256</label><input id="sha" placeholder="Required for single-file downloads"><small>Repository installation methods do not use a single-file checksum.</small>
 <label for="memory">Estimated model memory (MB)</label><input id="memory" type="number" min="1" max="10000000" required>

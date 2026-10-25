@@ -69,8 +69,14 @@ pub fn validate(entry: &Entry) -> Result<(), String> {
         return Err("Use a public https://huggingface.co/ model or artifact URL without credentials or query parameters.".into());
     }
     let kind = model["source_kind"].as_str().unwrap();
-    if !["huggingface-open", "huggingface-mlx", "huggingface-vllm"].contains(&kind) {
+    if !["huggingface-open", "huggingface-mlx", "huggingface-vllm", "huggingface-diffusion"].contains(&kind) {
         return Err("Unsupported model source kind.".into());
+    }
+    if kind == "huggingface-diffusion" && (model["format"] != "sd15-safetensors"
+        || model["capabilities"]["task_capabilities"] != json!(["text_to_image"])
+        || model["capabilities"]["supports_tools"] == true
+        || model["capabilities"]["supports_embeddings"] == true) {
+        return Err("Diffusion checkpoints require sd15-safetensors format and text_to_image capability only.".into());
     }
     let systems = model["supported_os"].as_array().ok_or("Select supported operating systems.")?;
     if systems.is_empty() || systems.iter().any(|os| !matches!(os.as_str(), Some("windows"|"macos"|"linux"))) {
@@ -81,7 +87,7 @@ pub fn validate(entry: &Entry) -> Result<(), String> {
         "huggingface-vllm" => os != "linux",
         _ => os == "macos",
     }) { return Err("Use MLX for macOS, vLLM for Linux, and GGUF for Windows/Linux.".into()); }
-    if kind == "huggingface-open" && model["sha256"].as_str().is_none_or(|s| s.len()!=64 || !s.bytes().all(|c| c.is_ascii_hexdigit())) {
+    if matches!(kind, "huggingface-open" | "huggingface-diffusion") && model["sha256"].as_str().is_none_or(|s| s.len()!=64 || !s.bytes().all(|c| c.is_ascii_hexdigit())) {
         return Err("Single-file downloads require a 64-character SHA-256 checksum.".into());
     }
     if model["estimated_vram_mb"].as_u64().is_none_or(|n| n == 0 || n > 10_000_000) {
