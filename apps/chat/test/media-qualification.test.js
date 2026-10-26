@@ -69,3 +69,11 @@ test('isolated image qualification validates artifact, survives reload, gates pr
   assert.equal((await q.complete(device.node_id,{...videoLease,generation_ms:456})).credits,0);
   assert.deepEqual(await q.eligible(device,['wan22-14b-480p-49f-v1']),['wan22-14b-480p-49f-v1']);
 });
+
+test('edit qualification fingerprint stays stable while model allocation changes free memory',()=>{
+ const profile='qwen-image-edit-2509-lightning-4step-832x480-v1';
+ const d={public_key_hex:'key',agent_version:'0.2.52',backend:'cuda',contribution_percent:80,worker_health:{runtime_mode:'media',media_budget_bytes:100*1024**3,capabilities:{physical_memory_mb:124551,usable_memory_mb:99641}}};
+ const before=mediaFingerprint(d,profile);d.worker_health.capabilities.usable_memory_mb=73746;
+ assert.equal(mediaFingerprint(d,profile),before);
+ d.contribution_percent=70;assert.notEqual(mediaFingerprint(d,profile),before);
+});

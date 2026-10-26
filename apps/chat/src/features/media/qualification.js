@@ -12,9 +12,10 @@ const secret=(v,h)=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)&&typeof h==='s
 export function mediaFingerprint(device,profile) {
   const health=device.worker_health_json??device.worker_health??{};
   const native=profile==='dreamshaper-8-sd15-512-v1';
-  return hash(JSON.stringify([native?2:1,device.public_key_hex,device.agent_version,device.backend,
+  const editing=profile.startsWith('qwen-image-edit-');
+  return hash(JSON.stringify([native||editing?2:1,device.public_key_hex,device.agent_version,device.backend,
     device.contribution_percent,health.runtime_mode,health.media_budget_bytes,
-    health.capabilities?.physical_memory_mb,native?health.capabilities?.total_vram_mb:health.capabilities?.usable_memory_mb,profile]));
+    health.capabilities?.physical_memory_mb,native?health.capabilities?.total_vram_mb:editing?null:health.capabilities?.usable_memory_mb,profile]));
 }
 export class MediaQualification {
   constructor(store,enabled=process.env.MUNDUSX_MEDIA_QUALIFICATION_MODE==='gradual') {this.store=store;this.enabled=enabled;}
