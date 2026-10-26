@@ -3,7 +3,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
   const controllers = new WeakMap();
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function api(path, body) {
-    const timeout = AbortSignal.timeout(15000);
+    const timeout = AbortSignal.timeout(path === '/api/media/chat' ? 30000 : 15000);
     const options = body === undefined ? {} : {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     };
@@ -30,12 +30,12 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
     const heading = document.createElement('strong');
     heading.textContent = item.kind === 'video' ? 'Creating your video' : 'Creating your image';
     const detail = document.createElement('p'); detail.className = 'media-chat-detail';
-    detail.textContent = item.kind === 'video' ? (item.duration_seconds || 3) + ' seconds · Maximum 10 seconds' : 'Qwen Image · ' + (item.width || 832) + ' × ' + (item.height || 480);
+    detail.textContent = item.kind === 'video' ? (item.duration_seconds || 3) + ' seconds · Maximum 10 seconds' : 'Image generation · preparing model and composition';
     const status = document.createElement('p'); status.className = 'media-chat-status'; status.setAttribute('role','status');
     const queue = document.createElement('p'); queue.className = 'media-chat-queue';
     const diagnostic = document.createElement('p'); diagnostic.className = 'media-chat-queue';
     diagnostic.textContent = item.job_id ? 'Request ID: ' + item.job_id : '';
-    status.textContent = 'Submitting request…';
+    status.textContent = item.kind === 'image' && !item.job_id ? 'Preparing your image prompt…' : 'Submitting request…';
     card.setAttribute('aria-busy','true'); card.append(visual,heading,detail,status,queue,diagnostic); body.append(card);
     if (item.kind === 'image') {
       const another = document.createElement('button'); another.type = 'button'; another.className = 'media-chat-another';
@@ -73,7 +73,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
           if (another) another.disabled = pending >= (job.max_pending_requests || 2);
           if (item.kind === 'image' && job.quote?.width && job.quote?.height) {
             item.width = job.quote.width; item.height = job.quote.height;
-            detail.textContent = 'Qwen Image · ' + item.width + ' × ' + item.height;
+            detail.textContent = (job.quote.model === 'Lykon/dreamshaper-8' ? 'DreamShaper 8' : 'Qwen Image') + ' · ' + item.width + ' × ' + item.height;
           }
           if (item.kind === 'video' && job.quote?.steps) {
             detail.textContent = (job.quote.steps === 4 ? 'Fast Lightning' : 'Quality') + ' · ' + job.quote.steps + ' steps · ' + job.quote.width + ' × ' + job.quote.height;

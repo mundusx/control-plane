@@ -9,6 +9,7 @@ import { persistMediaChatTurn } from './features/media/chat-history.js';
 import { mediaChatIntent, mayNeedMediaClassification } from './features/media/chat-intent.js';
 import { installMediaChatUi, mediaChatCss } from './features/media/chat-ui.js';
 import { MediaQueue } from './features/media/queue.js';
+import { imagePromptPlanner } from './features/media/image-prompt.js';
 import { MediaClientService } from './features/media/client-service.js';
 import { createMediaClientHttpController } from './features/media/client-http.js';
 import { videoPage } from "./features/media/page.js";
@@ -7053,7 +7054,11 @@ export function createServerApp(config = configFromEnv()) {
   const fleet = config.mediaFleet ?? (config.mediaAdmission ? null : mediaFleet(config,fetch,Date.now, process.env.MUNDUSX_MEDIA_QUALIFICATION_MODE==='gradual'&&mediaStore
     ? async ()=>(await mediaStore.pool.query("select node_id,profile_id,fingerprint,state from public.media_qualification_probes where state='passed'")).rows : null));
   const planMedia = config.mediaPlanner ?? mediaPlanner(process.env.MUNDUSX_MEDIA_PLANNER_URL);
-  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia);
+  const prepareImage = config.imagePromptPlanner ?? imagePromptPlanner(async (text, systemPrompt) => {
+    const job = await submitToolPlannerJob(text, {...config, toolPlannerTimeoutSeconds: 6}, fetch, systemPrompt);
+    return String(job.output ?? '');
+  });
+  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia, prepareImage);
   const mediaIntentCache = new Map();
   async function detectMediaIntent(owner, message) {
     const key = owner + ':' + String(message);

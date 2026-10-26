@@ -13,10 +13,11 @@ export function videoQuality(input) {
 
 // Shared contract for MCP and HTTP actions. Never wait for GPU work in a request.
 export class MediaClientService {
-  constructor(queue, publicOrigin, planner = null) {
+  constructor(queue, publicOrigin, planner = null, prepareImage = null) {
     this.queue = queue;
     this.origin = publicOrigin ? new URL(publicOrigin).origin : null;
     this.planner = planner;
+    this.prepareImage = prepareImage;
   }
   profiles() {
     return { profiles: [IMAGE_PROFILE, DREAMSHAPER_PROFILE, ...ACTIVE_VIDEO_PROFILES, ...ACTIVE_I2V_PROFILES].map(mediaQuote),
@@ -46,7 +47,9 @@ export class MediaClientService {
       const plan = await this.planner(input);
       if (plan.profile_id !== profile) throw httpError(503,'Media planner profile does not match the supported request');
     }
-    const job = await this.queue.submit(owner, { profile_id: profile, prompt: input.prompt,
+    const prepared = input.kind === 'image' && this.prepareImage
+      ? await this.prepareImage({prompt: input.prompt, profile_id: profile}) : null;
+    const job = await this.queue.submit(owner, { profile_id: profile, prompt: prepared?.prompt ?? input.prompt,
       seed: input.seed, input_artifact_id: input.input_artifact_id, idempotency_key: input.idempotency_key });
     return this.describe(job);
   }
