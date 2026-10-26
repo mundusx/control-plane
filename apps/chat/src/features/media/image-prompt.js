@@ -2,7 +2,7 @@ import { DREAMSHAPER_PROFILE } from './pricing.js';
 import { httpError } from '../../shared/http-error.js';
 
 function guidance(profile, logo) {
-  const model = profile === DREAMSHAPER_PROFILE
+  const model = profile.startsWith('qwen-image-edit-') ? 'Qwen Image Edit: describe only the requested change to the reference image. Preserve identity, composition, pose, clothing, text and all other details unless explicitly changed. Do not invent the unseen image contents.' : profile === DREAMSHAPER_PROFILE
     ? 'SD1.5 DreamShaper: concise visual phrases, one clear subject, simple composition. Do not depend on accurate lettering.'
     : 'Qwen Image: natural descriptive sentences with clear layout. Preserve requested lettering exactly in quotation marks.';
   return model + (logo ? ' Logo: a clean, recognizable flat symbol, balanced negative space, crisp silhouette, limited palette, plain background, no product mockup. For DreamShaper prioritize the symbol; do not promise a typeset wordmark or vector file.' : ' Describe composition, lighting and style only when consistent with the brief.');

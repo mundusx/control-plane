@@ -34,7 +34,7 @@ export class MediaQualification {
         if(row.state!=='pending')continue;
         const token=randomBytes(32).toString('hex');
         await db.query("update public.media_qualification_probes set state='running',lease_hash=$2,lease_until=$3 where job_id=$1",[row.job_id,hash(token),new Date(this.store.now()+180000)]);
-        return {job_id:row.job_id,profile_id:profile,qualification:true,prompt:'A quiet green field beneath a blue sky, no people, no text.',seed:42,lease_token:token,lease_seconds:180,quote:{...quote,compute_credits:0,contributor_reward_credits:0}};
+        return {job_id:row.job_id,profile_id:profile,qualification:true,prompt:quote.operation==='image_edit'?'Change the background to solid blue. Keep the foreground object unchanged.':'A quiet green field beneath a blue sky, no people, no text.',seed:42,lease_token:token,lease_seconds:180,quote:{...quote,compute_credits:0,contributor_reward_credits:0}};
       }
       return null;
     });
@@ -45,7 +45,7 @@ export class MediaQualification {
     return profiles.filter(p=>rows.some(r=>r.profile_id===p&&r.fingerprint===mediaFingerprint(device,p)));
   }
   async lookup(id) {return (await this.store.pool.query('select * from public.media_qualification_probes where job_id=$1',[id])).rows[0];}
-  async input(node,input) {return this.store.transaction(async db=>{const row=await this.lease(db,node,input);if(mediaQuote(row.profile_id).operation!=='image_to_video')throw httpError(404,'Probe has no reference image');const bytes=referenceImage();return {data:bytes.toString('base64'),sha256:hash(bytes)};});}
+  async input(node,input) {return this.store.transaction(async db=>{const row=await this.lease(db,node,input);if(!['image_to_video','image_edit'].includes(mediaQuote(row.profile_id).operation))throw httpError(404,'Probe has no reference image');const bytes=referenceImage();return {data:bytes.toString('base64'),sha256:hash(bytes)};});}
   async lease(db,node,input,completed=false) {
     const row=(await db.query('select * from public.media_qualification_probes where job_id=$1 for update',[input.job_id])).rows[0];
     if(!row||row.node_id!==node||!secret(input.lease_token,row.lease_hash)||
@@ -57,7 +57,7 @@ export class MediaQualification {
   async heartbeat(node,input) {return this.store.transaction(async db=>{await this.lease(db,node,input);await db.query('update public.media_qualification_probes set lease_until=$2 where job_id=$1',[input.job_id,new Date(this.store.now()+180000)]);return {ok:true};});}
   async reserve(node,input) {return this.store.transaction(async db=>{
     const row=await this.lease(db,node,input),q=mediaQuote(row.profile_id);
-    const metadata=validateMetadata({...input.metadata,width:q.width,height:q.height,frames:q.frames,fps:q.fps,content_type:q.operation==='text_to_image'?'image/png':'video/mp4'});
+    const metadata=validateMetadata({...input.metadata,width:q.width,height:q.height,frames:q.frames,fps:q.fps,content_type:['text_to_image','image_edit'].includes(q.operation)?'image/png':'video/mp4'});
     const artifact=randomUUID(),token=randomBytes(32).toString('hex');
     await db.query('update public.media_qualification_probes set artifact_id=$2,upload_hash=$3,metadata=$4,uploaded=false where job_id=$1',[row.job_id,artifact,hash(token),metadata]);
     return {artifact_id:artifact,upload_ticket:{version:1,artifact_id:artifact,upload_path:`/api/media/artifacts/${artifact}/content`,upload_token:token,expires_at:row.lease_until.toISOString(),...metadata,content_type:metadata.content_type??"image/png"}};

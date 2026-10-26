@@ -7,7 +7,7 @@ export function eligibleMediaNode(node, profile, now = Date.now()) {
   const qualified = !node?.trust?.qualification_required || !!node.media_qualifications?.some(q=>q.profile_id===profile&&q.state==='passed'&&q.fingerprint===mediaFingerprint(node,profile));
   return qualified && node?.policy_allowed === true && ['ready','busy'].includes(node.state)
     && Number.isFinite(age) && age >= -120 && age <= 60
-    && health?.healthy === true && health.media_budget_bytes >= (profile==='dreamshaper-8-sd15-512-v1' ? 8 : profile.startsWith('qwen-') ? 24 : 64) * 1024 ** 3
+    && health?.healthy === true && health.media_budget_bytes >= (profile==='dreamshaper-8-sd15-512-v1' ? 8 : profile.startsWith('qwen-image-edit-') ? 48 : profile.startsWith('qwen-') ? 24 : 64) * 1024 ** 3
     && health.media_profiles?.includes(profile);
 }
 

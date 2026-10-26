@@ -3,7 +3,7 @@ import {eligibleMediaNode} from './routing.js';
 export function capabilityAvailability(nodes, presence = [], loads = [], now = Date.now()) {
   const polling=new Map(presence.map(p=>[p.node_id,p]));
   const active=new Map(loads.map(p=>[p.node_id,p]));
-  const result=Object.fromEntries(['chat','image','video','image_to_video'].map(k=>[k,{nodes:0,free_slots:0,duration_seconds:[]}]));
+  const result=Object.fromEntries(['chat','image','video','image_to_video','image_edit'].map(k=>[k,{nodes:0,free_slots:0,duration_seconds:[]}]));
   for (const node of nodes) {
     const age=now/1000-Number(node.updated_at);
     if (!node.policy_allowed || !['ready','busy'].includes(node.state) || !Number.isFinite(age) || age < -120 || age>60) continue;
@@ -17,10 +17,10 @@ export function capabilityAvailability(nodes, presence = [], loads = [], now = D
     if (!poll || poll.public_key_hex !== node.public_key_hex) continue;
     const running=Number(load.media_running ?? 0);
     if (now-new Date(poll.last_poll_at).getTime()>45000 && running===0) continue;
-    for (const kind of ['image','video','image_to_video']) {
+    for (const kind of ['image','video','image_to_video','image_edit']) {
       const profiles=(node.worker_health?.media_profiles ?? []).filter(p=>poll.profiles.includes(p)
         && eligibleMediaNode(node,p,now)
-        && (kind==='image'?(p.startsWith('qwen-image-')||p==='dreamshaper-8-sd15-512-v1'):kind==='image_to_video'?p.startsWith('wan22-i2v-'):p.startsWith('wan22-14b-')));
+        && (kind==='image'?((p.startsWith('qwen-image-')&&!p.startsWith('qwen-image-edit-'))||p==='dreamshaper-8-sd15-512-v1'):kind==='image_edit'?p.startsWith('qwen-image-edit-'):kind==='image_to_video'?p.startsWith('wan22-i2v-'):p.startsWith('wan22-14b-')));
       if (!profiles.length) continue;
       result[kind].nodes++;
       result[kind].free_slots+=running?0:1;

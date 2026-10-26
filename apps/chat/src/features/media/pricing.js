@@ -1,6 +1,7 @@
 import { httpError } from "../../shared/http-error.js";
 
 export const DREAMSHAPER_PROFILE = "dreamshaper-8-sd15-512-v1";
+export const EDIT_PROFILE = "qwen-image-edit-2509-lightning-4step-832x480-v1";
 export const IMAGE_PROFILE = "qwen-image-fp8-832x480-v1";
 export const LEGACY_IMAGE_PROFILE = "qwen-image-fp8-1024-v1";
 
@@ -16,6 +17,14 @@ export const IMAGE_CREDITS_PER_REFERENCE_SECOND = IMAGE_REFERENCE_BENCHMARK.rewa
 export const IMAGE_CREDITS_PER_MEGAPIXEL_STEP =
   (IMAGE_REFERENCE_BENCHMARK.generation_ms / 1000) * IMAGE_CREDITS_PER_REFERENCE_SECOND / (referencePixelSteps / 1_000_000);
 export function imageQuote(profile = IMAGE_PROFILE) {
+  if (profile === EDIT_PROFILE) {
+    const credits=Math.ceil(142266/1000*IMAGE_CREDITS_PER_REFERENCE_SECOND);
+    return {pricing_version:'image-edit-gb10-measured-v1',profile_id:profile,operation:'image_edit',model:'Qwen/Qwen-Image-Edit-2509',
+      width:832,height:480,steps:4,image_count:1,compute_credits:credits,contributor_reward_credits:credits,
+      reference_generation_ms:142266,benchmark:{hardware:'NVIDIA GB10',generation_ms:142266,artifact_sha256:'f28e458bd403baabe8e9423cdd9bc2298be14d2d84a423dc6989932d15343bbd'},
+      calibration:'provisional_single_edit_run_using_existing_image_reward_rate',currency:'credits',
+      formula:'ceil(reference_edit_seconds * existing_image_credits_per_reference_second)',cash_price:null,file_retention_seconds:172800};
+  }
   if (profile === DREAMSHAPER_PROFILE) return {
     pricing_version:'dreamshaper-measured-minute-v1',profile_id:profile,operation:'text_to_image',model:'Lykon/dreamshaper-8',
     width:512,height:512,steps:20,image_count:1,compute_credits:3,contributor_reward_credits:3,
@@ -89,7 +98,7 @@ for (let seconds = 1; seconds <= 10; seconds++) {
 }
 export const ACTIVE_VIDEO_PROFILES = Object.keys(VIDEO_PROFILES).filter(id => (id.startsWith('wan22-14b-480p-') || id.startsWith('wan22-t2v-lightning-14b-480p-')) && VIDEO_PROFILES[id].reference_generation_ms > 0).sort((a,b) => VIDEO_PROFILES[a].frames - VIDEO_PROFILES[b].frames);
 export function mediaQuote(profile = IMAGE_PROFILE) {
-  if (profile === DREAMSHAPER_PROFILE || profile === IMAGE_PROFILE || profile === LEGACY_IMAGE_PROFILE) return imageQuote(profile);
+  if (profile === EDIT_PROFILE || profile === DREAMSHAPER_PROFILE || profile === IMAGE_PROFILE || profile === LEGACY_IMAGE_PROFILE) return imageQuote(profile);
   const preset = Object.hasOwn(VIDEO_PROFILES, profile) ? VIDEO_PROFILES[profile] : null;
   if (!preset || !(preset.reference_generation_ms > 0)) throw httpError(422, 'Media profile is not benchmarked or priced');
   return { pricing_version: preset.width === 832 ? 'video-compute-v3' : preset.model ? 'video-compute-v2' : 'video-compute-v1', profile_id: profile, operation: preset.operation ?? 'text_to_video', model: preset.model ?? 'Wan-AI/Wan2.2-TI2V-5B',

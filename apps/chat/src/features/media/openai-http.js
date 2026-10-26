@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { httpError } from '../../shared/http-error.js';
 import { validatePng } from './png.js';
 
+export const EDIT_MODEL = 'Qwen/Qwen-Image-Edit-2509';
 export const IMAGE_MODEL = 'Qwen/Qwen-Image';
 export const VIDEO_MODEL = 'Wan-AI/Wan2.2-T2V-A14B';
 export const I2V_MODEL = 'Wan-AI/Wan2.2-I2V-A14B-Lightning';
@@ -25,7 +26,7 @@ async function readVideoRequest(request, readJsonBody) {
   for (const [key, value] of form) {
     if (Object.hasOwn(input, key)) throw httpError(400, 'Duplicate request field');
     if (typeof value === 'string') input[key] = value;
-    else if (key === 'input_reference') input[key] = Buffer.from(await value.arrayBuffer());
+    else if (key === 'input_reference' || key === 'image') input[key] = Buffer.from(await value.arrayBuffer());
     else throw httpError(400, 'Only input_reference accepts a file');
   }
   return input;
@@ -47,8 +48,9 @@ export function createOpenAiMediaHttpController({ service, authStore, readJsonBo
   return async ({ request, response, url }) => {
     const models = url.pathname === '/v1/models' && request.method === 'GET';
     const image = url.pathname === '/v1/images/generations';
+    const editing = url.pathname === '/v1/images/edits';
     const video = url.pathname.match(/^\/v1\/videos(?:\/([0-9a-f-]{36})(\/content)?)?$/);
-    if (!image && !video && !models) return false;
+    if (!image && !editing && !video && !models) return false;
     if (models && !String(request.headers.authorization ?? '').startsWith('Bearer mxmcp_')) return false;
     response.setHeader('Cache-Control', 'private, no-store');
     try {
@@ -56,15 +58,20 @@ export function createOpenAiMediaHttpController({ service, authStore, readJsonBo
       if (!session && models) return false;
       if (!session) throw httpError(401, 'A MundusX user access token is required');
       if (models) {
-        sendJson(response, 200, { object:'list', data:[IMAGE_MODEL, 'Lykon/dreamshaper-8', VIDEO_MODEL, I2V_MODEL].map(id=>({id,object:'model',created:0,owned_by:'mundusx-media'})) });
+        sendJson(response, 200, { object:'list', data:[IMAGE_MODEL, EDIT_MODEL, 'Lykon/dreamshaper-8', VIDEO_MODEL, I2V_MODEL].map(id=>({id,object:'model',created:0,owned_by:'mundusx-media'})) });
         return true;
       }
-      if (image && request.method === 'POST') {
-        const input = await readJsonBody(request);
-        allowed(input, ['model','prompt','n','size','response_format','user']);
+      if ((image || editing) && request.method === 'POST') {
+        const input = editing ? await readVideoRequest(request, readJsonBody) : await readJsonBody(request);
+        allowed(input, ['model','prompt','n','size','response_format','user',...(editing?['image','input_artifact_id']:[])]);
+        if(editing && input.model && input.model !== EDIT_MODEL) throw httpError(400,'Image edits require '+EDIT_MODEL);
+        if(typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>4000)throw httpError(400,'Expected a prompt of 1-4000 characters');
+        let referenceId=input.input_artifact_id;
+        if(editing && input.image) referenceId=await saveReference(service.queue?.store,session.id,input.image);
+        if(editing && !referenceId)throw httpError(400,'Upload a reference PNG image or supply its owned input_artifact_id');
         const dream=input.model==='Lykon/dreamshaper-8';
-        if (input.model && ![IMAGE_MODEL,'Lykon/dreamshaper-8'].includes(input.model) || input.n !== undefined && input.n !== 1 || input.size && input.size !== (dream?'512x512':'832x480') || input.response_format && !['url','b64_json'].includes(input.response_format)) throw httpError(400, 'Supported: Qwen/Qwen-Image (832x480) or Lykon/dreamshaper-8 (512x512), n=1, url or b64_json');
-        const submitted = await service.submit(session.id, { kind: 'image', model:input.model, prompt: input.prompt, idempotency_key: request.headers['idempotency-key'] ?? randomUUID() });
+        if (input.model && ![IMAGE_MODEL,'Lykon/dreamshaper-8',...(editing?[EDIT_MODEL]:[])].includes(input.model) || input.n !== undefined && Number(input.n) !== 1 || input.size && input.size !== (dream?'512x512':'832x480') || input.response_format && !['url','b64_json'].includes(input.response_format)) throw httpError(400, 'Supported: Qwen/Qwen-Image (832x480) or Lykon/dreamshaper-8 (512x512), n=1, url or b64_json');
+        const submitted = await service.submit(session.id, { kind: 'image', model:editing?EDIT_MODEL:input.model, prompt: input.prompt, ...(editing?{input_artifact_id:referenceId}:{}), idempotency_key: request.headers['idempotency-key'] ?? randomUUID() });
         response.setHeader('X-MundusX-Job-Id', submitted.job_id);
         const deadline = Date.now() + imageTimeoutMs;
         let job = submitted;
@@ -86,7 +93,7 @@ export function createOpenAiMediaHttpController({ service, authStore, readJsonBo
         allowed(input, ['model','prompt','seconds','size','input_reference']);
         const seconds = Number(input.seconds ?? 3);
         if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.');
-        if (input.size && input.size !== (dream?'512x512':'832x480')) throw httpError(400, 'Supported video size: 832x480');
+        if (input.size && input.size !== '832x480') throw httpError(400, 'Supported video size: 832x480');
         if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 4000) throw httpError(400, 'Expected a prompt of 1-4000 characters');
         const reference = input.input_reference;
         const model = reference ? I2V_MODEL : VIDEO_MODEL;

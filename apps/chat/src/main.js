@@ -2414,9 +2414,9 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
           <div class="composer-actions">
             <span class="composer-left-actions">
               <button class="composer-plus" id="composer-plus" type="button" aria-label="Add attachments and tools" aria-haspopup="dialog" aria-expanded="false" aria-controls="composer-menu">+</button>
-              <input id="media-reference" type="file" accept="image/png" aria-label="Reference image for video" hidden>
+              <input id="media-reference" type="file" accept="image/png" aria-label="Reference image for editing or video" hidden>
               <div class="composer-menu" id="composer-menu" role="dialog" aria-label="Attachments and tools" hidden>
-              <button class="tool-toggle" id="media-reference-open" type="button"><span aria-hidden="true">＋</span> Add image for video</button>
+              <button class="tool-toggle" id="media-reference-open" type="button"><span aria-hidden="true">＋</span> Add reference image</button>
               ${config.harnessUiEnabled ? `<span class="active-project-context" id="active-project-context"><button class="tool-toggle project-context-open" id="active-project-open" type="button" aria-pressed="false" title="Choose a project"><span class="kbd" aria-hidden="true">⌁</span><strong id="active-project-name">Choose project</strong></button><button class="project-context-clear" id="active-project-clear" type="button" aria-label="Leave active project" title="Leave active project" hidden>&times;</button></span>` : ""}
               <select class="mutation-toggle" id="mutation-toggle" aria-label="Project access" title="Access is saved for this project" hidden><option value="ask">Ask before edits</option><option value="full">Full access</option></select>
             <button class="tool-toggle" id="enter-to-send-toggle" type="button" aria-pressed="false" title="Toggle sending messages with Enter"><span class="kbd">&#8629;</span><span id="enter-to-send-label">Enter to Send</span></button>
@@ -4205,7 +4205,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       // Freeze the selected workspace for this submission. Account refreshes,
       // runner polling, and responsive UI updates may all refresh activeProject
       // while an async request is being dispatched.
-      let mediaIntent = mediaChatIntent(message);
+      let mediaIntent = mediaChatIntent(message, Boolean(mediaReferenceEl.files?.[0]));
       const submittedProject = projectSelectedForSubmission();
       const conversationId = getConversationId();
       const priorConversationTurns = readCachedConversation(conversationId);
@@ -4234,7 +4234,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
       try {
         if (!mediaIntent && mayNeedMediaClassification(message)) {
           try {
-            const detected = await fetch('/api/media/intent', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message}) });
+            const detected = await fetch('/api/media/intent', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message,has_reference:Boolean(mediaReferenceEl.files?.[0])}) });
             if (detected.ok) mediaIntent = (await detected.json()).intent;
           } catch {}
         }
@@ -4245,7 +4245,7 @@ button,input,select,textarea { font-family:inherit; } code,pre,kbd,samp { font-f
             return;
           }
           const reference = document.getElementById('media-reference')?.files?.[0];
-          if (reference && mediaIntent.kind !== 'video') throw new Error('Reference images currently support video generation only.');
+          if (reference && !['image','video'].includes(mediaIntent.kind)) throw new Error('Reference images require image editing or video generation.');
           let inputArtifactId;
           if (reference) {
             const uploaded = await fetch('/api/media/reference', { method:'POST', headers:{'Content-Type':'image/png'}, body:reference });
@@ -7060,8 +7060,8 @@ export function createServerApp(config = configFromEnv()) {
   });
   const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia, prepareImage);
   const mediaIntentCache = new Map();
-  async function detectMediaIntent(owner, message) {
-    const key = owner + ':' + String(message);
+  async function detectMediaIntent(owner, message, hasReference = false) {
+    const key = owner + ':' + hasReference + ':' + String(message);
     const existing = mediaIntentCache.get(key);
     if (existing && existing.expires > Date.now()) return existing.intent;
     const intent = await resolveMediaIntent(message, config.mediaIntentClassifier ?? (async (text, systemPrompt) => {
@@ -7069,13 +7069,13 @@ export function createServerApp(config = configFromEnv()) {
       const job = await submitToolPlannerJob(text, config, fetch, systemPrompt);
       const output = String(job.output ?? '').replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
       return JSON.parse(output);
-    }));
+    }), hasReference);
     if (mediaIntentCache.size >= 512) mediaIntentCache.delete(mediaIntentCache.keys().next().value);
     mediaIntentCache.set(key, { intent, expires: Date.now() + 60000 });
     return intent;
   }
   const handleOpenAiMediaRequest = createOpenAiMediaHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
-  const handleMediaClientRequest = createMediaClientHttpController({ service: mediaService, authStore, readJsonBody, sendJson });
+  const handleMediaClientRequest = createMediaClientHttpController({ service: mediaService, authStore, readJsonBody, sendJson, store:mediaStore });
   const handleMediaRequest = createMediaHttpController({ store: mediaStore, authStore, operatorToken: config.operatorToken, readJsonBody, sendJson, admitWorker: config.mediaAdmission ?? mediaAdmission(config), fleet });
   const handleGlobalSkills = createGlobalSkillsController({ authStore, registry: SKILL_REGISTRY, token: config.operatorToken, readJsonBody, sendJson });
   const harnessService = createHarnessService({ config });
@@ -7456,7 +7456,7 @@ export function createServerApp(config = configFromEnv()) {
         if (!session) throw httpError(401, 'Sign in to request media');
         authStore.requireCsrf(request, session);
         const body = await readJsonBody(request);
-        return sendJson(response, 200, { intent: await detectMediaIntent(session.id, body.message) });
+        return sendJson(response, 200, { intent: await detectMediaIntent(session.id, body.message, Boolean(body.input_artifact_id || body.has_reference)) });
       }
       if (url.pathname === "/api/media/chat" || /^\/api\/media\/chat\/jobs\/[0-9a-f-]{36}(?:\/(?:result|cancel))?$/.test(url.pathname)) {
         const session = request.mundusxSession ?? await authStore.session(request);
@@ -7465,7 +7465,7 @@ export function createServerApp(config = configFromEnv()) {
         response.setHeader("Cache-Control", "private, no-store");
         if (url.pathname === "/api/media/chat" && request.method === "POST") {
           const body = await readJsonBody(request);
-          const intent = await detectMediaIntent(session.id, body.message);
+          const intent = await detectMediaIntent(session.id, body.message, Boolean(body.input_artifact_id || body.has_reference));
           if (!intent || intent.error) throw httpError(400, intent?.error || "Ask to create an image or video");
           if (!body.conversationId) throw httpError(400, "conversationId is required");
           await authStore.authorizeConversation(session.id, body.conversationId, true, {title:body.message});

@@ -45,6 +45,14 @@ test('isolated image qualification validates artifact, survives reload, gates pr
   assert.equal(eligibleMediaNode(live,image,clock),true);
   live.media_qualifications[0].fingerprint='stale';assert.equal(eligibleMediaNode(live,image,clock),false);
   const queue=new MediaQueue(store,async()=>true);queue.qualification=q;
+  const edit='qwen-image-edit-2509-lightning-4step-832x480-v1';
+  const editJob=await q.claim(device,[edit]);const editLease={job_id:editJob.job_id,lease_token:editJob.lease_token};
+  assert.equal(editJob.quote.operation,'image_edit');
+  assert.equal((await q.input(device.node_id,editLease)).sha256,sha256);
+  const editTicket=await q.reserve(device.node_id,{...editLease,metadata:{sha256,byte_size:bytes.length}});
+  assert.equal(editTicket.upload_ticket.content_type,'image/png');
+  await q.upload(editTicket.artifact_id,editTicket.upload_ticket.upload_token,bytes);
+  assert.equal((await q.complete(device.node_id,{...editLease,generation_ms:142266})).credits,0);
   clock+=1;const next=await q.claim(device,['wan22-i2v-lightning-14b-480p-49f-v3']);
   assert.equal(next.quote.operation,'image_to_video');
   const ref=await queue.input(device.node_id,{job_id:next.job_id,lease_token:next.lease_token});assert.equal(ref.sha256,sha256);

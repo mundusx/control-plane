@@ -281,3 +281,12 @@ node --env-file=.env src/main.js
 ## External chat API keys
 
 Set `MUNDUSX_CHAT_API_KEYS` on both public services to require Bearer keys for OpenAI-compatible chat clients. See [configuration, rollout and revocation](../../docs/chat-api-keys.md).
+
+
+## Reference image editing
+
+Upload a PNG using the chat reference-image button, then request an edit (for example, “Change the background to blue”). Reference-based image requests use the separate Qwen-Image-Edit-2509 profile. Text-only image requests retain the existing generation route. The optional prompt planner preserves the requested change and does not invent visual details it has not inspected.
+
+Token clients can upload raw PNG bytes to `POST /v1/media/reference`, then submit `kind: "image"` and `input_artifact_id` to `POST /v1/media/jobs`. Poll the returned status URL and request the result when complete. MCP exposes `mundusx_edit_image`. `POST /v1/images/edits` accepts multipart `image`/`prompt` or JSON with an owned `input_artifact_id`, using model `Qwen/Qwen-Image-Edit-2509`, n=1 and size 832x480.
+
+Reference ownership, expiry and checksums are checked before admission and input retrieval. Edit output is PNG throughout reservation, validation and settlement. Existing progress, result links and retention apply. The edit quote is separately calibrated from a real GB10 run at 142266 ms using the existing image reward rate; it is a provisional single-run calibration, not a performance guarantee.

@@ -27,6 +27,11 @@ export function registerMediaTools(server, service, owner) {
       ...(kind === 'video' ? { duration_seconds: z.number().int().min(1).max(10).default(3) } : {}) }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, wrap(input => service.submit(owner, { ...input, kind })));
+  server.registerTool('mundusx_edit_image', {
+    description:'Edit an owned reference PNG with Qwen Image Edit. Upload the PNG through POST /v1/media/reference first. Returns an asynchronous job; use the existing job/status/result tools.',
+    inputSchema:z.object({prompt:z.string().min(1).max(4000),input_artifact_id:z.string().uuid(),idempotency_key:z.string().uuid(),seed:z.number().int().min(0).max(2147483647).optional()}),
+    annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  },wrap(input=>service.submit(owner,{...input,kind:'image',model:'Qwen/Qwen-Image-Edit-2509'})));
   server.registerTool('mundusx_get_media_job', {
     description: 'Check an owned media job. Queued/running means still waiting; respect poll_after_seconds. Completed means call mundusx_get_media_result for the download link. Failed means report the failure. If the client cannot continue polling, retain the job ID and check on the next user request.',
     inputSchema: z.object({ job_id: z.string().uuid() }), annotations: read,

@@ -73,7 +73,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
           if (another) another.disabled = pending >= (job.max_pending_requests || 2);
           if (item.kind === 'image' && job.quote?.width && job.quote?.height) {
             item.width = job.quote.width; item.height = job.quote.height;
-            detail.textContent = (job.quote.model === 'Lykon/dreamshaper-8' ? 'DreamShaper 8' : 'Qwen Image') + ' · ' + item.width + ' × ' + item.height;
+            detail.textContent = (job.quote.model === 'Lykon/dreamshaper-8' ? 'DreamShaper 8' : job.quote.operation === 'image_edit' ? 'Qwen Image Edit' : 'Qwen Image') + ' · ' + item.width + ' × ' + item.height;
           }
           if (item.kind === 'video' && job.quote?.steps) {
             detail.textContent = (job.quote.steps === 4 ? 'Fast Lightning' : 'Quality') + ' · ' + job.quote.steps + ' steps · ' + job.quote.width + ' × ' + job.quote.height;

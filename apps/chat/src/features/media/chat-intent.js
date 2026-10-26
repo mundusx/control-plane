@@ -10,11 +10,12 @@ export function mayNeedMediaClassification(message) {
     || /[^\u0000-\u007f]/.test(text);
 }
 
-export function mediaChatIntent(message) {
+export function mediaChatIntent(message, hasReference = false) {
   const text = String(message || '').trim();
   if (!text || /^(?:how|why|what|explain|tell me|show me how)\b/i.test(text) ||
       /\b(?:don't|do not|never)\s+(?:create|generate|make|draw)\b/i.test(text) ||
       /\b(?:code|function|component|api|endpoint|script|tutorial|button|player)\b/i.test(text)) return null;
+  if (hasReference && /^(?:(?:please|can you|could you)\s+)?(?:edit|modify|change|alter|replace|remove|add|make|turn)\b/i.test(text)) return {kind:'image',prompt:text};
   // Explicit requests in common languages; Unicode boundaries must not use ASCII \b.
   const international = [
     [/^(?:por favor\s+)?(?:genera|generar|crea|crear|haz|dibuja|quiero).{0,100}?(vídeo|video|imagen|foto|ilustración)/iu, /vídeo|video/iu],
@@ -36,7 +37,7 @@ export function mediaChatIntent(message) {
   ];
   if (/^(?:nie|no|non|nicht|não|не|لا|不要|别|別|huwag)\s*/iu.test(text) || /^(?:jak|dlaczego|co|cómo|como|por qué|comment|pourquoi|wie|warum|как|почему|如何|怎么|怎麼|为什么|為什麼|paano|bakit)\s*/iu.test(text)) return null;
   const translated = international.find(([pattern]) => pattern.test(text));
-  const match = text.match(/^(?:(?:please|hey)[,\s]+)?(?:(?:can|could|would|will)\s+(?:you|u)\s+)?(?:please\s+)?(?:design|create|generate|make|draw|render|produce|give me|show me|i\s+(?:want|need|would like|would love)(?:\s+(?:you|u)\s+to\s+(?:create|generate|make))?)\b[\s\S]{0,100}?\b(video|clip|image|picture|photo|illustration|logo|logotype|wordmark)\b/i);
+  const match = text.match(/^(?:(?:please|hey)[,\s]+)?(?:(?:can|could|would|will)\s+(?:you|u)\s+)?(?:please\s+)?(?:edit|modify|alter|change|design|create|generate|make|draw|render|produce|give me|show me|i\s+(?:want|need|would like|would love)(?:\s+(?:you|u)\s+to\s+(?:create|generate|make))?)\b[\s\S]{0,100}?\b(video|clip|image|picture|photo|illustration|logo|logotype|wordmark)\b/i);
   if (!match && !translated) return null;
   const kind = (translated ? translated[1].test(text) : /video|clip/i.test(match[1])) ? 'video' : 'image';
   if (kind === 'image') return { kind, prompt: text };
