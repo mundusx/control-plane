@@ -8944,6 +8944,7 @@ pub fn evaluate_policy(
 
     if worker_health.runtime_mode == "media" {
         let valid = !worker_health.media_profiles.is_empty() && worker_health.media_profiles.iter().all(|profile| {
+            (profile == "dreamshaper-8-sd15-512-v1" && worker_health.media_budget_bytes >= 8 * 1024u64.pow(3) && worker_health.cuda_memory_mb.unwrap_or(0) >= 4096) ||
             (profile == "qwen-image-fp8-832x480-v1" && worker_health.media_budget_bytes >= 32 * 1024u64.pow(3)) ||
             (((1..=10).any(|seconds| profile == &format!("wan22-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-14b-704p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-t2v-lightning-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-lightning-14b-480p-{}f-v3", seconds * 16 + 1))) && worker_health.media_budget_bytes >= 64 * 1024u64.pow(3))
         });
@@ -9078,7 +9079,7 @@ pub fn evaluate_admission_policy(
 
         if policy.enforce_model_policy && worker_health.runtime_mode == "media" {
             for profile in &worker_health.media_profiles {
-                let model = if profile.starts_with("qwen-") { "Qwen/Qwen-Image" } else if profile.starts_with("wan22-i2v-") { "Wan-AI/Wan2.2-I2V-A14B-Lightning" } else { "Wan-AI/Wan2.2-T2V-A14B" };
+                let model = if profile.starts_with("dreamshaper-") { "Lykon/dreamshaper-8" } else if profile.starts_with("qwen-") { "Qwen/Qwen-Image" } else if profile.starts_with("wan22-i2v-") { "Wan-AI/Wan2.2-I2V-A14B-Lightning" } else { "Wan-AI/Wan2.2-T2V-A14B" };
                 if !policy.allowed_models.iter().any(|allowed| allowed == model) {
                     reasons.push(format!("media model {model} is denied by operator model policy"));
                 }
@@ -18560,6 +18561,16 @@ mod tests {
         health.parallel_slots = 2;
         health.capabilities.max_parallel_jobs = 2;
         assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+    }
+
+    #[test]
+    fn dreamshaper_media_admission_keeps_large_model_floors() {
+        let mut health=healthy_worker_health("1");health.runtime_mode="media".into();health.model_name=None;health.model_path=None;
+        health.media_profiles=vec!["dreamshaper-8-sd15-512-v1".into()];health.media_budget_bytes=8*1024u64.pow(3);health.cuda_memory_mb=Some(4096);
+        assert!(evaluate_policy(AgentState::Ready,"ac",false,None,&health).0);
+        health.cuda_memory_mb=Some(2048);assert!(!evaluate_policy(AgentState::Ready,"ac",false,None,&health).0);
+        health.cuda_memory_mb=Some(4096);health.media_profiles=vec!["qwen-image-fp8-832x480-v1".into()];
+        assert!(!evaluate_policy(AgentState::Ready,"ac",false,None,&health).0);
     }
 
     #[test]
