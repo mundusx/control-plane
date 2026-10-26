@@ -8945,6 +8945,7 @@ pub fn evaluate_policy(
     if worker_health.runtime_mode == "media" {
         let valid = !worker_health.media_profiles.is_empty() && worker_health.media_profiles.iter().all(|profile| {
             (profile == "dreamshaper-8-sd15-512-v1" && worker_health.media_budget_bytes >= 8 * 1024u64.pow(3) && worker_health.cuda_memory_mb.unwrap_or(0) >= 4096) ||
+            (profile == "qwen-image-edit-2509-lightning-4step-832x480-v1" && worker_health.media_budget_bytes >= 48 * 1024u64.pow(3)) ||
             (profile == "qwen-image-fp8-832x480-v1" && worker_health.media_budget_bytes >= 32 * 1024u64.pow(3)) ||
             (((1..=10).any(|seconds| profile == &format!("wan22-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-14b-704p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-t2v-lightning-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-14b-480p-{}f-v1", seconds * 16 + 1) || profile == &format!("wan22-i2v-lightning-14b-480p-{}f-v3", seconds * 16 + 1))) && worker_health.media_budget_bytes >= 64 * 1024u64.pow(3))
         });
@@ -9079,7 +9080,7 @@ pub fn evaluate_admission_policy(
 
         if policy.enforce_model_policy && worker_health.runtime_mode == "media" {
             for profile in &worker_health.media_profiles {
-                let model = if profile.starts_with("dreamshaper-") { "Lykon/dreamshaper-8" } else if profile.starts_with("qwen-") { "Qwen/Qwen-Image" } else if profile.starts_with("wan22-i2v-") { "Wan-AI/Wan2.2-I2V-A14B-Lightning" } else { "Wan-AI/Wan2.2-T2V-A14B" };
+                let model = if profile.starts_with("dreamshaper-") { "Lykon/dreamshaper-8" } else if profile.starts_with("qwen-image-edit-") { "Qwen/Qwen-Image-Edit-2509" } else if profile.starts_with("qwen-") { "Qwen/Qwen-Image" } else if profile.starts_with("wan22-i2v-") { "Wan-AI/Wan2.2-I2V-A14B-Lightning" } else { "Wan-AI/Wan2.2-T2V-A14B" };
                 if !policy.allowed_models.iter().any(|allowed| allowed == model) {
                     reasons.push(format!("media model {model} is denied by operator model policy"));
                 }
@@ -18542,6 +18543,19 @@ mod tests {
         assert_eq!(timeline[0].stage, "repair");
         assert_eq!(timeline[0].status, "planned");
     }
+    #[test]
+    fn image_edit_admission_requires_its_own_profile_and_memory_budget() {
+        let mut health = healthy_worker_health("1");
+        health.runtime_mode = "media".into(); health.model_name = None; health.model_path = None;
+        health.media_profiles = vec!["qwen-image-edit-2509-lightning-4step-832x480-v1".into()];
+        health.media_budget_bytes = 48 * 1024u64.pow(3);
+        assert!(evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_budget_bytes -= 1;
+        assert!(!evaluate_policy(AgentState::Ready, "ac", false, None, &health).0);
+        health.media_budget_bytes += 1;
+        assert!(!evaluate_policy(AgentState::Paused, "ac", false, None, &health).0);
+    }
+
     #[test]
     fn media_only_admission_requires_verified_profiles_budget_and_one_slot() {
         let mut health = healthy_worker_health("1");
