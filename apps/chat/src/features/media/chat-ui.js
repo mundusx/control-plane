@@ -84,7 +84,7 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
             if (!live()) return;
             const media = document.createElement(item.kind === 'video' ? 'video' : 'img');
             if (item.kind === 'video') { media.controls = true; media.preload = 'metadata'; }
-            else { media.alt = item.prompt || 'Generated image'; media.loading = 'lazy'; }
+            else { media.alt = item.prompt || 'Generated image'; media.loading = 'eager'; }
             media.className = 'media-chat-output';
             const readyTitle = item.kind === 'video' ? 'Your video is ready' : 'Your image is ready';
             media.addEventListener(item.kind === 'video' ? 'loadedmetadata' : 'load', () => {
@@ -102,13 +102,12 @@ export function installMediaChatUi({ detect, cache, activeConversation, scroll, 
               retry.onclick = () => { retry.remove(); media.hidden = false; heading.textContent = 'Loading saved media…'; media.src = result.preview_url + (result.preview_url.includes('?') ? '&' : '?') + 'reload=' + Date.now(); };
               card.append(retry);
             });
-            media.src = result.preview_url;
             visual.replaceWith(media); card.setAttribute('aria-busy','false');card.classList.add('media-chat-complete');
-            heading.textContent = 'Loading saved media…';
+            heading.textContent = readyTitle;
             status.textContent = 'Generation completed. Loading the preview.';
             const link = document.createElement('a'); link.className = 'media-chat-download';
             link.href = result.download_url; link.textContent = item.kind === 'video' ? 'Download video' : 'Download image';
-            card.append(link); scroll(); return;
+            card.append(link); media.src = result.preview_url; scroll(); return;
           }
           if (job.state === 'failed' || job.state === 'cancelled') throw Object.assign(new Error(job.error || 'Generation ' + job.state + '. Please try a new request.'),{terminal:true});
           heading.textContent = job.state === 'running' ? 'Generating…' : (item.kind === 'video' ? 'Video request · Queued' : 'Image request · Queued');
