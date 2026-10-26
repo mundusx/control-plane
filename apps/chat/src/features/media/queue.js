@@ -1,6 +1,6 @@
 import { MediaQualification } from './qualification.js';
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from 'node:crypto';
-import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
+import { mediaQuote, VIDEO_PROFILES, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, DREAMSHAPER_PROFILE, IMAGE_PROFILE, LEGACY_IMAGE_PROFILE } from './pricing.js';
 import { MediaAccounting } from './accounting.js';
 import { httpError } from '../../shared/http-error.js';
 import { rankedMediaWorker, eligibleMediaNode } from './routing.js';
@@ -41,7 +41,7 @@ export class MediaQueue {
       }
       // Queue supported requests even while contributors are offline. Live fleet
       // checks, policy and capacity remain enforced when a worker claims work.
-      if (quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
+      if (quote.profile_id !== DREAMSHAPER_PROFILE && quote.profile_id !== IMAGE_PROFILE && !ACTIVE_VIDEO_PROFILES.includes(quote.profile_id) && !ACTIVE_I2V_PROFILES.includes(quote.profile_id)) throw httpError(422,'This media preset has been retired. Refresh to choose the current model.');
       const pending=(await db.query("select count(*)::int n from public.media_generation_jobs where owner_user_id=$1 and state in ('queued','running')",[owner])).rows[0].n;
       if(pending>=2) throw httpError(429,'You already have two pending media requests. Wait for one to finish before submitting another.');
       // Media-prefixed states are excluded by the legacy LLM restore/claim query.
@@ -54,7 +54,7 @@ export class MediaQueue {
   }
   async claim(device,profiles) {
     if(!await this.admitWorker(device, profiles)) throw httpError(403,'Contributor policy does not allow work');
-    let supported=Array.isArray(profiles)?profiles.filter(x=>x===IMAGE_PROFILE || x===LEGACY_IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
+    let supported=Array.isArray(profiles)?profiles.filter(x=>x===DREAMSHAPER_PROFILE || x===IMAGE_PROFILE || x===LEGACY_IMAGE_PROFILE || Object.hasOwn(VIDEO_PROFILES,x)):[];
     if(!supported.length) throw httpError(422,'No supported media presets');
     if(this.qualification.enabled) {
       const probe=await this.qualification.claim(device,supported);

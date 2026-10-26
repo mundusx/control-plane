@@ -20,7 +20,7 @@ export function capabilityAvailability(nodes, presence = [], loads = [], now = D
     for (const kind of ['image','video','image_to_video']) {
       const profiles=(node.worker_health?.media_profiles ?? []).filter(p=>poll.profiles.includes(p)
         && eligibleMediaNode(node,p,now)
-        && (kind==='image'?p.startsWith('qwen-image-'):kind==='image_to_video'?p.startsWith('wan22-i2v-'):p.startsWith('wan22-14b-')));
+        && (kind==='image'?(p.startsWith('qwen-image-')||p==='dreamshaper-8-sd15-512-v1'):kind==='image_to_video'?p.startsWith('wan22-i2v-'):p.startsWith('wan22-14b-')));
       if (!profiles.length) continue;
       result[kind].nodes++;
       result[kind].free_slots+=running?0:1;

@@ -99,7 +99,7 @@ export class MediaArtifactStore {
     return { artifact_id: id, status: "pending", retention_seconds: RETENTION_SECONDS,
       download_path: downloadPath, preview_path: `${downloadPath}&inline=1`,
       upload_ticket: { version: 1, artifact_id: id, upload_path: `/api/media/artifacts/${id}/content`,
-        upload_token: uploadToken, expires_at: expires.toISOString(), ...metadata } };
+        upload_token: uploadToken, expires_at: expires.toISOString(), ...metadata, content_type: metadata.content_type ?? "image/png" } };
   }
 
   async lookup(id) {

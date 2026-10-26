@@ -29,6 +29,7 @@ test('isolated image qualification validates artifact, survives reload, gates pr
   await assert.rejects(q.reserve('other',lease),{statusCode:409});
   const bytes=referenceImage(),sha256=createHash('sha256').update(bytes).digest('hex');
   const ticket=await q.reserve(device.node_id,{...lease,metadata:{sha256,byte_size:bytes.length}});
+  assert.equal(ticket.upload_ticket.content_type,'image/png');
   await assert.rejects(q.complete(device.node_id,{...lease,generation_ms:123}),{statusCode:409});
   await assert.rejects(q.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,Buffer.alloc(bytes.length)),{statusCode:422});
   await q.upload(ticket.artifact_id,ticket.upload_ticket.upload_token,bytes);

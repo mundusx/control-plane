@@ -56,14 +56,15 @@ export function createOpenAiMediaHttpController({ service, authStore, readJsonBo
       if (!session && models) return false;
       if (!session) throw httpError(401, 'A MundusX user access token is required');
       if (models) {
-        sendJson(response, 200, { object:'list', data:[IMAGE_MODEL, VIDEO_MODEL, I2V_MODEL].map(id=>({id,object:'model',created:0,owned_by:'mundusx-media'})) });
+        sendJson(response, 200, { object:'list', data:[IMAGE_MODEL, 'Lykon/dreamshaper-8', VIDEO_MODEL, I2V_MODEL].map(id=>({id,object:'model',created:0,owned_by:'mundusx-media'})) });
         return true;
       }
       if (image && request.method === 'POST') {
         const input = await readJsonBody(request);
         allowed(input, ['model','prompt','n','size','response_format','user']);
-        if (input.model && input.model !== IMAGE_MODEL || input.n !== undefined && input.n !== 1 || input.size && input.size !== '832x480' || input.response_format && !['url','b64_json'].includes(input.response_format)) throw httpError(400, 'Supported: Qwen/Qwen-Image, n=1, size=832x480, url or b64_json');
-        const submitted = await service.submit(session.id, { kind: 'image', prompt: input.prompt, idempotency_key: request.headers['idempotency-key'] ?? randomUUID() });
+        const dream=input.model==='Lykon/dreamshaper-8';
+        if (input.model && ![IMAGE_MODEL,'Lykon/dreamshaper-8'].includes(input.model) || input.n !== undefined && input.n !== 1 || input.size && input.size !== (dream?'512x512':'832x480') || input.response_format && !['url','b64_json'].includes(input.response_format)) throw httpError(400, 'Supported: Qwen/Qwen-Image (832x480) or Lykon/dreamshaper-8 (512x512), n=1, url or b64_json');
+        const submitted = await service.submit(session.id, { kind: 'image', model:input.model, prompt: input.prompt, idempotency_key: request.headers['idempotency-key'] ?? randomUUID() });
         response.setHeader('X-MundusX-Job-Id', submitted.job_id);
         const deadline = Date.now() + imageTimeoutMs;
         let job = submitted;
@@ -85,7 +86,7 @@ export function createOpenAiMediaHttpController({ service, authStore, readJsonBo
         allowed(input, ['model','prompt','seconds','size','input_reference']);
         const seconds = Number(input.seconds ?? 3);
         if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.');
-        if (input.size && input.size !== '832x480') throw httpError(400, 'Supported video size: 832x480');
+        if (input.size && input.size !== (dream?'512x512':'832x480')) throw httpError(400, 'Supported video size: 832x480');
         if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 4000) throw httpError(400, 'Expected a prompt of 1-4000 characters');
         const reference = input.input_reference;
         const model = reference ? I2V_MODEL : VIDEO_MODEL;

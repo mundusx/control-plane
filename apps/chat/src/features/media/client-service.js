@@ -1,4 +1,5 @@
-import { IMAGE_PROFILE, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, mediaQuote } from './pricing.js';
+import { eligibleMediaNode } from './routing.js';
+import { DREAMSHAPER_PROFILE, IMAGE_PROFILE, ACTIVE_VIDEO_PROFILES, ACTIVE_I2V_PROFILES, mediaQuote } from './pricing.js';
 import { httpError } from '../../shared/http-error.js';
 
 export function videoQuality(input) {
@@ -18,13 +19,21 @@ export class MediaClientService {
     this.planner = planner;
   }
   profiles() {
-    return { profiles: [IMAGE_PROFILE, ...ACTIVE_VIDEO_PROFILES, ...ACTIVE_I2V_PROFILES].map(mediaQuote),
+    return { profiles: [IMAGE_PROFILE, DREAMSHAPER_PROFILE, ...ACTIVE_VIDEO_PROFILES, ...ACTIVE_I2V_PROFILES].map(mediaQuote),
       file_retention_seconds: 172800, asynchronous: true };
   }
   async submit(owner, input) {
     if (!this.queue || !this.origin) throw httpError(503, 'Media generation is not configured');
     if (!input || !['image', 'video'].includes(input.kind)) throw httpError(400, 'kind must be image or video');
     let profile = IMAGE_PROFILE;
+    if(input.kind==='image') {
+      if(input.model!==undefined && !['Qwen/Qwen-Image','Lykon/dreamshaper-8'].includes(input.model)) throw httpError(400,'Unsupported image model');
+      if(input.model==='Lykon/dreamshaper-8') profile=DREAMSHAPER_PROFILE;
+      else if(!input.model && this.queue.fleet) {
+        const nodes=await this.queue.fleet();
+        if(!nodes.some(n=>eligibleMediaNode(n,IMAGE_PROFILE))&&nodes.some(n=>eligibleMediaNode(n,DREAMSHAPER_PROFILE))) profile=DREAMSHAPER_PROFILE;
+      }
+    }
     if (input.kind === 'video') {
       const seconds = input.duration_seconds ?? 3;
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 10) throw httpError(400, 'Videos are limited to 10 seconds maximum. Please choose a whole-number duration from 1 to 10 seconds.');
@@ -33,7 +42,7 @@ export class MediaClientService {
       const prefix = input.input_artifact_id ? (fast ? 'wan22-i2v-lightning-14b' : 'wan22-i2v-14b') : (fast ? 'wan22-t2v-lightning-14b' : 'wan22-14b');
       profile = `${prefix}-480p-${seconds * 16 + 1}f-${input.input_artifact_id && fast ? 'v3' : 'v1'}`;
     } else if (input.duration_seconds !== undefined) throw httpError(400, 'duration_seconds applies only to video');
-    if (this.planner) {
+    if (this.planner && profile !== DREAMSHAPER_PROFILE) {
       const plan = await this.planner(input);
       if (plan.profile_id !== profile) throw httpError(503,'Media planner profile does not match the supported request');
     }

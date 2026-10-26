@@ -11,9 +11,10 @@ const hash=v=>createHash('sha256').update(v).digest('hex');
 const secret=(v,h)=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)&&typeof h==='string'&&timingSafeEqual(Buffer.from(hash(v),'hex'),Buffer.from(h,'hex'));
 export function mediaFingerprint(device,profile) {
   const health=device.worker_health_json??device.worker_health??{};
-  return hash(JSON.stringify([1,device.public_key_hex,device.agent_version,device.backend,
+  const native=profile==='dreamshaper-8-sd15-512-v1';
+  return hash(JSON.stringify([native?2:1,device.public_key_hex,device.agent_version,device.backend,
     device.contribution_percent,health.runtime_mode,health.media_budget_bytes,
-    health.capabilities?.physical_memory_mb,health.capabilities?.usable_memory_mb,profile]));
+    health.capabilities?.physical_memory_mb,native?health.capabilities?.total_vram_mb:health.capabilities?.usable_memory_mb,profile]));
 }
 export class MediaQualification {
   constructor(store,enabled=process.env.MUNDUSX_MEDIA_QUALIFICATION_MODE==='gradual') {this.store=store;this.enabled=enabled;}
@@ -59,7 +60,7 @@ export class MediaQualification {
     const metadata=validateMetadata({...input.metadata,width:q.width,height:q.height,frames:q.frames,fps:q.fps,content_type:q.operation==='text_to_image'?'image/png':'video/mp4'});
     const artifact=randomUUID(),token=randomBytes(32).toString('hex');
     await db.query('update public.media_qualification_probes set artifact_id=$2,upload_hash=$3,metadata=$4,uploaded=false where job_id=$1',[row.job_id,artifact,hash(token),metadata]);
-    return {artifact_id:artifact,upload_ticket:{version:1,artifact_id:artifact,upload_path:`/api/media/artifacts/${artifact}/content`,upload_token:token,expires_at:row.lease_until.toISOString(),...metadata}};
+    return {artifact_id:artifact,upload_ticket:{version:1,artifact_id:artifact,upload_path:`/api/media/artifacts/${artifact}/content`,upload_token:token,expires_at:row.lease_until.toISOString(),...metadata,content_type:metadata.content_type??"image/png"}};
   });}
   async artifact(id) {return (await this.store.pool.query('select * from public.media_qualification_probes where artifact_id=$1',[id])).rows[0];}
   authorizeUpload(row,token) {if(row.state!=='running'||!secret(token,row.upload_hash)||new Date(row.lease_until).getTime()<=this.store.now())throw httpError(404,'Qualification upload expired');}
