@@ -1,4 +1,6 @@
 import test from 'node:test';
+import {Readable} from 'node:stream';
+import {referenceImage} from '../src/features/media/probe-image.js';
 import assert from 'node:assert/strict';
 import {MediaClientService} from '../src/features/media/client-service.js';
 import {MediaQueue} from '../src/features/media/queue.js';
@@ -43,4 +45,15 @@ test('queued image edits reserve PNG output with the edit dimensions',async()=>{
  const q=new MediaQueue({reserve:async(owner,m)=>{assert.equal(owner,'owner');assert.equal(m.content_type,'image/png');assert.equal(m.width,832);assert.equal(m.height,480);return {artifact_id:id}},transaction:async fn=>fn({query:async()=>({rows:[{status:'quoted'}]})})});
  q.lease=async()=>({owner_user_id:'owner',request:{profile_id:EDIT_PROFILE}});
  assert.equal((await q.reserve('node',{job_id:id,lease_token:'lease',metadata:{byte_size:100,sha256:'x'}})).artifact_id,id);
+});
+
+test('multipart edit uploads the PNG and accepts the SDK string n=1',async()=>{
+ const bytes=referenceImage(),form=new FormData();form.set('image',new Blob([bytes],{type:'image/png'}),'reference.png');form.set('prompt','Make the background blue');form.set('n','1');
+ const encoded=new Request('http://localhost',{method:'POST',body:form});
+ const request=Readable.from([Buffer.from(await encoded.arrayBuffer())]);request.method='POST';request.headers={'content-type':encoded.headers.get('content-type')};
+ let uploaded=false,submitted=false,result;
+ const store={reserve:async(owner,m)=>{assert.equal(owner,'owner');assert.equal(m.content_type,'image/png');return {artifact_id:id,upload_ticket:{upload_token:'scoped'}}},upload:async(artifact,token,body)=>{assert.equal(artifact,id);assert.equal(token,'scoped');assert.deepEqual(body,bytes);uploaded=true}};
+ const handler=createOpenAiMediaHttpController({authStore:{mcpSession:async()=>({id:'owner'})},readJsonBody:()=>{throw Error('Multipart must be parsed')},service:{queue:{store},submit:async(owner,input)=>{assert.equal(uploaded,true);assert.equal(input.input_artifact_id,id);assert.equal(input.model,'Qwen/Qwen-Image-Edit-2509');submitted=true;return {job_id:id,state:'completed'}},result:async()=>({download_url:'https://chat.example/owned.png'})},sendJson:(_,status,body)=>{result={status,body}}});
+ await handler({request,response:{setHeader(){}},url:new URL('https://chat.example/v1/images/edits')});
+ assert.equal(submitted,true);assert.equal(result.status,200);
 });
