@@ -9483,7 +9483,8 @@ fn handle_connection_with_streams(
                     if let Err(error) = chat_gateway::validate_request(&request_body) {
                         return write_chat_error(&mut stream, "400 Bad Request", &error);
                     }
-                    native_checkpoint::normalize_request(&mut request_body);
+                    let host_native_turn=chat_gateway::host_managed_native_turn(&request_body);
+                    if !host_native_turn {native_checkpoint::normalize_request(&mut request_body);}
                     let environment = control_plane_environment_from_env(
                         std::env::var(CONTROL_PLANE_ENVIRONMENT_ENV).ok().as_deref(),
                     );
@@ -9499,7 +9500,7 @@ fn handle_connection_with_streams(
                     if let Err(error)=chat_gateway::validate_image_inputs(&request_body) {
                         return stream.write_all(json_response("400 Bad Request",openai_error(&error)).as_bytes()).unwrap_or(());
                     }
-                    if let Some(completion) = native_checkpoint::completion(&request_body, &completion_id, created, public_model)
+                    if let Some(completion) = (!host_native_turn).then(||native_checkpoint::completion(&request_body, &completion_id, created, public_model)
                         .or_else(||native_json_api::observed_completion(&request_body, &completion_id, created, public_model))
                         .or_else(||native_json_api::failure_completion(&request_body, &completion_id, created, public_model))
                         .or_else(||chat_gateway::native_http_parse_recovery(&request_body, &completion_id, created, public_model))
@@ -9512,7 +9513,7 @@ fn handle_connection_with_streams(
                         .or_else(||native_edit_guard::diagnostics_shortcut(&request_body,&completion_id,created,public_model))
                         .or_else(||native_edit_guard::diagnostics_refresh(&request_body,&completion_id,created,public_model))
                         .or_else(||native_edit_guard::diagnostics_read(&request_body,&completion_id,created,public_model))
-                        .or_else(||native_edit_guard::verification_loop_stop(&request_body,&completion_id,created,public_model)) {
+                        .or_else(||native_edit_guard::verification_loop_stop(&request_body,&completion_id,created,public_model))).flatten() {
                         // Native get_errors samples cached diagnostics before
                         // opening a fresh document snapshot. Refresh once after
                         // language services have had time to process the edit.
@@ -9525,15 +9526,15 @@ fn handle_connection_with_streams(
                         return stream.write_all(response.as_bytes()).unwrap_or(());
                     }
                     let native_tool_turn = chat_gateway::is_native_tool_turn(&request_body);
-                    if native_tool_turn {
+                    if native_tool_turn && !host_native_turn {
                         chat_gateway::apply_native_turn_tool_policy(&mut request_body);
                     }
-                    let adaptive_native_edit = native_tool_turn
+                    let adaptive_native_edit = native_tool_turn && !host_native_turn
                         && chat_gateway::apply_adaptive_native_edit_policy(&mut request_body);
                     let (system_prompt, prompt) = if native_tool_turn {
                         // The worker returns a complete native assistant message;
                         // omit null options rejected by native MLX runtimes.
-                        let native_request = chat_gateway::native_tool_payload(&request_body);
+                        let native_request = if host_native_turn {chat_gateway::native_host_payload(&request_body)} else {chat_gateway::native_tool_payload(&request_body)};
                         (
                             None,
                             format!(
@@ -9780,7 +9781,7 @@ fn handle_connection_with_streams(
                     let mut streamed_content = String::new();
                     let mut native_stream = native_stream::NativeStream::default();
                     let mut native_delta_decoder = native_stream::DeltaDecoder::default();
-                    let structured_json_turn=native_tool_turn && native_json_api::active(&chat_gateway::native_tool_payload(&request_body));
+                    let structured_json_turn=native_tool_turn && !host_native_turn && native_json_api::active(&chat_gateway::native_tool_payload(&request_body));
                     let completed_result = if live_stream_job {
                         chat_gateway::wait_for_job_with_stream(
                             &state,
@@ -9906,7 +9907,7 @@ fn handle_connection_with_streams(
                         Some(&completed),
                         None,
                     );
-                    if native_tool_turn {
+                    if native_tool_turn && !host_native_turn {
                         let payload=chat_gateway::native_tool_payload(&request_body);
                         let original=serde_json::to_value(&request_body).expect("validated request serializes");
                         match native_json_api::compile(&original,&payload,&completion["choices"][0]["message"]) {
@@ -9928,6 +9929,14 @@ fn handle_connection_with_streams(
                                 let _=stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"native_response_validation_failed").as_bytes());
                                 return;
                             }
+                            return write_chat_error(&mut stream,"502 Bad Gateway",&error);
+                        }
+                    }
+                    if native_tool_turn && host_native_turn {
+                        let original=chat_gateway::native_host_payload(&request_body);
+                        if let Err(error)=native_edit_guard::validate_host_contract(&original,&completion["choices"][0]["message"]) {
+                            if live_stream_job {live_streams.lock().expect("live stream registry lock").remove(&record.job_id);}
+                            if wants_stream {let _=stream.write_all(chat_gateway::native_failure_stream(&completion_id,created,public_model,&error,"native_response_validation_failed").as_bytes());return;}
                             return write_chat_error(&mut stream,"502 Bad Gateway",&error);
                         }
                     }

@@ -11,6 +11,39 @@ use std::time::{Duration, Instant};
 
 pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]";
 
+/// Native clients own orchestration and filesystem execution. Keep the previous
+/// server-side workflow available only as an explicit compatibility mode.
+pub fn host_managed_native_turn(request: &ChatCompletionRequest) -> bool {
+    is_native_tool_turn(request)
+        && std::env::var("MUNDUSX_NATIVE_WORKFLOW").as_deref() != Ok("legacy")
+}
+
+pub fn native_host_payload(request: &ChatCompletionRequest) -> Value {
+    let mut payload=serde_json::to_value(request).expect("validated request serializes");
+    payload.as_object_mut().expect("request object").retain(|_,v|!v.is_null());
+    payload["stream"]=json!(false);
+    payload
+}
+
+#[cfg(test)]
+mod host_native_contract_tests {
+    use super::*;
+    #[test]
+    fn host_payload_preserves_instructions_tools_and_budget() {
+        let original=json!({"model":"mundusx-agnostic","max_tokens":16384,"tool_choice":"auto",
+            "messages":[{"role":"system","content":"IDE rules"},{"role":"user","content":"Build a converter"},
+                {"role":"assistant","content":null,"tool_calls":[{"id":"r1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"r1","content":"Observed file"}],
+            "tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}},
+                {"type":"function","function":{"name":"list_dir","parameters":{"type":"object"}}}]});
+        let request:ChatCompletionRequest=serde_json::from_value(original.clone()).unwrap();
+        let p=native_host_payload(&request);
+        assert_eq!(p["messages"],original["messages"]);assert_eq!(p["tools"],original["tools"]);
+        assert_eq!(p["max_tokens"],16384);assert_eq!(p["tool_choice"],"auto");
+        assert!(p.as_object().unwrap().values().all(|v|!v.is_null()));
+    }
+}
+
 pub fn cancel_native_disconnect(native:bool,retain:bool,error:&str)->bool {
     native&&!retain&&(error.starts_with("chat stream disconnected:")||error.starts_with("chat stream disconnected while queued:"))
 }

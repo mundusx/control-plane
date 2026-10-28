@@ -22,7 +22,7 @@ pub fn current_request_index(request:&crate::contracts::ChatCompletionRequest)->
     if crate::native_checkpoint::is_compaction_request(request) {return request.messages.len().checked_sub(1);}
     task_index(request.messages.iter().enumerate().map(|(i,m)|(i,m.role.as_str(),m.content.as_str())))
 }
-fn validate_native_tool_schema(payload:&serde_json::Value,message:&serde_json::Value)->Result<(),String> {
+pub fn validate_native_tool_schema(payload:&serde_json::Value,message:&serde_json::Value)->Result<(),String> {
     fn check(value:&serde_json::Value,schema:&serde_json::Value,path:&str,depth:usize)->Result<(),String> {
         if depth>16 {return Err(format!("{path}: schema depth exceeded"));}
         if let Some(kind)=schema["type"].as_str() {
@@ -72,6 +72,51 @@ fn observed_file_key(path:&str)->Option<String> {
 
 /// The contributor has no filesystem authority. Validate against the client's
 /// observed read result, then let its exact-match edit tool check current disk.
+pub fn validate_host_contract(payload:&serde_json::Value,message:&serde_json::Value)->Result<(),String> {
+    if message["content"].as_str().is_none_or(|s|s.trim().is_empty())
+        && message["tool_calls"].as_array().is_none_or(|calls|calls.is_empty()) {
+        return Err("native model returned no content or tool call; response is not complete".into());
+    }
+    validate_native_tool_schema(payload,message)?;
+    let calls=message["tool_calls"].as_array();
+    if payload["tool_choice"]=="none" && calls.is_some_and(|c|!c.is_empty()) {
+        return Err("native tool schema precondition failed: tool_choice none forbids tool calls".into());
+    }
+    if payload["tool_choice"]=="required" && calls.is_none_or(|c|c.is_empty()) {
+        return Err("native tool schema precondition failed: required tool choice needs a registered tool call".into());
+    }
+    if let Some(name)=payload.pointer("/tool_choice/function/name").and_then(|v|v.as_str()) {
+        if calls.is_none_or(|calls|calls.is_empty() || calls.iter().any(|c|c["function"]["name"].as_str()!=Some(name))) {
+            return Err(format!("native tool schema precondition failed: expected the explicitly selected function {name}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod host_contract_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn host_schema_does_not_require_gateway_observation_or_choose_an_edit_tool() {
+        let p=json!({"messages":[{"role":"user","content":"Build a converter"}],"tools":[
+            {"function":{"name":"read_file","parameters":{"type":"object"}}},
+            {"function":{"name":"list_dir","parameters":{"type":"object"}}},
+            {"function":{"name":"replace_string_in_file","parameters":{"type":"object","required":["filePath","oldString","newString"],"properties":{"filePath":{"type":"string"},"oldString":{"type":"string"},"newString":{"type":"string"}}}}},
+            {"function":{"name":"insert_edit_into_file","parameters":{"type":"object"}}}
+        ]});
+        let message=json!({"role":"assistant","tool_calls":[{"id":"e1","type":"function","function":{"name":"replace_string_in_file","arguments":json!({"filePath":"D:/projects/converter/script.js","oldString":"old","newString":"new"}).to_string()}}]});
+        assert!(validate(&p,&message).unwrap_err().contains("read the exact target"));
+        assert!(validate_host_contract(&p,&message).is_ok());
+        let mut invalid=message.clone();invalid["tool_calls"][0]["function"]["arguments"]=json!("{}");
+        assert!(validate_host_contract(&p,&invalid).unwrap_err().contains("filePath"));
+        let mut wrong=message.clone();wrong["tool_calls"][0]["function"]["name"]=json!("unregistered");
+        assert!(validate_host_contract(&p,&wrong).unwrap_err().contains("unregistered"));
+        let mut disabled=p.clone();disabled["tool_choice"]=json!("none");
+        assert!(validate_host_contract(&disabled,&message).is_err());
+    }
+}
+
 pub fn validate(payload:&serde_json::Value,message:&serde_json::Value)->Result<(),String> {
     if message["content"].as_str().is_none_or(|s|s.trim().is_empty())
         && message["tool_calls"].as_array().is_none_or(|calls|calls.is_empty()) {
