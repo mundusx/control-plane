@@ -9553,7 +9553,7 @@ fn handle_connection_with_streams(
                     let (mode, system_prompt, max_tokens) = match apply_chat_mode(
                         request_body.mode.as_deref(),
                         system_prompt,
-                        request_body.max_tokens,
+                        request_body.max_tokens.or_else(||host_native_turn.then_some(chat_gateway::NATIVE_HOST_OUTPUT_BUDGET)),
                     ) {
                         Ok(values) => values,
                         Err(error) => {

@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const GENERATION_LIMIT_MARKER: &str = "[truncated: hit the generation limit]";
+pub const NATIVE_HOST_OUTPUT_BUDGET: u32 = 8_192;
 
 /// Native clients own orchestration and filesystem execution. Keep the previous
 /// server-side workflow available only as an explicit compatibility mode.
@@ -22,12 +23,24 @@ pub fn native_host_payload(request: &ChatCompletionRequest) -> Value {
     let mut payload=serde_json::to_value(request).expect("validated request serializes");
     payload.as_object_mut().expect("request object").retain(|_,v|!v.is_null());
     payload["stream"]=json!(false);
+    payload["max_tokens"]=json!(request.max_tokens.unwrap_or(NATIVE_HOST_OUTPUT_BUDGET));
     payload
 }
 
 #[cfg(test)]
 mod host_native_contract_tests {
     use super::*;
+    #[test]
+    fn omitted_host_budget_defaults_to_8192_and_explicit_limits_are_preserved() {
+        for (limit, expected) in [(None,8192),(Some(128),128),(Some(16384),16384)] {
+            let mut value=json!({"model":"test","messages":[{"role":"user","content":"Create an app"}]});
+            if let Some(limit)=limit {value["max_tokens"]=json!(limit);}
+            let request:ChatCompletionRequest=serde_json::from_value(value).unwrap();
+            assert_eq!(native_host_payload(&request)["max_tokens"],expected);
+        }
+        let request:ChatCompletionRequest=serde_json::from_value(json!({"model":"test","messages":[],"max_completion_tokens":256})).unwrap();
+        assert_eq!(native_host_payload(&request)["max_tokens"],256);
+    }
     #[test]
     fn host_payload_preserves_instructions_tools_and_budget() {
         let original=json!({"model":"mundusx-agnostic","max_tokens":16384,"tool_choice":"auto",
