@@ -1,0 +1,15 @@
+{
+  "name": "@mundusx/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dedicated OpenAI-compatible MundusX inference API",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js",
+    "test": "node --test test/*.test.js",
+    "keys": "node src/keys.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
