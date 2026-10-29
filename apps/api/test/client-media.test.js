@@ -2,6 +2,16 @@ const test=require('node:test');const assert=require('node:assert/strict');const
 const {clientMediaRoute,mediaHeaders}=require('../src/client-media');const {createApi}=require('../src/server');
 const tools=[{type:'function',function:{name:'run_in_terminal',parameters:{type:'object',properties:{command:{type:'string'}}}}}];
 const body=text=>({model:'mundusx-agnostic',tools,messages:[{role:'user',content:`<context>Editor data</context><userRequest>${text}</userRequest>`}]});
+test('ambiguous creation and format replies route together, unrelated PNG stays normal',()=>{
+ const {MEDIA_TYPE_QUESTION}=require('../src/client-clarification');
+ assert.equal(clientMediaRoute(body('create walking cat with hat')),true);
+ assert.equal(clientMediaRoute(body('create garfiled cat in nija custom')),true);
+ assert.equal(clientMediaRoute(body('PNG')),false);
+ const pending={...body('PNG'),messages:[...body('create walking cat with hat').messages,{role:'assistant',content:MEDIA_TYPE_QUESTION},...body('PNG').messages]};
+ assert.equal(clientMediaRoute(pending),true);
+ assert.equal(clientMediaRoute({...pending,messages:[...pending.messages.slice(0,-1),...body('hello').messages]}),false);
+ assert.equal(clientMediaRoute(body('create a cat component')),false);
+});
 test('only explicit image work and its own save acknowledgements use the optional route',()=>{
  assert.equal(clientMediaRoute(body('Generate an image of blue mountains')),true);
  for(const text of ['Hello','How do I generate an image?','Write code to generate an image','Do not create an image','Create a video of a cat'])assert.equal(clientMediaRoute(body(text)),false,text);
