@@ -107,3 +107,10 @@ Output links still expire after 48 hours. An expired or failed request retains
 its history and does not silently create a replacement job. Explicitly request
 a new generation when a replacement is needed. Pre-existing legacy queue entries
 are not imported into this API request history or deleted by this feature.
+
+Folder-only requests such as `save in assets folder` use that directory and a
+stable request-specific filename, so separate generations do not collide with
+`generated-image.png`. Explicit filenames remain unchanged. Save receipts accept
+terminal colour/mode sequences and supported output wrappers, but only a complete
+receipt line matching the path, hash, size and request ID proves success. Echoed
+commands do not count. Destination conflicts return a specific no-overwrite message.

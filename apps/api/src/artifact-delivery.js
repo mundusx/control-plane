@@ -55,8 +55,24 @@ function artifactSaveResult(body) {
   if(!call)return null;
   let args;try{args=JSON.parse(call.function.arguments)}catch{return null}
   const command=Object.values(args).find(v=>typeof v==='string'&&v.includes('# EHDA_ARTIFACT_TARGET '));
-  let target,saved;try{target=JSON.parse(command.split('# EHDA_ARTIFACT_TARGET ')[1]);saved=JSON.parse(textOf(last).split('EHDA_ARTIFACT_SAVED:')[1])}catch{}
-  const ok=target&&saved&&saved.path===target.path&&saved.sha256===target.sha256&&saved.byte_size===target.byte_size&&saved.byte_size>0;
-  return {...completion(ok?'Saved and verified '+target.path+'.':'The client did not confirm a verified artifact save. Check the terminal result.'),mundusx:{file_saved:!!ok,...(ok?{saved_path:target.path,sha256:target.sha256,...(target.artifact_request_id?{artifact_request_id:target.artifact_request_id}:{})}:{})}};
+  let target;try{target=JSON.parse(command.split('# EHDA_ARTIFACT_TARGET ')[1])}catch{}
+  // Terminal receipts may have CSI colours/mode changes or a JSON output wrapper.
+  // Match complete output lines only: echoed command arguments are not evidence.
+  function outputs(value,depth=0) {
+    if(depth>6)return [];
+    if(typeof value==='string'){try{const parsed=JSON.parse(value);if(parsed&&typeof parsed==='object')return outputs(parsed,depth+1)}catch{}return [value]}
+    if(Array.isArray(value))return value.flatMap(v=>outputs(v,depth+1));
+    if(value&&typeof value==='object')return ['output','stdout','content','text','result','value'].flatMap(k=>k in value?outputs(value[k],depth+1):[]);
+    return [];
+  }
+  const output=outputs(last.content).join('\n').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g,'').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/\r\n?/g,'\n');
+  let saved;
+  for(const line of output.split('\n')) {
+    const match=line.trim().match(/^EHDA_ARTIFACT_SAVED:(\{.*\})$/);if(!match)continue;
+    try{const receipt=JSON.parse(match[1]);if(target&&receipt.path===target.path&&receipt.sha256===target.sha256&&receipt.byte_size===target.byte_size&&receipt.byte_size>0&&(!target.artifact_request_id||receipt.artifact_request_id===target.artifact_request_id))saved=receipt}catch{}
+  }
+  const ok=!!saved,conflict=/Destination exists with different content/i.test(output);
+  const message=ok?'Saved and verified '+target.path+'.':conflict?'The destination '+(target?.path||'file')+' already contains a different file. It was not overwritten. Choose a new filename; the generated artifact is still available.':'The client did not return a verified save receipt. The generated artifact is retained; check the terminal error or retry its save.';
+  return {...completion(message),mundusx:{file_saved:ok,...(target?.artifact_request_id?{artifact_request_id:target.artifact_request_id}:{}),...(conflict?{save_error:'destination_exists'}:{}),...(ok?{saved_path:target.path,sha256:target.sha256}:{})}};
 }
 module.exports={artifactSave,artifactSaveResult,completion,workspaceOf};

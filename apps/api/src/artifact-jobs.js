@@ -5,6 +5,16 @@ const {artifactSave,completion,workspaceOf}=require('./artifact-delivery');
 const ID=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const active=job=>!['ready','failed','expired'].includes(job.state);
 const workspaceKey=value=>{const normalized=(value||'').replaceAll('\\','/').replace(/\/$/,'');return /^[a-z]:/i.test(normalized)?normalized.toLowerCase():normalized};
+function destination(job) {
+  if(job.intent.path)return job.intent.path.replace(/\.webpn$/i,'.webp');
+  const root=(job.workspace||'').replaceAll('\\','/').replace(/\/$/,'');
+  if(job.saved_path&&root&&workspaceKey(job.saved_path).startsWith(workspaceKey(root)+'/'))return job.saved_path.replaceAll('\\','/').slice(root.length+1);
+  const match=job.intent.prompt.match(/\bsave\s+(?:it\s+)?(?:in|to)\s+(?:the\s+)?[`"']?([\w./-]+)[`"']?(?:\s+(?:folder|directory)\b|[.!?]?\s*$)/i);
+  const directory=match?.[1]?.replace(/\/$/,'');
+  const {EXT}=require('./artifact-pack');
+  const filename='generated-'+(job.intent.format==='sb3'?'sprite':'image')+'-'+job.id.replaceAll('-','').slice(0,12)+'.'+(EXT[job.intent.format]||job.intent.format);
+  return directory?directory+'/'+filename:filename;
+}
 function identity(key,body,intent) {
   const bytes=createHash('sha256').update(JSON.stringify([key.id,body.request_id||null,intent.format,
     intent.prompt.trim().replace(/\s+/g,' '),intent.path||null,workspaceKey(workspaceOf(body))])).digest().subarray(0,16);
@@ -78,7 +88,7 @@ class ArtifactJobs {
     if(job.state==='ready'&&Number(new URL(job.artifact.url).searchParams.get('expires'))>this.now()) {
       const workspace=workspaceOf(body);
       if(job.workspace&&workspaceKey(workspace)!==workspaceKey(job.workspace))result=completion(marker+' is ready. Reopen its original workspace to resume saving, or download it: '+job.artifact.url+'\nNo file has been saved in the current workspace.');
-      else result=artifactSave(body,{...job.artifact,request_id:job.id},job.intent.path);
+      else result=artifactSave(body,{...job.artifact,request_id:job.id},destination(job));
     } else if(job.state==='ready'||job.state==='expired')result=completion(marker+' has expired output. Its history remains; no replacement job was created. Explicitly request a new generation if needed.');
     else if(job.state==='failed')result=completion(marker+' failed: '+job.error+'. No successful local save is claimed. Explicitly request a new generation if you want a replacement.');
     else result=completion(marker+' is still pending, waiting for image generation or conversion. It will continue in the background even if this chat disconnects. Ask “check image status” in this conversation to resume saving. No file has been saved yet.');
@@ -99,4 +109,4 @@ function resumeRequest(body) {
   }
   return null;
 }
-module.exports={ArtifactJobs,identity,resumeRequest};
+module.exports={ArtifactJobs,identity,resumeRequest,destination};
