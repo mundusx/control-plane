@@ -47,15 +47,25 @@ export class MediaClientService {
       const prefix = input.input_artifact_id ? (fast ? 'wan22-i2v-lightning-14b' : 'wan22-i2v-14b') : (fast ? 'wan22-t2v-lightning-14b' : 'wan22-14b');
       profile = `${prefix}-480p-${seconds * 16 + 1}f-${input.input_artifact_id && fast ? 'v3' : 'v1'}`;
     } else if (input.duration_seconds !== undefined) throw httpError(400, 'duration_seconds applies only to video');
-    if (this.planner && profile !== DREAMSHAPER_PROFILE && profile !== EDIT_PROFILE) {
-      const plan = await this.planner(input);
+    let delivery;
+    if (input.client_delivery && !this.planner) throw httpError(503,'Client image delivery requires the media planner');
+    if (this.planner && (input.client_delivery || profile !== DREAMSHAPER_PROFILE && profile !== EDIT_PROFILE)) {
+      const plan = await this.planner({...input,...(input.client_delivery ? {model:mediaQuote(profile).model} : {})});
       if (plan.profile_id !== profile) throw httpError(503,'Media planner profile does not match the supported request');
+      if (input.client_delivery) {
+        if (plan.client_delivery?.action !== 'download_to_workspace' || plan.client_delivery.execution_owner !== 'client')
+          throw httpError(503,'Media planner did not return client delivery');
+        if (JSON.stringify(plan.client_delivery.tool_names) !== JSON.stringify(input.client_delivery.tool_names))
+          throw httpError(503,'Media planner changed the client execution tools');
+        delivery = plan.client_delivery;
+      }
     }
-    const prepared = input.kind === 'image' && this.prepareImage
+    const prepared = input.kind === 'image' && this.prepareImage && !input.client_delivery
       ? await this.prepareImage({prompt: input.prompt, profile_id: profile}) : null;
     const job = await this.queue.submit(owner, { profile_id: profile, prompt: prepared?.prompt ?? input.prompt,
+      ...(delivery ? {client_delivery:delivery} : {}),
       seed: input.seed, input_artifact_id: input.input_artifact_id, idempotency_key: input.idempotency_key });
-    return this.describe(job);
+    return {...this.describe(job),...(delivery ? {client_delivery:delivery} : {})};
   }
   describe(job) {
     return { ...job, status_url: `${this.origin}/v1/media/jobs/${job.job_id}`,

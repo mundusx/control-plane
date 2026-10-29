@@ -7,6 +7,7 @@ export function mediaPlanner(url, fetchImpl = fetch) {
     try {
       response = await fetchImpl(url, {method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({kind:input.kind,has_reference:!!input.input_artifact_id,
+          ...(input.client_delivery ? {client_delivery:input.client_delivery,image_model:input.model} : {}),
           ...(input.kind === 'video' ? {duration_seconds:input.duration_seconds ?? 3, quality:input.quality ?? 'fast'} : {})}),
         signal:AbortSignal.timeout(8000),redirect:'error'});
     } catch { throw httpError(503,'Media planning is temporarily unavailable'); }
