@@ -122,3 +122,42 @@ Save receipts accept
 terminal colour/mode sequences and supported output wrappers, but only a complete
 receipt line matching the path, hash, size and request ID proves success. Echoed
 commands do not count. Destination conflicts return a specific no-overwrite message.
+
+## IDE context latency budget
+
+Agent requests identified by a VS Code/Copilot User-Agent, a `<userRequest>`
+envelope, or supported terminal tool names receive an API-side context budget.
+This applies to both Chat Completions and converted Responses requests, including
+the first request in a fresh chat. Ordinary API chats and the artifact-delivery
+path retain their existing behavior; browser-chat sources are unchanged.
+
+Defaults are 24,576 estimated input tokens, a 32,768 total request budget,
+4,096 output tokens when the caller supplies no output limit, and 1,024 safety
+tokens. Configure `MUNDUSX_API_IDE_INPUT_TOKENS`,
+`MUNDUSX_API_IDE_TOTAL_TOKENS`, and `MUNDUSX_API_IDE_OUTPUT_TOKENS` to change these
+deployment limits. They are latency limits, not advertised model context windows.
+The input allowance is the smaller of the input limit and total minus requested
+output minus safety. Explicit output limits are preserved, not silently lowered.
+
+Token estimates use serialized UTF-8 bytes divided by three, rounded up; they
+are not measurements from the model tokenizer and do not guarantee model fit.
+Old user-led turns are removed as complete groups until the estimate fits.
+All system/developer instructions, tool schemas and descriptions, and the current
+user turn with its tool exchanges remain intact. A developer notice records that
+old context was omitted. No synthetic summary invents facts from removed turns.
+Cross-turn tool references and legacy function-call histories are conservatively
+kept rather than split. If protected content alone exceeds the budget, the API
+returns HTTP 400 `context_budget_exceeded` before forwarding or queuing a job.
+This can reject a fresh Agent request; it does not silently shorten its fixed
+instructions or tool definitions. Reduce supplied context/tools or use a lighter
+client mode, or deliberately raise the deployment budget if latency is acceptable.
+
+The CORS-exposed `X-Mundusx-Context-Budget` header contains before/after serialized
+byte sizes, estimated tokens, output reserve, dropped-turn count, and separate
+instruction/tool/history/current-turn/other byte counts. Rejections include the
+same report under `error.context_budget`. Agent decisions also emit an
+`ide_context_budget` structured service log keyed by the API request ID. Reports
+contain counts only, with no prompt, tool arguments, file paths or response text.
+Editor attachments embedded inside a message count toward that message; their
+boundaries cannot reliably be inferred from arbitrary client text. Existing
+control-plane dashboard character counts are unchanged.

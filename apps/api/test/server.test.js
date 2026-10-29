@@ -44,6 +44,43 @@ const payload = {
     { role: "user", content: "Hello" },
   ],
 };
+test('IDE context budgets cover first-turn Chat and Responses requests before upstream queuing', async t => {
+  let forwarded=0;
+  const events=[];
+  const f=await fixture(t,(_req,res)=>{forwarded++;res.end('{}')},{onContextBudget:event=>events.push(event)});
+  const tools=[{type:'function',function:{name:'run_in_terminal',parameters:{type:'object',properties:{command:{type:'string'}}}}}];
+  const messages=[{role:'system',content:'secret instruction '.repeat(7000)},{role:'user',content:'hello'}];
+  const chat=await f.call('/v1/chat/completions',{model:payload.model,messages,tools});
+  assert.equal(chat.status,400);
+  const error=await chat.json();
+  assert.equal(error.error.code,'context_budget_exceeded');
+  assert.equal(error.error.context_budget.rejected,true);
+  assert.ok(chat.headers.get('access-control-expose-headers').includes('x-mundusx-context-budget'));
+  assert.ok(!JSON.stringify(error).includes('secret instruction'));
+  const response=await f.call('/v1/responses',{model:payload.model,input:messages,
+    tools:[{type:'function',name:'run_in_terminal',parameters:{type:'object',properties:{command:{type:'string'}}}}]});
+  assert.equal(response.status,400);
+  assert.equal((await response.json()).error.code,'context_budget_exceeded');
+  assert.equal(forwarded,0);
+  assert.equal(events.length,2);
+  assert.ok(events.every(e=>e.request_id && e.rejected));
+});
+
+test('IDE requests forward compacted whole turns and a bounded output allowance', async t => {
+  let got;
+  const f=await fixture(t,(req,res)=>{let raw='';req.on('data',c=>raw+=c);req.on('end',()=>{got=JSON.parse(raw);res.end('{}')})},
+    {contextBudget:{inputTokens:2000,totalTokens:8000,outputTokens:1000},onContextBudget:()=>{}});
+  const latest={role:'user',content:'<userRequest>hello</userRequest>'};
+  const result=await f.call('/v1/chat/completions',{...payload,messages:[payload.messages[0],{role:'user',content:'old '.repeat(8000)},{role:'assistant',content:'old response'},latest]});
+  await result.text();
+  assert.equal(result.status,200);
+  const report=JSON.parse(result.headers.get('x-mundusx-context-budget'));
+  assert.equal(report.dropped_turns,1);
+  assert.ok(report.after.estimated_tokens<=2000);
+  assert.deepEqual(got.messages.at(-1),latest);
+  assert.ok(got.messages.some(m=>m.content==='Keep my rules'));
+  assert.equal(got.max_tokens,1000);
+});
 test("health is public; model and inference routes require keys; administration is never proxied", async (t) => {
   let forwarded = 0;
   const f = await fixture(t, (_, res) => {
