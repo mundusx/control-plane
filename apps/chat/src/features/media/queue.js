@@ -25,6 +25,15 @@ export class MediaQueue {
     const seed=input.seed??42;
     if(!Number.isSafeInteger(seed)||seed<0||seed>2147483647) throw httpError(400,'Invalid seed');
     const task={prompt:input.prompt.trim(),profile_id:quote.profile_id,seed};
+    if (input.client_delivery !== undefined) {
+      const d = input.client_delivery;
+      if (quote.operation !== 'text_to_image' || d?.action !== 'download_to_workspace' || d.execution_owner !== 'client'
+          || !Array.isArray(d.tool_names) || !d.tool_names.length || d.tool_names.length > 32
+          || d.tool_names.some(name => typeof name !== 'string' || !/^[\w.:-]{1,128}$/.test(name)))
+        throw httpError(400,'Invalid client image delivery');
+      task.client_delivery = {action:d.action,execution_owner:d.execution_owner,tool_names:d.tool_names,
+        path_resolution:'active_client_workspace',verification:'local_file_exists_and_nonempty',file_saved:false};
+    }
     if (['image_to_video','image_edit'].includes(quote.operation)) {
       const reference = await this.store.owned(input.input_artifact_id, owner);
       if (!reference.media_available || reference.content_type !== 'image/png') throw httpError(422, 'A ready, owned PNG reference is required');
@@ -34,7 +43,7 @@ export class MediaQueue {
     return this.store.transaction(async db=>{
       await db.query("select id from public.users where id=$1 and status='active' for update",[owner]);
       const old=(await db.query('select * from public.media_generation_jobs where owner_user_id=$1 and idempotency_key=$2',[owner,input.idempotency_key])).rows[0];
-      if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed || (old.request.input_sha256 ?? old.request.input_artifact_id)!==(task.input_sha256 ?? task.input_artifact_id))) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,created_at:old.created_at,quote:saved.quote}; }
+      if(old) { if(JSON.stringify(old.request)!==JSON.stringify(task) && (old.request.prompt!==task.prompt || old.request.profile_id!==task.profile_id || old.request.seed!==seed || JSON.stringify(old.request.client_delivery)!==JSON.stringify(task.client_delivery) || (old.request.input_sha256 ?? old.request.input_artifact_id)!==(task.input_sha256 ?? task.input_artifact_id))) throw httpError(409,'Idempotency key already used for another request'); const saved=(await db.query('select quote from public.media_compute_records where job_id=$1',[old.job_id])).rows[0]; return {job_id:old.job_id,state:old.state,created_at:old.created_at,quote:saved.quote}; }
       if (task.input_artifact_id) {
         const reference=(await db.query('select * from public.media_artifacts where artifact_id=$1 for update',[task.input_artifact_id])).rows[0];
         if (!reference || reference.owner_user_id!==owner || reference.status!=='ready' || reference.file_deleted_at || new Date(reference.expires_at).getTime()<=this.store.now()) throw httpError(410,'Reference image expired');

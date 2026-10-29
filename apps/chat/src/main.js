@@ -4,6 +4,8 @@ import { projectComputeAvailability } from './features/agent/compute-availabilit
 import { assertNoRepetition } from './repetition-guard.js';
 import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
+import { clientImageRequest, clientImageCompletion, clientMediaOwners, forwardedImageOwner } from './features/media/client-delivery.js';
+import { imageSaveResult } from './features/media/native-image-save.js';
 import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
 import { mediaChatIntent, mayNeedMediaClassification } from './features/media/chat-intent.js';
@@ -196,6 +198,8 @@ export function configFromEnv(env = process.env) {
   );
   return {
     chatApiKeys: parseChatApiKeys(env.MUNDUSX_CHAT_API_KEYS),
+    clientMediaEnabled: String(env.MUNDUSX_CLIENT_IMAGE_DELIVERY_ENABLED ?? '').toLowerCase() === 'true',
+    clientMediaOwners: clientMediaOwners(env.MUNDUSX_CLIENT_IMAGE_OWNERS),
     auth: authConfigFromEnv(env),
     webResearchUrl: (env.MUNDUSX_WEB_RESEARCH_URL ?? "").trim().replace(/\/$/, ""),
     webResearchToken: (env.MUNDUSX_WEB_RESEARCH_TOKEN ?? "").trim(),
@@ -7058,7 +7062,50 @@ export function createServerApp(config = configFromEnv()) {
     const job = await submitToolPlannerJob(text, {...config, toolPlannerTimeoutSeconds: 6}, fetch, systemPrompt);
     return String(job.output ?? '');
   });
-  const mediaService = new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia, prepareImage);
+  const mediaService = config.mediaService ?? new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia, prepareImage);
+  async function handleClientImage(request, response, body, authenticatedOwner = null) {
+    if (!config.clientMediaEnabled) return false;
+    const saved = imageSaveResult(body);
+    if (saved) {
+      if (body.stream === true) sendOpenAiStream(response, saved);
+      else sendOpenAiJson(response, 200, saved);
+      return true;
+    }
+    if (!clientImageRequest(body)) return false;
+    // Account ownership comes only from authenticated server state, never from
+    // prompt text, client metadata, workspace paths or an operator credential.
+    const owner = authenticatedOwner ?? config.clientMediaOwners?.[request.mundusxApiKeyId]
+      ?? forwardedImageOwner(request,body,config.operatorToken,config.clientMediaOwners)
+      ?? (typeof authStore.mcpSession === 'function' ? (await authStore.mcpSession(request))?.id : null);
+    if (!owner) throw httpError(403, 'This API key is not bound to a media account. Normal chat remains available.');
+    const abort = new AbortController();
+    const close = () => abort.abort();
+    response.once('close', close);
+    let heartbeat;
+    try {
+      if (body.stream === true) {
+        startOpenAiStream(response, 'client-image-delivery');
+        response.write(': Planning and generating the requested image\n\n');
+        heartbeat = setInterval(() => { if (!response.destroyed) response.write(': image generation pending\n\n'); }, 15000);
+        heartbeat.unref();
+      }
+      const completion = await clientImageCompletion(body, {
+        owner, service: mediaService, signal: abort.signal,
+      });
+      if (!response.destroyed) {
+        if (body.stream === true) response.end(openAiSseBody(completion));
+        else sendOpenAiJson(response, 200, completion);
+      }
+      return true;
+    } catch (error) {
+      if (!response.headersSent) throw error;
+      if (!response.destroyed) response.end(`data: ${JSON.stringify({error:{message:error.statusCode ? error.message : 'Client image delivery failed',type:'image_delivery_error'}})}\n\ndata: [DONE]\n\n`);
+      return true;
+    } finally {
+      clearInterval(heartbeat);
+      response.removeListener('close', close);
+    }
+  }
   const mediaIntentCache = new Map();
   async function detectMediaIntent(owner, message, hasReference = false) {
     const key = owner + ':' + hasReference + ':' + String(message);
@@ -7227,6 +7274,7 @@ export function createServerApp(config = configFromEnv()) {
         if (request.method === "POST" && url.pathname === "/api/agent/model/v1/chat/completions") {
           const body = await readJsonBody(request, MAX_AGENT_MODEL_BODY_BYTES);
           const routedBody = { ...body, model: PUBLIC_MODEL_ID };
+          if (await handleClientImage(request, response, routedBody, connector.id)) return;
           if (Array.isArray(routedBody.tools) && routedBody.tools.length) {
             // Preserve Hermes' native OpenAI messages and tool schema all the
             // way to the selected model runtime. The control plane is the
@@ -7275,6 +7323,7 @@ export function createServerApp(config = configFromEnv()) {
       }
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         const body = await readJsonBody(request, MAX_AGENT_MODEL_BODY_BYTES);
+        if (await handleClientImage(request, response, body)) return;
         if (body?.stream === true) {
           return await streamOpenAiChatCompletion(response, body, {
             ...config,

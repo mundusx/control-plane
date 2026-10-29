@@ -59,13 +59,17 @@ test('real queue selects ranked worker, preserves one slot, and records failed/e
     catch(e){await db.exec('rollback');throw e;}finally{release();}
   }};
   const queue=new MediaQueue(store,async()=>true,async()=>fleet);
-  const submit=()=>queue.submit(owner,{profile_id:profile,prompt:'A teapot',idempotency_key:randomUUID()});
+  const submit=(extra={})=>queue.submit(owner,{profile_id:profile,prompt:'A teapot',idempotency_key:randomUUID(),...extra});
   const fast={node_id:'fast',public_key_hex:'fast'},slow={node_id:'slow',public_key_hex:'slow'};
   await queue.claim(fast,[profile]);await queue.claim(slow,[profile]);
   await db.query('update media_worker_presence set last_assigned_at=$1 where node_id=$2',[new Date(now),'slow']);
-  await submit();
+  const clientDelivery={action:'download_to_workspace',execution_owner:'client',tool_names:['run_in_terminal']};
+  await submit({client_delivery:clientDelivery});
   const [lower,job]=await Promise.all([queue.claim(slow,[profile]),queue.claim(fast,[profile])]);
   assert.equal(lower,null);assert.ok(job);
+  assert.equal((await queue.owned(owner,job.job_id)).request.client_delivery.execution_owner,'client');
+  const originalKey=(await db.query('select idempotency_key from media_generation_jobs where job_id=$1',[job.job_id])).rows[0].idempotency_key;
+  await assert.rejects(submit({idempotency_key:originalKey,client_delivery:{...clientDelivery,tool_names:['other_terminal']}}),{statusCode:409});
   assert.equal(await queue.claim(fast,[profile]),null);
   await queue.fail('fast',{job_id:job.job_id,lease_token:job.lease_token});
   assert.equal((await db.query('select state from media_execution_attempts')).rows[0].state,'failed');
