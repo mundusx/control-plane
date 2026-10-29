@@ -24,19 +24,17 @@ test('normal chats, image discussions, code requests and tool continuations neve
 });
 
 test('completed image is handed to the original client tools; server never claims a local save',async()=>{
-  const submitted=[]; let polls=0,turn;
+  const submitted=[]; let polls=0;
   const original=request(); const before=structuredClone(original);
   const service={
     submit:async(user,input)=>{assert.equal(user,owner);submitted.push(input);return {job_id:'job',state:'queued',client_delivery:delivery};},
     status:async()=>{polls++;return {state:'completed'};},
     result:async(user,id)=>{assert.equal(user,owner);assert.equal(id,'job');return {content_type:'image/png',download_url:'https://chat.example/image.png?token=opaque',expires_at:'tomorrow'};},
   };
-  const options={owner,service,wait:async()=>{},complete:async body=>{turn=body;return {choices:[{message:{tool_calls:[{id:'save',function:{name:'run_in_terminal',arguments:'{}'}}]}}]};}};
+  const options={owner,service,wait:async()=>{},complete:async()=>assert.fail('image handoff must not queue an LLM turn')};
   const result=await clientImageCompletion(original,options);
-  assert.equal(polls,1); assert.deepEqual(turn.tools,original.tools);assert.deepEqual(original,before);
-  assert.deepEqual(turn.messages.slice(1),original.messages);
-  assert.match(turn.messages[0].content,/active workspace on the client host/);
-  assert.match(turn.messages[0].content,/Verify the local file exists/);
+  assert.equal(polls,1); assert.deepEqual(original,before);
+  assert.match(result.choices[0].message.content,/not been saved locally/);
   assert.equal(result.mundusx.file_saved,false);
   assert.equal(result.mundusx.media_artifact.url,'https://chat.example/image.png?token=opaque');
   await clientImageCompletion(original,options);

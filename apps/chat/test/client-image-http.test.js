@@ -46,12 +46,12 @@ test('image handoff preserves native calls in JSON and SSE and never runs client
   const mediaService={submit:async()=>{generated++;return {job_id:'image',state:'completed',client_delivery:{action:'download_to_workspace',execution_owner:'client',tool_names:['run_in_terminal']}};},result:async()=>({content_type:'image/png',download_url:'https://chat.example/generated.png',expires_at:'tomorrow'})};
   const base=await start(t,createServerApp({...configFromEnv({MUNDUSX_CONTROL_PLANE_URL:upstream,MUNDUSX_CLIENT_IMAGE_DELIVERY_ENABLED:'true'}),authStore:{mcpSession:async request=>request.headers.authorization===`Bearer ${key}`?{id:owner}:null},mediaService}));
   for(const stream of [false,true]) {
-    const body={tools,stream,messages:[{role:'user',content:'Generate an image of a cat in assets/cat.png'}]};
+    const body={tools,stream,messages:[{role:'user',content:'<environment_info>The user\'s current OS is: Windows</environment_info>\n<workspace_info>\nI am working in a workspace with the following folders:\n- D:\\projects\\converter\nI am working in a workspace</workspace_info>'},{role:'user',content:'<context>Editor context</context>\n<userRequest>Generate an image of a cat and save it as assets/cat.png</userRequest>'}]};
     const response=await fetch(base+'/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
     assert.equal(response.status,200);
     if(stream) {const text=await response.text();assert.match(text,/"tool_calls"/);assert.match(text,/run_in_terminal/);assert.match(text,/data: \[DONE\]/);}
-    else {const result=await response.json();assert.deepEqual(result.choices,completion.choices);assert.equal(result.mundusx.file_saved,false);}
-    assert.deepEqual(modelTurn.tools,tools);assert.match(modelTurn.messages[0].content,/generated.png/);assert.deepEqual(modelTurn.messages.slice(1),body.messages);
+    else {const result=await response.json();assert.equal(result.choices[0].message.tool_calls[0].function.name,'run_in_terminal');assert.equal(result.mundusx.file_saved,false);}
+    assert.equal(modelTurn,undefined);
   }
   assert.equal(generated,2);
 });

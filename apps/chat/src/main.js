@@ -5,6 +5,7 @@ import { assertNoRepetition } from './repetition-guard.js';
 import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
 import { clientImageRequest, clientImageCompletion, clientMediaOwners } from './features/media/client-delivery.js';
+import { imageSaveResult } from './features/media/native-image-save.js';
 import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
 import { mediaChatIntent, mayNeedMediaClassification } from './features/media/chat-intent.js';
@@ -7063,7 +7064,14 @@ export function createServerApp(config = configFromEnv()) {
   });
   const mediaService = config.mediaService ?? new MediaClientService(mediaStore ? new MediaQueue(mediaStore, config.mediaAdmission ?? mediaAdmission(config), fleet) : null, config.auth?.publicOrigin, planMedia, prepareImage);
   async function handleClientImage(request, response, body, authenticatedOwner = null) {
-    if (!config.clientMediaEnabled || !clientImageRequest(body)) return false;
+    if (!config.clientMediaEnabled) return false;
+    const saved = imageSaveResult(body);
+    if (saved) {
+      if (body.stream === true) sendOpenAiStream(response, saved);
+      else sendOpenAiJson(response, 200, saved);
+      return true;
+    }
+    if (!clientImageRequest(body)) return false;
     // Account ownership comes only from authenticated server state, never from
     // prompt text, client metadata, workspace paths or an operator credential.
     const owner = authenticatedOwner ?? config.clientMediaOwners?.[request.mundusxApiKeyId]
@@ -7082,7 +7090,6 @@ export function createServerApp(config = configFromEnv()) {
       }
       const completion = await clientImageCompletion(body, {
         owner, service: mediaService, signal: abort.signal,
-        complete: turn => submitOpenAiChatCompletion(turn, config),
       });
       if (!response.destroyed) {
         if (body.stream === true) response.end(openAiSseBody(completion));
