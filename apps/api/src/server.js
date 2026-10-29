@@ -5,6 +5,7 @@ const { randomUUID } = require("node:crypto");
 const { authenticate, recordUsage, load } = require("./keys-store");
 const { interactiveDefaults } = require("./policy");
 const { responsesHandler } = require("./responses");
+const {clientMediaRoute,mediaHeaders}=require('./client-media');
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -35,6 +36,10 @@ function createApi(options = {}) {
     throw Error("Invalid upstream URL");
   const token =
     options.upstreamToken ?? process.env.MUNDUSX_API_UPSTREAM_TOKEN ?? "";
+  const mediaUrl=options.mediaUpstreamUrl ?? process.env.MUNDUSX_API_IMAGE_UPSTREAM_URL;
+  const mediaUpstream=mediaUrl?new URL(mediaUrl):null;
+  if(mediaUpstream && (!['http:','https:'].includes(mediaUpstream.protocol)||mediaUpstream.username||mediaUpstream.password||mediaUpstream.search||mediaUpstream.hash||!token))throw Error('Invalid image upstream configuration');
+  const mediaAgent=mediaUpstream?(mediaUpstream.protocol==='https:'?new https.Agent({keepAlive:true}):new http.Agent({keepAlive:true})):null;
   const auth = options.authenticate || authenticate,
     usage = options.recordUsage || recordUsage;
   const maxConcurrent = limit(
@@ -96,7 +101,7 @@ function createApi(options = {}) {
       req.on("error", reject);
     });
   }
-  function forward(req, res, key, body, path = req.url.split("?")[0]) {
+  function forward(req, res, key, body, path = req.url.split("?")[0], image=false) {
     const started = Date.now();
     const headers = {
       "content-type": "application/json",
@@ -105,17 +110,19 @@ function createApi(options = {}) {
     };
     if (body) headers["content-length"] = Buffer.byteLength(body);
     if (token) headers.authorization = "Bearer " + token;
+    if(image)Object.assign(headers,mediaHeaders(key,body,token));
     for (const h of [
       "x-mundusx-resume-token",
       "last-event-id",
       "idempotency-key",
     ])
       if (req.headers[h]) headers[h] = req.headers[h];
-    const target = new URL(upstream);
-    target.pathname = upstream.pathname.replace(/\/$/, "") + path;
-    const pending = transport.request(
+    const selected=image?mediaUpstream:upstream;
+    const target = new URL(selected);
+    target.pathname = selected.pathname.replace(/\/$/, "") + path;
+    const pending = (image?(target.protocol==='https:'?https:http):transport).request(
       target,
-      { method: req.method, headers, agent },
+      { method: req.method, headers, agent:image?mediaAgent:agent },
       (up) => {
         const h = {
           ...CORS,
@@ -271,7 +278,7 @@ function createApi(options = {}) {
           400,
           "Structured output formats are not supported by the current public router",
         );
-      forward(req, res, key, JSON.stringify(interactiveDefaults(parsed)), path);
+      forward(req, res, key, JSON.stringify(interactiveDefaults(parsed)), path, !!mediaUpstream && clientMediaRoute(parsed));
     } catch (e) {
       error(
         res,
@@ -284,7 +291,7 @@ function createApi(options = {}) {
   server.headersTimeout = 30000;
   server.requestTimeout = 30000;
   server.keepAliveTimeout = 65000;
-  server.on("close", () => agent.destroy());
+  server.on("close", () => {agent.destroy();mediaAgent?.destroy();});
   return server;
 }
 if (require.main === module) {
