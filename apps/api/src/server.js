@@ -5,6 +5,13 @@ const { randomUUID } = require("node:crypto");
 const { authenticate, recordUsage, load } = require("./keys-store");
 const { interactiveDefaults } = require("./policy");
 const { responsesHandler } = require("./responses");
+const {clientMediaRoute,mediaHeaders}=require('./client-media');
+const {clientMediaClarification}=require('./client-clarification');
+const {Artifacts}=require('./artifacts');
+const {artifactSaveResult,completion:artifactCompletion}=require('./artifact-delivery');
+const {ArtifactJobs,resumeRequest}=require('./artifact-jobs');
+const {textOf,requestedFormat}=require('./client-clarification');
+const pathUtil=require('node:path');
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -35,6 +42,34 @@ function createApi(options = {}) {
     throw Error("Invalid upstream URL");
   const token =
     options.upstreamToken ?? process.env.MUNDUSX_API_UPSTREAM_TOKEN ?? "";
+  const mediaUrl=options.mediaUpstreamUrl ?? process.env.MUNDUSX_API_IMAGE_UPSTREAM_URL;
+  const mediaUpstream=mediaUrl?new URL(mediaUrl):null;
+  if(mediaUpstream && (!['http:','https:'].includes(mediaUpstream.protocol)||mediaUpstream.username||mediaUpstream.password||mediaUpstream.search||mediaUpstream.hash||!token))throw Error('Invalid image upstream configuration');
+  const mediaAgent=mediaUpstream?(mediaUpstream.protocol==='https:'?new https.Agent({keepAlive:true}):new http.Agent({keepAlive:true})):null;
+  const artifactOrigin=options.artifactOrigin??process.env.MUNDUSX_API_PUBLIC_URL??(process.env.RAILWAY_PUBLIC_DOMAIN?'https://'+process.env.RAILWAY_PUBLIC_DOMAIN:null);
+  const artifacts=options.artifacts??(mediaUpstream&&artifactOrigin?new Artifacts({secret:token,root:pathUtil.join(process.env.MUNDUSX_API_HOME||'/data','artifacts'),origin:artifactOrigin.replace(/\/$/,''),mediaUpstream:mediaUpstream.href,plannerUrl:process.env.MUNDUSX_API_ARTIFACT_PLANNER_URL||'http://planner.railway.internal:8080/v1/artifacts/plan'}):null);
+  const artifactJobs=options.artifactJobs??(artifacts?.root?new ArtifactJobs(artifacts):null);
+  artifactJobs?.ready.catch(()=>console.error('Artifact recovery unavailable; requests will report an error'));
+  function artifactStream(res,parsed,id) {
+    if(!parsed.stream)return null;
+    res.artifactStreamInfo={id:'chatcmpl-'+randomUUID(),created:Math.floor(Date.now()/1000)};
+    res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();
+    res.write('data: '+JSON.stringify({...res.artifactStreamInfo,object:'chat.completion.chunk',model:parsed.model,choices:[{index:0,delta:{role:'assistant',content:'Artifact request '+id+' is pending. I’ll return its result here automatically when it is ready.\n\n'},finish_reason:null}]})+'\n\n');
+    const heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': durable artifact request pending\n\n')},15000);heartbeat.unref();return heartbeat;
+  }
+  function sendCompletion(res,parsed,completion,started=false) {
+    if(parsed.stream) {
+      if(!started)res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
+      const message=completion.choices[0].message;
+      const delta={...message,...(message.tool_calls?{tool_calls:message.tool_calls.map((c,index)=>({...c,index}))}:{})};
+      if(res.artifactStreamInfo)delete delta.role;
+      const chunk={id:res.artifactStreamInfo?.id||completion.id,object:'chat.completion.chunk',created:res.artifactStreamInfo?.created||completion.created,model:parsed.model};
+      res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta,finish_reason:null}]})+'\n\n');
+      res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:completion.choices[0].finish_reason}],mundusx:completion.mundusx})+'\n\n');
+      return res.end('data: [DONE]\n\n');
+    }
+    res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(completion));
+  }
   const auth = options.authenticate || authenticate,
     usage = options.recordUsage || recordUsage;
   const maxConcurrent = limit(
@@ -96,7 +131,7 @@ function createApi(options = {}) {
       req.on("error", reject);
     });
   }
-  function forward(req, res, key, body, path = req.url.split("?")[0]) {
+  function forward(req, res, key, body, path = req.url.split("?")[0], image=false) {
     const started = Date.now();
     const headers = {
       "content-type": "application/json",
@@ -105,17 +140,19 @@ function createApi(options = {}) {
     };
     if (body) headers["content-length"] = Buffer.byteLength(body);
     if (token) headers.authorization = "Bearer " + token;
+    if(image)Object.assign(headers,mediaHeaders(key,body,token));
     for (const h of [
       "x-mundusx-resume-token",
       "last-event-id",
       "idempotency-key",
     ])
       if (req.headers[h]) headers[h] = req.headers[h];
-    const target = new URL(upstream);
-    target.pathname = upstream.pathname.replace(/\/$/, "") + path;
-    const pending = transport.request(
+    const selected=image?mediaUpstream:upstream;
+    const target = new URL(selected);
+    target.pathname = selected.pathname.replace(/\/$/, "") + path;
+    const pending = (image?(target.protocol==='https:'?https:http):transport).request(
       target,
-      { method: req.method, headers, agent },
+      { method: req.method, headers, agent:image?mediaAgent:agent },
       (up) => {
         const h = {
           ...CORS,
@@ -177,6 +214,7 @@ function createApi(options = {}) {
     try {
       const url = new URL(req.url, "http://localhost");
       const path = url.pathname;
+      if(req.method==='GET'&&artifacts&&await artifacts.download(url,res))return;
       if (path === "/health" && req.method === "GET") {
         res.writeHead(200, {
           "Content-Type": "application/json",
@@ -271,7 +309,50 @@ function createApi(options = {}) {
           400,
           "Structured output formats are not supported by the current public router",
         );
-      forward(req, res, key, JSON.stringify(interactiveDefaults(parsed)), path);
+      const saved=artifactSaveResult(parsed);
+      if(saved){if(artifactJobs)await artifactJobs.receipt(key.id,saved);if(saved.mundusx?.artifact_request_id)saved.choices[0].message.content='Artifact request '+saved.mundusx.artifact_request_id+'. '+saved.choices[0].message.content;return sendCompletion(res,parsed,saved)}
+      const resumeId=artifactJobs?resumeRequest(parsed):null;
+      if(resumeId){const abort=new AbortController();res.once('close',()=>abort.abort());let heartbeat;try{const job=await artifactJobs.read(resumeId,key.id);artifactJobs.kick(job.id);if(job.state==='pending')heartbeat=artifactStream(res,parsed,job.id);const current=await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??Infinity,signal:abort.signal});if(!res.destroyed)sendCompletion(res,parsed,artifactJobs.response(current,parsed),res.headersSent);return}catch{if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion('That artifact request is unavailable for this API key. No replacement job was created.'),res.headersSent);return}finally{clearInterval(heartbeat)}}
+      const image = !!mediaUpstream && clientMediaRoute(parsed);
+      const clarification = image ? clientMediaClarification(parsed) : null;
+      if (clarification && !['image','artifact'].includes(clarification.action)) {
+        const completion = {id:'chatcmpl-'+randomUUID(),object:'chat.completion',created:Math.floor(Date.now()/1000),model:parsed.model,
+          choices:[{index:0,message:{role:'assistant',content:clarification.message},finish_reason:'stop'}],
+          mundusx:{clarification_required:clarification.action==='ask',job_started:false,file_saved:false}};
+        return sendCompletion(res,parsed,completion);
+      }
+      if(artifactJobs&&image&&parsed.messages.at(-1).role==='user') {
+        const intent=clarification||{action:'artifact',format:'png',prompt:textOf(parsed.messages.at(-1)),path:requestedFormat(textOf(parsed.messages.at(-1))).path};
+        const abort=new AbortController();res.once('close',()=>abort.abort());let heartbeat;
+        try {
+          const plan=await artifacts.plan(intent.format,intent.prompt,abort.signal);
+          if(plan.action!=='generate'){const result=artifactCompletion(plan.reason+'. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
+          const job=await artifactJobs.ensure(key,parsed,intent,plan);
+          if(job.state==='pending')heartbeat=artifactStream(res,parsed,job.id);
+          const current=await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??Infinity,signal:abort.signal});
+          if(!res.destroyed)sendCompletion(res,parsed,artifactJobs.response(current,parsed),res.headersSent);
+        }catch(e){if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion(e.message+'; no successful local save is claimed.'),res.headersSent)}finally{clearInterval(heartbeat)}
+        return;
+      }
+      if(clarification?.action==='artifact'&&clarification.format!=='png') {
+        if(!artifacts){const result=artifactCompletion('Artifact conversion is not configured. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
+        const abort=new AbortController();res.once('close',()=>abort.abort());
+        let heartbeat;
+        try {
+          const plan=await artifacts.plan(clarification.format,clarification.prompt,abort.signal);
+          if(plan.action!=='generate'){const result=artifactCompletion(plan.reason+'. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
+          if(parsed.stream){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': artifact generation pending\n\n')},15000);heartbeat.unref();}
+          const result=await artifacts.generate(key,parsed,clarification,plan,abort.signal);
+          if(!res.destroyed)sendCompletion(res,parsed,result,parsed.stream===true);
+        }catch(e){if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion(e.message+'; no successful local save is claimed.'),res.headersSent)}
+        finally{clearInterval(heartbeat)}
+        return;
+      }
+      // Resolve the format in the API only. Existing image backend and browser chat
+      // remain unchanged; they receive an explicit image request with full history.
+      const resolved = ['image','artifact'].includes(clarification?.action) ? {...parsed,messages:[...parsed.messages,
+        {role:'user',content:'Create an image in PNG format. Original request: '+clarification.prompt}]} : parsed;
+      forward(req, res, key, JSON.stringify(interactiveDefaults(resolved)), path, image);
     } catch (e) {
       error(
         res,
@@ -284,7 +365,8 @@ function createApi(options = {}) {
   server.headersTimeout = 30000;
   server.requestTimeout = 30000;
   server.keepAliveTimeout = 65000;
-  server.on("close", () => agent.destroy());
+  server.on("close", () => {agent.destroy();mediaAgent?.destroy();artifactJobs?.close().catch(()=>{});});
+  server.artifactJobs=artifactJobs;
   return server;
 }
 if (require.main === module) {
