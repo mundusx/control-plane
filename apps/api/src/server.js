@@ -4,6 +4,7 @@ const https = require("node:https");
 const { randomUUID } = require("node:crypto");
 const { authenticate, recordUsage, load } = require("./keys-store");
 const { interactiveDefaults } = require("./policy");
+const { budgetContext } = require("./context-budget");
 const { responsesHandler } = require("./responses");
 const {clientMediaRoute,mediaHeaders}=require('./client-media');
 const {clientMediaClarification}=require('./client-clarification');
@@ -18,7 +19,7 @@ const CORS = {
   "Access-Control-Allow-Headers":
     "authorization, content-type, x-api-key, x-request-id",
   "Access-Control-Expose-Headers":
-    "x-request-id, retry-after, x-mundusx-completion-id",
+    "x-request-id, retry-after, x-mundusx-completion-id, x-mundusx-context-budget",
 };
 const limit = (v, def, max) => {
   const n = Number(v ?? def);
@@ -100,6 +101,7 @@ function createApi(options = {}) {
     message,
     type = "invalid_request_error",
     code = null,
+    contextBudget = null,
   ) {
     if (res.headersSent) return res.destroy();
     res.writeHead(status, {
@@ -107,7 +109,7 @@ function createApi(options = {}) {
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
     });
-    res.end(JSON.stringify({ error: { message, type, param: null, code } }));
+    res.end(JSON.stringify({ error: { message, type, param: null, code, ...(contextBudget ? {context_budget: contextBudget} : {}) } }));
   }
   function readBody(req) {
     return new Promise((resolve, reject) => {
@@ -198,6 +200,28 @@ function createApi(options = {}) {
     res.on("close", () => pending.destroy());
     pending.end(body || undefined);
   }
+  function prepareContext(body, req, res) {
+    const reportBudget = report => {
+      res.setHeader('X-Mundusx-Context-Budget', JSON.stringify(report));
+      if (report.applied) {
+        const event = {event: 'ide_context_budget', request_id: res.getHeader('x-request-id'), ...report};
+        (options.onContextBudget || (value => console.info(JSON.stringify(value))))(event);
+      }
+    };
+    const config = options.contextBudget ?? {
+      inputTokens: Number(process.env.MUNDUSX_API_IDE_INPUT_TOKENS || 24576),
+      totalTokens: Number(process.env.MUNDUSX_API_IDE_TOTAL_TOKENS || 32768),
+      outputTokens: Number(process.env.MUNDUSX_API_IDE_OUTPUT_TOKENS || 4096),
+    };
+    try {
+      const {body: prepared, report} = budgetContext(body, req.headers, config);
+      reportBudget(report);
+      return prepared;
+    } catch (e) {
+      if (e.contextBudget) reportBudget(e.contextBudget);
+      throw e;
+    }
+  }
   const handleResponses = responsesHandler({
     upstream,
     token,
@@ -205,6 +229,7 @@ function createApi(options = {}) {
     transport,
     error,
     defaults: interactiveDefaults,
+    prepareContext,
   });
   const server = http.createServer(async (req, res) => {
     res.setHeader("X-Request-Id", randomUUID());
@@ -352,13 +377,16 @@ function createApi(options = {}) {
       // remain unchanged; they receive an explicit image request with full history.
       const resolved = ['image','artifact'].includes(clarification?.action) ? {...parsed,messages:[...parsed.messages,
         {role:'user',content:'Create an image in PNG format. Original request: '+clarification.prompt}]} : parsed;
-      forward(req, res, key, JSON.stringify(interactiveDefaults(resolved)), path, image);
+      const prepared = image ? resolved : prepareContext(resolved, req, res);
+      forward(req, res, key, JSON.stringify(interactiveDefaults(prepared)), path, image);
     } catch (e) {
       error(
         res,
         e.status || 500,
         e.status ? e.message : "Internal API error",
-        "api_error",
+        e.status ? "invalid_request_error" : "api_error",
+        e.code || null,
+        e.contextBudget || null,
       );
     }
   });
