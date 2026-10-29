@@ -50,12 +50,20 @@ function createApi(options = {}) {
   const artifacts=options.artifacts??(mediaUpstream&&artifactOrigin?new Artifacts({secret:token,root:pathUtil.join(process.env.MUNDUSX_API_HOME||'/data','artifacts'),origin:artifactOrigin.replace(/\/$/,''),mediaUpstream:mediaUpstream.href,plannerUrl:process.env.MUNDUSX_API_ARTIFACT_PLANNER_URL||'http://planner.railway.internal:8080/v1/artifacts/plan'}):null);
   const artifactJobs=options.artifactJobs??(artifacts?.root?new ArtifactJobs(artifacts):null);
   artifactJobs?.ready.catch(()=>console.error('Artifact recovery unavailable; requests will report an error'));
+  function artifactStream(res,parsed,id) {
+    if(!parsed.stream)return null;
+    res.artifactStreamInfo={id:'chatcmpl-'+randomUUID(),created:Math.floor(Date.now()/1000)};
+    res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();
+    res.write('data: '+JSON.stringify({...res.artifactStreamInfo,object:'chat.completion.chunk',model:parsed.model,choices:[{index:0,delta:{role:'assistant',content:'Artifact request '+id+' is pending. I’ll return its result here automatically when it is ready.\n\n'},finish_reason:null}]})+'\n\n');
+    const heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': durable artifact request pending\n\n')},15000);heartbeat.unref();return heartbeat;
+  }
   function sendCompletion(res,parsed,completion,started=false) {
     if(parsed.stream) {
       if(!started)res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
       const message=completion.choices[0].message;
       const delta={...message,...(message.tool_calls?{tool_calls:message.tool_calls.map((c,index)=>({...c,index}))}:{})};
-      const chunk={id:completion.id,object:'chat.completion.chunk',created:completion.created,model:parsed.model};
+      if(res.artifactStreamInfo)delete delta.role;
+      const chunk={id:res.artifactStreamInfo?.id||completion.id,object:'chat.completion.chunk',created:res.artifactStreamInfo?.created||completion.created,model:parsed.model};
       res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta,finish_reason:null}]})+'\n\n');
       res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:completion.choices[0].finish_reason}],mundusx:completion.mundusx})+'\n\n');
       return res.end('data: [DONE]\n\n');
@@ -304,7 +312,7 @@ function createApi(options = {}) {
       const saved=artifactSaveResult(parsed);
       if(saved){if(artifactJobs)await artifactJobs.receipt(key.id,saved);if(saved.mundusx?.artifact_request_id)saved.choices[0].message.content='Artifact request '+saved.mundusx.artifact_request_id+'. '+saved.choices[0].message.content;return sendCompletion(res,parsed,saved)}
       const resumeId=artifactJobs?resumeRequest(parsed):null;
-      if(resumeId){try{const job=await artifactJobs.read(resumeId,key.id);artifactJobs.kick(job.id);return sendCompletion(res,parsed,artifactJobs.response(await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??20000}),parsed))}catch{return sendCompletion(res,parsed,artifactCompletion('That artifact request is unavailable for this API key. No replacement job was created.'))}}
+      if(resumeId){const abort=new AbortController();res.once('close',()=>abort.abort());let heartbeat;try{const job=await artifactJobs.read(resumeId,key.id);artifactJobs.kick(job.id);if(job.state==='pending')heartbeat=artifactStream(res,parsed,job.id);const current=await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??Infinity,signal:abort.signal});if(!res.destroyed)sendCompletion(res,parsed,artifactJobs.response(current,parsed),res.headersSent);return}catch{if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion('That artifact request is unavailable for this API key. No replacement job was created.'),res.headersSent);return}finally{clearInterval(heartbeat)}}
       const image = !!mediaUpstream && clientMediaRoute(parsed);
       const clarification = image ? clientMediaClarification(parsed) : null;
       if (clarification && !['image','artifact'].includes(clarification.action)) {
@@ -320,8 +328,8 @@ function createApi(options = {}) {
           const plan=await artifacts.plan(intent.format,intent.prompt,abort.signal);
           if(plan.action!=='generate'){const result=artifactCompletion(plan.reason+'. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
           const job=await artifactJobs.ensure(key,parsed,intent,plan);
-          if(parsed.stream){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': durable artifact request pending\n\n')},15000);heartbeat.unref()}
-          const current=await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??20000,signal:abort.signal});
+          if(job.state==='pending')heartbeat=artifactStream(res,parsed,job.id);
+          const current=await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??Infinity,signal:abort.signal});
           if(!res.destroyed)sendCompletion(res,parsed,artifactJobs.response(current,parsed),res.headersSent);
         }catch(e){if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion(e.message+'; no successful local save is claimed.'),res.headersSent)}finally{clearInterval(heartbeat)}
         return;

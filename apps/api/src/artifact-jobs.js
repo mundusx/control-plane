@@ -80,7 +80,7 @@ class ArtifactJobs {
       await this.write(job);
     } finally {clearInterval(heartbeat);if(handle){await handle.close();await fs.unlink(lock).catch(()=>{})}}
   }
-  async wait(id,owner,{timeoutMs=20000,signal}={}) {
+  async wait(id,owner,{timeoutMs=Infinity,signal}={}) {
     const deadline=this.now()+timeoutMs;
     while(true){const job=await this.read(id,owner);if(!active(job)||this.now()>=deadline||signal?.aborted)return job;await new Promise(r=>setTimeout(r,Math.min(200,timeoutMs||1)))}
   }

@@ -91,3 +91,23 @@ test('upstream timeout reuses stable source identity; conversion retry reuses it
   const completed=await ready(jobs,job.id);assert.equal(completed.state,'ready');assert.equal(submissions,2);assert.equal(new Set(ids).size,1);assert.equal(ids[0],job.id);assert.equal(downloads,2);
  }finally{await jobs.close()}
 });
+
+test('connected chat stays open past 20 seconds and automatically receives the save tool call',async t=>{
+ const {createApi}=require('../src/server'),{Artifacts}=require('../src/artifacts'),sharp=require('sharp');
+ const root=await mkdtemp(tmpdir()+'/ehda-connected-');let finish,submissions=0,ended=false;
+ const png=await sharp({create:{width:8,height:8,channels:3,background:'#00aa44'}}).png().toBuffer();
+ const artifacts=new Artifacts({root,origin:'https://api.test',secret:'test',mediaUpstream:'https://chat.mundusx.ai',plannerUrl:'https://planner.test',fetchImpl:async(url,options)=>{
+  if(String(url).includes('planner.test'))return Response.json({action:'generate',format:JSON.parse(options.body).format,planner_provider:'langgraph'});
+  if(String(url).includes('chat/completions')){submissions++;return new Promise(resolve=>{finish=()=>resolve(Response.json({mundusx:{media_artifact:{job_id:'connected-source',content_type:'image/png',url:'https://chat.mundusx.ai/image.png'}}}))})}
+  return new Response(png,{headers:{'Content-Type':'image/png'}});
+ }});
+ const server=createApi({upstreamUrl:'http://127.0.0.1:1',mediaUpstreamUrl:'https://chat.mundusx.ai',upstreamToken:'test',artifacts,authenticate:()=>key,recordUsage:()=>{}});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(async()=>{server.closeAllConnections();server.close();await server.artifactJobs.close()});
+ const response=await fetch('http://127.0.0.1:'+server.address().port+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...body,stream:true,messages:[...body.messages,{role:'user',content:'Create an image of a cat as assets/connected.png'}]})});
+ const reader=response.body.getReader();const first=new TextDecoder().decode((await reader.read()).value);assert.match(first,/automatically when it is ready/);
+ let output=first;const readRest=(async()=>{while(true){const chunk=await reader.read();if(chunk.done)break;output+=new TextDecoder().decode(chunk.value)}ended=true})();
+ await sleep(21000);assert.equal(ended,false,'response must not end at the previous 20-second deadline');assert.ok(finish);finish();await readRest;
+ assert.match(output,/tool_calls/);assert.match(output,/\[DONE\]/);assert.equal(submissions,1);
+ const chunks=output.split('\n').filter(l=>l.startsWith('data: {')).map(l=>JSON.parse(l.slice(6)));assert.equal(new Set(chunks.map(c=>c.id)).size,1);
+ assert.equal(chunks.at(-1).choices[0].finish_reason,'tool_calls');
+});

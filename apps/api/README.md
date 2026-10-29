@@ -96,9 +96,10 @@ sweeps recover interrupted work with per-request locks. Pending requests have
 no automatic age expiry; each API key can have two pending artifact requests,
 and the media backend separately enforces its two-per-account media-job limit.
 
-The chat response waits at most 20 seconds, then returns a durable request
-reference and an honest pending status. Say `check image status`, `resume`, or
-`retry` in the same conversation to resume that request and its local save.
+While connected, the chat response stays open, sends a visible pending status
+and keepalives, then returns the save instruction automatically when ready.
+There is no 20-second cutoff. After a disconnect, say `check image status`,
+`resume`, or `retry` in the same conversation to resume that request and its local save.
 Generation/conversion can run without VS Code; saving requires a connected
 client. Identical existing files are verified instead of rewritten; different
 existing content is never overwritten. A verified save receipt is persisted.
