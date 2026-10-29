@@ -9,6 +9,7 @@ test('ambiguous creation and format replies route together, unrelated PNG stays 
  assert.equal(clientMediaRoute(body('PNG')),false);
  const pending={...body('PNG'),messages:[...body('create walking cat with hat').messages,{role:'assistant',content:MEDIA_TYPE_QUESTION},...body('PNG').messages]};
  assert.equal(clientMediaRoute(pending),true);
+ assert.equal(clientMediaRoute({...pending,messages:[...pending.messages.slice(0,-1),...body('jpg').messages]}),true);
  assert.equal(clientMediaRoute({...pending,messages:[...pending.messages.slice(0,-1),...body('hello').messages]}),false);
  assert.equal(clientMediaRoute(body('create a cat component')),false);
 });
@@ -45,6 +46,12 @@ test('API itself asks without upstream work; PNG resumes explicitly against unch
  const question=await (await send(original)).json();
  assert.equal(question.mundusx.job_started,false);assert.equal(hits.length,0);
  const messages=[...original.messages,question.choices[0].message,...body('PNG').messages];
+ const jpgMessages=[...original.messages,question.choices[0].message,...body('jpg').messages];
+ const jpg=await (await send({...original,messages:jpgMessages})).json();
+ assert.match(jpg.choices[0].message.content,/JPG\/JPEG output is not connected/);assert.equal(hits.length,0);
+ const resumedJpg=[...jpgMessages,jpg.choices[0].message,...body('PNG').messages];
+ const {clientMediaClarification}=require('../src/client-clarification');
+ assert.match(clientMediaClarification({...original,messages:resumedJpg}).prompt,/walking cat with hat/);
  await (await send({...original,messages})).text();
  assert.equal(hits.length,1);assert.match(hits[0].messages.at(-1).content,/Create an image in PNG format.*walking cat with hat/);
  assert.deepEqual(hits[0].messages.slice(0,-1),messages);
