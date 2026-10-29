@@ -3,6 +3,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { mediaChatIntent } from './chat-intent.js';
 import { httpError } from '../../shared/http-error.js';
 import { activeImagePrompt, nativeImageSave, imageUrlCompletion } from './native-image-save.js';
+import { clientMediaClarification } from './client-clarification.js';
+import { randomUUID } from 'node:crypto';
 
 // Inspect only the active user turn, never instructions quoted by tools/history.
 export function clientImageRequest(body) {
@@ -10,8 +12,10 @@ export function clientImageRequest(body) {
   const messages = body.messages;
   if (!Array.isArray(messages) || messages.at(-1)?.role !== 'user') return null;
   const prompt = activeImagePrompt(body);
-  const intent = mediaChatIntent(prompt);
-  if (intent?.kind !== 'image' || intent.error || prompt.length > 4000) return null;
+  const clarification = clientMediaClarification(body);
+  const intent = clarification?.action === 'image' ? { kind: 'image', prompt: clarification.prompt }
+    : clarification ? { clarification } : mediaChatIntent(prompt);
+  if ((!intent?.clarification && intent?.kind !== 'image') || intent.error || prompt.length > 4000) return null;
   const tools = body.tools.filter(t => t?.type === 'function' &&
     /^[\w.:-]{1,128}$/.test(t.function?.name ?? '') &&
     /(?:^|[_.:])(?:run_in_terminal|execute_command|run_command|command|bash|powershell|exec_command)$/i.test(t.function.name) &&
@@ -51,6 +55,11 @@ function requestKey(owner, body) {
 export async function clientImageCompletion(body, { owner, service, wait = delay, signal, timeoutMs = 300000 }) {
   const intent = clientImageRequest(body);
   if (!intent) return null;
+  if (intent.clarification) return {
+    id: 'chatcmpl-'+randomUUID(), object: 'chat.completion', created: Math.floor(Date.now()/1000),
+    choices: [{index:0,message:{role:'assistant',content:intent.clarification.message},finish_reason:'stop'}],
+    mundusx: { clarification_required: intent.clarification.action === 'ask', file_saved: false, job_started: false },
+  };
   if (!owner) throw httpError(403, 'Image generation needs an account-bound API key. Normal chat remains available.');
   signal?.throwIfAborted();
   const submitted = await service.submit(owner, { ...intent, idempotency_key: requestKey(owner, body) });
@@ -74,6 +83,9 @@ export async function clientImageCompletion(body, { owner, service, wait = delay
     job_id: submitted.job_id, url: artifact.download_url, content_type: artifact.content_type,
     expires_at: artifact.expires_at, suggested_filename: 'generated-image.png', ...delivery,
   };
-  const completion = nativeImageSave(body, handoff) ?? imageUrlCompletion(handoff);
+  // A format-only reply inherits the original request's workspace/path context.
+  const originalMessage = clientMediaClarification(body)?.originalMessage;
+  const saveBody = originalMessage ? {...body,messages:[...body.messages.slice(0,-1),originalMessage]} : body;
+  const completion = nativeImageSave(saveBody, handoff) ?? imageUrlCompletion(handoff);
   return { ...completion, mundusx: { ...completion.mundusx, media_artifact: handoff, file_saved: false } };
 }
