@@ -1,7 +1,7 @@
 // Ported from GX10 Nemotron interactive-chat optimization (13c65f9).
 // Caller-specified reasoning and native tool turns remain authoritative.
 function interactiveDefaults(input) {
-  const body = structuredClone(input);
+  const body = require('./terminal-feedback').terminalFeedbackPolicy(structuredClone(input));
   const model = String(body.model || "")
     .split("/")
     .pop()
