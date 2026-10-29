@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clientImageRequest, clientImageCompletion, clientMediaOwners } from '../src/features/media/client-delivery.js';
+import { clientImageRequest, clientImageCompletion, clientMediaOwners, forwardedImageOwner } from '../src/features/media/client-delivery.js';
+import {createHash,createHmac} from 'node:crypto';
 import { MediaClientService } from '../src/features/media/client-service.js';
 import { mediaPlanner } from '../src/features/media/planner.js';
 
@@ -8,6 +9,17 @@ const tool = {type:'function',function:{name:'run_in_terminal',parameters:{type:
 const request = (content='Create an image of a cat and save it in assets/cat.png') => ({tools:[tool],messages:[{role:'user',content}]});
 const delivery = {action:'download_to_workspace',execution_owner:'client',tool_names:['run_in_terminal'],path_resolution:'active_client_workspace'};
 const owner='11111111-1111-4111-8111-111111111111';
+test('forwarded ownership requires a fresh signature for the exact image request',()=>{
+ const body=request(),now=Date.now(),secret='server-only-secret';const timestamp=String(now);
+ const digest=createHash('sha256').update(JSON.stringify(body)).digest('hex');
+ const signature=createHmac('sha256',secret).update('owner\n'+timestamp+'\n'+digest).digest('hex');
+ const req={headers:{'x-mundusx-image-key-id':'owner','x-mundusx-image-timestamp':timestamp,'x-mundusx-image-signature':signature}};
+ assert.equal(forwardedImageOwner(req,body,secret,{owner},now),owner);
+ assert.equal(forwardedImageOwner(req,request('Create another image'),secret,{owner},now),null);
+ assert.equal(forwardedImageOwner(req,body,secret,{owner},now+120001),null);
+ assert.equal(forwardedImageOwner(req,body,'wrong',{owner},now),null);
+ assert.equal(forwardedImageOwner({headers:{'x-mundusx-image-key-id':'owner'}},body,secret,{owner},now),null);
+});
 
 test('normal chats, image discussions, code requests and tool continuations never enter image generation',()=>{
   for(const text of ['Hello','Explain image generation','How can I create an image?','Write a script to generate an image','Do not create an image','Create a video of a cat','Fix my API']) assert.equal(clientImageRequest(request(text)),null,text);

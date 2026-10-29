@@ -4,7 +4,7 @@ import { projectComputeAvailability } from './features/agent/compute-availabilit
 import { assertNoRepetition } from './repetition-guard.js';
 import { codingQualificationController } from './features/qualification/http.js';
 import { resolveMediaIntent } from './features/media/intent-resolver.js';
-import { clientImageRequest, clientImageCompletion, clientMediaOwners } from './features/media/client-delivery.js';
+import { clientImageRequest, clientImageCompletion, clientMediaOwners, forwardedImageOwner } from './features/media/client-delivery.js';
 import { imageSaveResult } from './features/media/native-image-save.js';
 import { createOpenAiMediaHttpController, saveReference } from './features/media/openai-http.js';
 import { persistMediaChatTurn } from './features/media/chat-history.js';
@@ -7075,6 +7075,7 @@ export function createServerApp(config = configFromEnv()) {
     // Account ownership comes only from authenticated server state, never from
     // prompt text, client metadata, workspace paths or an operator credential.
     const owner = authenticatedOwner ?? config.clientMediaOwners?.[request.mundusxApiKeyId]
+      ?? forwardedImageOwner(request,body,config.operatorToken,config.clientMediaOwners)
       ?? (typeof authStore.mcpSession === 'function' ? (await authStore.mcpSession(request))?.id : null);
     if (!owner) throw httpError(403, 'This API key is not bound to a media account. Normal chat remains available.');
     const abort = new AbortController();

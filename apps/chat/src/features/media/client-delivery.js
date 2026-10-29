@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mediaChatIntent } from './chat-intent.js';
 import { httpError } from '../../shared/http-error.js';
@@ -29,6 +29,14 @@ export function clientMediaOwners(raw) {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(owner)))
     throw new Error('Invalid client media API-key owner bindings');
   return value;
+}
+
+export function forwardedImageOwner(request,body,secret,owners,now=Date.now()) {
+  const id=request.headers['x-mundusx-image-key-id'],timestamp=request.headers['x-mundusx-image-timestamp'],signature=request.headers['x-mundusx-image-signature'];
+  if(!secret||typeof id!=='string'||typeof timestamp!=='string'||!/^\d{13}$/.test(timestamp)||Math.abs(now-Number(timestamp))>120000||typeof signature!=='string'||!/^[a-f0-9]{64}$/.test(signature))return null;
+  const digest=createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  const expected=createHmac('sha256',secret).update(id+'\n'+timestamp+'\n'+digest).digest();
+  return timingSafeEqual(expected,Buffer.from(signature,'hex'))?owners?.[id]??null:null;
 }
 
 function requestKey(owner, body) {
