@@ -2004,7 +2004,7 @@ pub fn completion_response(
     } else {
         native_finish_reason
     };
-    json!({
+    let mut completion = json!({
         "id": id,
         "object": "chat.completion",
         "created": created,
@@ -2015,7 +2015,11 @@ pub fn completion_response(
             "finish_reason": finish_reason
         }],
         "mundusx": mundusx
-    })
+    });
+    if let Some(usage) = native_message.as_ref().and_then(|m|m.get("usage")).filter(|v|v.is_object()) {
+        completion["usage"] = usage.clone();
+    }
+    completion
 }
 
 pub fn sse_start(id: &str, _created: u64, _model: &str, live: bool, resume_token: &str) -> String {
@@ -2062,13 +2066,18 @@ pub fn sse_delta(id: &str, created: u64, model: &str, content: &str) -> String {
 }
 
 pub fn sse_end(id: &str, created: u64, model: &str, finish_reason: &str) -> String {
-    let end = json!({
+    sse_end_with_usage(id, created, model, finish_reason, None)
+}
+
+pub fn sse_end_with_usage(id: &str, created: u64, model: &str, finish_reason: &str, usage: Option<&Value>) -> String {
+    let mut end = json!({
         "id": id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
     });
+    if let Some(usage) = usage.filter(|v|v.is_object()) { end["usage"] = usage.clone(); }
     sse_terminal(&format!("data: {end}\n\n"))
 }
 
@@ -2118,13 +2127,13 @@ pub fn sse_finish(completion: &Value) -> String {
         format!(
             "{}{}",
             sse_frame(&format!("data: {chunk}\n\n")),
-            sse_end(id, created, model, finish_reason)
+            sse_end_with_usage(id, created, model, finish_reason, completion.get("usage"))
         )
     } else {
         format!(
             "{}{}",
             sse_delta(id, created, model, content),
-            sse_end(id, created, model, finish_reason)
+            sse_end_with_usage(id, created, model, finish_reason, completion.get("usage"))
         )
     }
 }
@@ -2145,6 +2154,16 @@ pub fn sse_queue_status(job: &JobRecord, completion_id: &str, created: u64, mode
 
 pub fn sse_keep_alive() -> String {
     sse_frame(": mundusx keep-alive\n\n")
+}
+
+#[test]
+fn native_stream_end_preserves_runtime_cache_usage() {
+    let usage=json!({"prompt_tokens":49197,"completion_tokens":12,"total_tokens":49209,"prompt_tokens_details":{"cached_tokens":43000}});
+    let wire=sse_end_with_usage("test",0,"model","stop",Some(&usage));
+    let line=wire.lines().find(|line|line.starts_with("data: ")).unwrap();
+    let event:Value=serde_json::from_str(line.strip_prefix("data: ").unwrap()).unwrap();
+    assert_eq!(event["usage"],usage);
+    assert!(wire.contains("[DONE]"));
 }
 
 pub fn wait_for_job(
