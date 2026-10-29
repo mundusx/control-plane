@@ -160,10 +160,9 @@ function responsesHandler({
   transport,
   error,
   defaults,
-  prepareContext = body => body,
 }) {
   return async (req, res, body) => {
-    const chat = defaults(prepareContext(toChat(body), req, res)),
+    const chat = defaults(toChat(body)),
       id = "resp_" + randomUUID().replaceAll("-", "");
     const encoded = JSON.stringify(chat);
     const target = new URL(upstream);
