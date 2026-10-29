@@ -9,6 +9,8 @@ const {clientMediaRoute,mediaHeaders}=require('./client-media');
 const {clientMediaClarification}=require('./client-clarification');
 const {Artifacts}=require('./artifacts');
 const {artifactSaveResult,completion:artifactCompletion}=require('./artifact-delivery');
+const {ArtifactJobs,resumeRequest}=require('./artifact-jobs');
+const {textOf,requestedFormat}=require('./client-clarification');
 const pathUtil=require('node:path');
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -46,6 +48,8 @@ function createApi(options = {}) {
   const mediaAgent=mediaUpstream?(mediaUpstream.protocol==='https:'?new https.Agent({keepAlive:true}):new http.Agent({keepAlive:true})):null;
   const artifactOrigin=options.artifactOrigin??process.env.MUNDUSX_API_PUBLIC_URL??(process.env.RAILWAY_PUBLIC_DOMAIN?'https://'+process.env.RAILWAY_PUBLIC_DOMAIN:null);
   const artifacts=options.artifacts??(mediaUpstream&&artifactOrigin?new Artifacts({secret:token,root:pathUtil.join(process.env.MUNDUSX_API_HOME||'/data','artifacts'),origin:artifactOrigin.replace(/\/$/,''),mediaUpstream:mediaUpstream.href,plannerUrl:process.env.MUNDUSX_API_ARTIFACT_PLANNER_URL||'http://planner.railway.internal:8080/v1/artifacts/plan'}):null);
+  const artifactJobs=options.artifactJobs??(artifacts?.root?new ArtifactJobs(artifacts):null);
+  artifactJobs?.ready.catch(()=>console.error('Artifact recovery unavailable; requests will report an error'));
   function sendCompletion(res,parsed,completion,started=false) {
     if(parsed.stream) {
       if(!started)res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
@@ -298,7 +302,9 @@ function createApi(options = {}) {
           "Structured output formats are not supported by the current public router",
         );
       const saved=artifactSaveResult(parsed);
-      if(saved)return sendCompletion(res,parsed,saved);
+      if(saved){if(artifactJobs)await artifactJobs.receipt(key.id,saved);if(saved.mundusx?.artifact_request_id)saved.choices[0].message.content='Artifact request '+saved.mundusx.artifact_request_id+'. '+saved.choices[0].message.content;return sendCompletion(res,parsed,saved)}
+      const resumeId=artifactJobs?resumeRequest(parsed):null;
+      if(resumeId){try{const job=await artifactJobs.read(resumeId,key.id);artifactJobs.kick(job.id);return sendCompletion(res,parsed,artifactJobs.response(await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??20000}),parsed))}catch{return sendCompletion(res,parsed,artifactCompletion('That artifact request is unavailable for this API key. No replacement job was created.'))}}
       const image = !!mediaUpstream && clientMediaRoute(parsed);
       const clarification = image ? clientMediaClarification(parsed) : null;
       if (clarification && !['image','artifact'].includes(clarification.action)) {
@@ -306,6 +312,19 @@ function createApi(options = {}) {
           choices:[{index:0,message:{role:'assistant',content:clarification.message},finish_reason:'stop'}],
           mundusx:{clarification_required:clarification.action==='ask',job_started:false,file_saved:false}};
         return sendCompletion(res,parsed,completion);
+      }
+      if(artifactJobs&&image&&parsed.messages.at(-1).role==='user') {
+        const intent=clarification||{action:'artifact',format:'png',prompt:textOf(parsed.messages.at(-1)),path:requestedFormat(textOf(parsed.messages.at(-1))).path};
+        const abort=new AbortController();res.once('close',()=>abort.abort());let heartbeat;
+        try {
+          const plan=await artifacts.plan(intent.format,intent.prompt,abort.signal);
+          if(plan.action!=='generate'){const result=artifactCompletion(plan.reason+'. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
+          const job=await artifactJobs.ensure(key,parsed,intent,plan);
+          if(parsed.stream){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': durable artifact request pending\n\n')},15000);heartbeat.unref()}
+          const current=await artifactJobs.wait(job.id,key.id,{timeoutMs:options.artifactWaitMs??20000,signal:abort.signal});
+          if(!res.destroyed)sendCompletion(res,parsed,artifactJobs.response(current,parsed),res.headersSent);
+        }catch(e){if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion(e.message+'; no successful local save is claimed.'),res.headersSent)}finally{clearInterval(heartbeat)}
+        return;
       }
       if(clarification?.action==='artifact'&&clarification.format!=='png') {
         if(!artifacts){const result=artifactCompletion('Artifact conversion is not configured. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
@@ -338,7 +357,8 @@ function createApi(options = {}) {
   server.headersTimeout = 30000;
   server.requestTimeout = 30000;
   server.keepAliveTimeout = 65000;
-  server.on("close", () => {agent.destroy();mediaAgent?.destroy();});
+  server.on("close", () => {agent.destroy();mediaAgent?.destroy();artifactJobs?.close().catch(()=>{});});
+  server.artifactJobs=artifactJobs;
   return server;
 }
 if (require.main === module) {

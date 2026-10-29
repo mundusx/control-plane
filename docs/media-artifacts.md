@@ -203,7 +203,7 @@ debit. One validated completion earns the corresponding contributor reward.
 `POST /api/media/jobs` accepts `prompt`, `profile_id`, an optional `seed`, and
 an `idempotency_key` UUID. Normal account authentication and CSRF apply.
 `GET /api/media/jobs` and `/api/media/jobs/{id}` return only the owner's jobs.
-At most four pending requests are allowed per account. Requests wait FIFO for
+At most two pending requests are allowed per account. Requests wait FIFO for
 a compatible worker; each contributor has one media slot. Workers claim with
 Ed25519 device signatures, timestamp bounds and single-use nonces. Only an
 existing registered contributor whose policy allows work can claim jobs.

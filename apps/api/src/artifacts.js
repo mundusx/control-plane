@@ -30,17 +30,21 @@ class Artifacts {
     if(plan.planner_provider!=='langgraph'||plan.format!==format||!['generate','unsupported'].includes(plan.action))throw Error('Invalid artifact capability plan');
     return plan;
   }
-  async generate(key,body,intent,plan,signal) {
+  async generate(key,body,intent,plan,signal,resume={}) {
     const format=intent.format;if(!TYPES[format])throw Error('Unsupported artifact format');
     const sourcePrompt=format==='sb3'?'Create an image of a single isolated sprite on a plain white background, no text or computer screen. Subject: '+intent.prompt:intent.prompt;
     const sourceBody={...body,stream:false,messages:[...body.messages,{role:'user',content:'Create an image in PNG format. '+sourcePrompt}]};
     const raw=JSON.stringify(sourceBody);
-    const r=await this.fetchImpl(new URL('v1/chat/completions',this.mediaUpstream.replace(/\/?$/,'/')),{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+this.secret,...mediaHeaders(key,raw,this.secret)},body:raw,signal});
-    if(!r.ok)throw Error('Image source generation failed (HTTP '+r.status+'); no output file was saved');
-    const generated=await r.json();const source=generated.mundusx?.media_artifact;
+    let source=resume.source;
+    if(!source) {
+      const r=await this.fetchImpl(new URL('v1/chat/completions',this.mediaUpstream.replace(/\/?$/,'/')),{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+this.secret,...mediaHeaders(key,raw,this.secret)},body:raw,signal});
+      if(!r.ok){const error=Error('Image source is still pending or unavailable (HTTP '+r.status+'); no output file was saved');error.retryable=[409,429,503,504].includes(r.status);throw error}
+      const generated=await r.json();source=generated.mundusx?.media_artifact;
+    }
     const url=new URL(source?.url||'https://invalid.invalid');
     const allowed=new Set(['https://chat.mundusx.ai',new URL(this.mediaUpstream).origin]);
     if(source?.content_type!=='image/png'||!source.job_id||!allowed.has(url.origin)||url.username||url.password)throw Error('Untrusted generated image artifact');
+    if(!resume.source&&resume.checkpoint)await resume.checkpoint({source});
     const image=await this.fetchImpl(url,{redirect:'error',signal});
     if(!image.ok||!/^image\/png(?:;|$)/i.test(image.headers.get('content-type')||''))throw Error('Invalid source image response');
     const chunks=[];let size=0;for await(const chunk of image.body){size+=chunk.length;if(size>MAX)throw Error('Source image exceeds artifact size limit');chunks.push(chunk);}
@@ -62,7 +66,7 @@ class Artifacts {
     const requested=intent.path?.replace(/\.webpn$/i,'.webp');
     if(requested&&!new RegExp('\\.(?:'+(format==='jpeg'?'jpe?g':format==='tiff'?'tiff?':format)+')$','i').test(requested))throw Error('Requested filename does not match artifact encoding');
     const result=artifactSave(body,artifact,requested);
-    result.mundusx={...result.mundusx,artifact_plan:plan};
+    result.mundusx={...result.mundusx,artifact,artifact_plan:plan};
     return result;
   }
 }

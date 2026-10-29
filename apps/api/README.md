@@ -56,7 +56,7 @@ Streaming uses backpressure and keep-alive instead of final-reply buffering. Dis
 # Generated artifacts for existing IDE clients
 
 The API recognizes explicit image file formats and adjacent clarification replies.
-PNG uses the existing image route. JPG/JPEG, WebP (including `webpn`), BMP, TIFF,
+PNG uses the existing image queue with durable API delivery. JPG/JPEG, WebP (including `webpn`), BMP, TIFF,
 AVIF and still GIF use the image queue for a PNG source, then encode and validate
 the requested output. GIF requests ask whether the output is still or animated.
 
@@ -79,3 +79,31 @@ downloads and checks SHA-256 and file size, refuses overwrites and linked parent
 directories, and reports success only after reading back the saved bytes.
 Missing/ambiguous workspace context returns a URL with explicit unsaved status.
 No changes to VS Code, extensions, or chat.mundusx.ai are required.
+
+## Queue continuity and retries
+
+API image and artifact requests are durably recorded in `artifacts/jobs` on the
+API volume. Their identity uses the authenticated key, scene, output type,
+destination and workspace, rather than editor history or the calendar date.
+An explicit new `request_id` creates a separate request. Repeating the same
+request joins the original, including after restart or on a later day.
+
+Background work continues after a client disconnect. The source request uses a
+persisted UUID idempotency key; upstream timeouts reattach using the same input.
+Once the source image is ready, its checkpoint allows conversion/packaging to
+recover without another image-generation job. Startup recovery and periodic
+sweeps recover interrupted work with per-request locks. Pending requests have
+no automatic age expiry; each API key can have two pending artifact requests,
+and the media backend separately enforces its two-per-account media-job limit.
+
+The chat response waits at most 20 seconds, then returns a durable request
+reference and an honest pending status. Say `check image status`, `resume`, or
+`retry` in the same conversation to resume that request and its local save.
+Generation/conversion can run without VS Code; saving requires a connected
+client. Identical existing files are verified instead of rewritten; different
+existing content is never overwritten. A verified save receipt is persisted.
+
+Output links still expire after 48 hours. An expired or failed request retains
+its history and does not silently create a replacement job. Explicitly request
+a new generation when a replacement is needed. Pre-existing legacy queue entries
+are not imported into this API request history or deleted by this feature.

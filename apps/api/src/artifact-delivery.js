@@ -6,27 +6,34 @@ function completion(content,toolCall) {
 }
 const ps=s=>"'"+s.replaceAll("'","''")+"'";
 const sh=s=>"'"+s.replaceAll("'","'\"'\"'")+"'";
+function workspaceOf(body) {
+  for(const message of [...(body.messages||[])].reverse()) {
+    if(message.role!=='user'||typeof message.content!=='string'||!message.content.includes('<workspace_info>'))continue;
+    return message.content.match(/<workspace_info>\s*I am working in a workspace with the following folders:\s*\n-\s*([^\r\n]+)\s*\n(?!-)/)?.[1]?.trim()||null;
+  }
+  return null;
+}
 function artifactSave(body,artifact,requestedPath) {
-  const context=body.messages.filter(m=>m.role==='user').map(m=>typeof m.content==='string'?m.content:'').join('\n');
-  const workspace=context.match(/<workspace_info>\s*I am working in a workspace with the following folders:\s*\n-\s*([^\r\n]+)\s*\n(?!-)/)?.[1]?.trim();
+  const workspace=workspaceOf(body);
   const relative=requestedPath||artifact.filename;
   if(!workspace||!relative||!/^[\w./-]+$/.test(relative)||relative.startsWith('/')||relative.split('/').some(p=>!p||p==='.'||p==='..'||/[. ]$/.test(p)||/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p)))return completion('Artifact generated: '+artifact.url+'\nNo local file was saved. Choose a single workspace and use your client download tool.');
   const windows=/^[A-Za-z]:[\\/]/.test(workspace);
   if(!windows&&!workspace.startsWith('/'))return completion('Artifact generated: '+artifact.url+'\nNo unambiguous workspace path was supplied; no local save is claimed.');
   const target=workspace.replaceAll('\\','/').replace(/\/$/,'')+'/'+relative;
-  const manifest={path:target,sha256:artifact.sha256,byte_size:artifact.byte_size};
+  const manifest={path:target,sha256:artifact.sha256,byte_size:artifact.byte_size,...(artifact.request_id?{artifact_request_id:artifact.request_id}:{})};
   let command;
   if(windows) {
     command=`$ErrorActionPreference='Stop'; $ehdaRoot=[IO.Path]::GetFullPath(${ps(workspace)}); $ehdaPath=[IO.Path]::GetFullPath(${ps(target)}); `
       + `if(-not $ehdaPath.StartsWith($ehdaRoot.TrimEnd('\\')+'\\',[StringComparison]::OrdinalIgnoreCase)){throw 'Destination escapes workspace'}; `
-      + `$ehdaParent=[IO.Path]::GetDirectoryName($ehdaPath); $ehdaCheck=$ehdaParent; while($ehdaCheck){if(Test-Path -LiteralPath $ehdaCheck){if(([IO.File]::GetAttributes($ehdaCheck)-band [IO.FileAttributes]::ReparsePoint)-ne 0){$ehdaTag=& fsutil.exe reparsepoint query $ehdaCheck 2>&1; if($LASTEXITCODE-ne 0-or (($ehdaTag-join ' ')-notmatch '(?i)0x9000[0-9a-f]01a\\b')){throw 'Linked or unsupported reparse directories are not allowed'}}};$ehdaNext=[IO.Path]::GetDirectoryName($ehdaCheck);if($ehdaNext-eq $ehdaCheck){break};$ehdaCheck=$ehdaNext}; `
+      + `$ehdaParent=[IO.Path]::GetDirectoryName($ehdaPath); $ehdaCheck=$ehdaPath; while($ehdaCheck){if(Test-Path -LiteralPath $ehdaCheck){if(([IO.File]::GetAttributes($ehdaCheck)-band [IO.FileAttributes]::ReparsePoint)-ne 0){$ehdaTag=& fsutil.exe reparsepoint query $ehdaCheck 2>&1; if($LASTEXITCODE-ne 0-or (($ehdaTag-join ' ')-notmatch '(?i)0x9000[0-9a-f]01a\\b')){throw 'Linked or unsupported reparse directories are not allowed'}}};$ehdaNext=[IO.Path]::GetDirectoryName($ehdaCheck);if($ehdaNext-eq $ehdaCheck){break};$ehdaCheck=$ehdaNext}; `
+      + `if([IO.File]::Exists($ehdaPath)){$ehdaExisting=[IO.File]::ReadAllBytes($ehdaPath);$ehdaExistingHash=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($ehdaExisting)).Replace('-','').ToLowerInvariant();if($ehdaExisting.Length-ne ${artifact.byte_size}-or $ehdaExistingHash-ne ${ps(artifact.sha256)}){throw 'Destination exists with different content; not overwritten'};Write-Output ${ps('EHDA_ARTIFACT_SAVED:'+JSON.stringify(manifest))};return}; `
       + `$ehdaHttp=New-Object Net.Http.HttpClient; try{$ehdaBytes=$ehdaHttp.GetByteArrayAsync(${ps(artifact.url)}).GetAwaiter().GetResult(); `
       + `$ehdaHash=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($ehdaBytes)).Replace('-','').ToLowerInvariant(); if($ehdaBytes.Length-ne ${artifact.byte_size}-or $ehdaHash-ne ${ps(artifact.sha256)}){throw 'Artifact verification failed'}; `
       + `[IO.Directory]::CreateDirectory($ehdaParent)|Out-Null; $ehdaFile=[IO.File]::Open($ehdaPath,[IO.FileMode]::CreateNew); try{$ehdaFile.Write($ehdaBytes,0,$ehdaBytes.Length)}finally{$ehdaFile.Dispose()}; `
       + `$ehdaSaved=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($ehdaPath))).Replace('-','').ToLowerInvariant(); if($ehdaSaved-ne $ehdaHash){throw 'Saved file verification failed'}; Write-Output ${ps('EHDA_ARTIFACT_SAVED:'+JSON.stringify(manifest))}}finally{$ehdaHttp.Dispose()}`;
     command='Add-Type -AssemblyName System.Net.Http; '+command;
   } else {
-    const code=`import pathlib,urllib.request,hashlib,json\nroot=pathlib.Path(${JSON.stringify(workspace)})\np=root/${JSON.stringify(relative)}\nassert not root.is_symlink()\nfor parent in [p,*p.parents]:\n if parent.is_symlink(): raise RuntimeError('Linked paths are not allowed')\nassert p.resolve().is_relative_to(root.resolve())\nwith urllib.request.urlopen(${JSON.stringify(artifact.url)},timeout=60) as r: data=r.read(${artifact.byte_size+1})\nassert len(data)==${artifact.byte_size} and hashlib.sha256(data).hexdigest()==${JSON.stringify(artifact.sha256)}\np.parent.mkdir(parents=True,exist_ok=True)\nwith p.open('xb') as f: f.write(data)\nassert hashlib.sha256(p.read_bytes()).hexdigest()==${JSON.stringify(artifact.sha256)}\nprint(${JSON.stringify('EHDA_ARTIFACT_SAVED:'+JSON.stringify(manifest))})`;
+    const code=`import pathlib,urllib.request,hashlib,json,sys\nroot=pathlib.Path(${JSON.stringify(workspace)})\np=root/${JSON.stringify(relative)}\nassert not root.is_symlink()\nfor parent in [p,*p.parents]:\n if parent.is_symlink(): raise RuntimeError('Linked paths are not allowed')\nassert p.resolve().is_relative_to(root.resolve())\nif p.exists():\n data=p.read_bytes()\n assert len(data)==${artifact.byte_size} and hashlib.sha256(data).hexdigest()==${JSON.stringify(artifact.sha256)},'Destination exists with different content; not overwritten'\n print(${JSON.stringify('EHDA_ARTIFACT_SAVED:'+JSON.stringify(manifest))})\n sys.exit(0)\nwith urllib.request.urlopen(${JSON.stringify(artifact.url)},timeout=60) as r: data=r.read(${artifact.byte_size+1})\nassert len(data)==${artifact.byte_size} and hashlib.sha256(data).hexdigest()==${JSON.stringify(artifact.sha256)}\np.parent.mkdir(parents=True,exist_ok=True)\nwith p.open('xb') as f: f.write(data)\nassert hashlib.sha256(p.read_bytes()).hexdigest()==${JSON.stringify(artifact.sha256)}\nprint(${JSON.stringify('EHDA_ARTIFACT_SAVED:'+JSON.stringify(manifest))})`;
     command='python3 -c '+sh(code);
   }
   command+='\n# EHDA_ARTIFACT_TARGET '+JSON.stringify(manifest);
@@ -50,6 +57,6 @@ function artifactSaveResult(body) {
   const command=Object.values(args).find(v=>typeof v==='string'&&v.includes('# EHDA_ARTIFACT_TARGET '));
   let target,saved;try{target=JSON.parse(command.split('# EHDA_ARTIFACT_TARGET ')[1]);saved=JSON.parse(textOf(last).split('EHDA_ARTIFACT_SAVED:')[1])}catch{}
   const ok=target&&saved&&saved.path===target.path&&saved.sha256===target.sha256&&saved.byte_size===target.byte_size&&saved.byte_size>0;
-  return {...completion(ok?'Saved and verified '+target.path+'.':'The client did not confirm a verified artifact save. Check the terminal result.'),mundusx:{file_saved:!!ok,...(ok?{saved_path:target.path}:{})}};
+  return {...completion(ok?'Saved and verified '+target.path+'.':'The client did not confirm a verified artifact save. Check the terminal result.'),mundusx:{file_saved:!!ok,...(ok?{saved_path:target.path,sha256:target.sha256,...(target.artifact_request_id?{artifact_request_id:target.artifact_request_id}:{})}:{})}};
 }
-module.exports={artifactSave,artifactSaveResult,completion};
+module.exports={artifactSave,artifactSaveResult,completion,workspaceOf};

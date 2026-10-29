@@ -4,7 +4,7 @@ const {encodeImage,scratchProject,validateScratch}=require('../src/artifact-pack
 const {clientMediaClarification,MEDIA_TYPE_QUESTION,FORMAT_QUESTION}=require('../src/client-clarification');
 const {artifactSave,artifactSaveResult}=require('../src/artifact-delivery');
 const {Artifacts}=require('../src/artifacts');
-const {mkdtemp,readFile,symlink}=require('node:fs/promises');
+const {mkdtemp,readFile,writeFile,symlink}=require('node:fs/promises');
 const {tmpdir}=require('node:os');
 const {createHash}=require('node:crypto');
 const {execFileSync}=require('node:child_process');
@@ -70,10 +70,13 @@ test('signed storage verifies links; client download saves exact bytes and refus
   const windowsBody=request('create cat');windowsBody.messages.unshift({role:'user',content:'<workspace_info>I am working in a workspace with the following folders:\n- '+workspace.replaceAll('/','\\')+'\nFiles</workspace_info>'});
   const native=artifactSave(windowsBody,artifact,'assets/cat.jpg');const nativeCall=native.choices[0].message.tool_calls[0];const nativeCommand=JSON.parse(nativeCall.function.arguments).command;
   stdout=(await execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',nativeCommand],{encoding:'utf8'})).stdout;
-  await assert.rejects(execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',nativeCommand]));
+  const repeated=await execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',nativeCommand]);assert.match(repeated.stdout,/EHDA_ARTIFACT_SAVED/);
   const ack=artifactSaveResult({messages:[native.choices[0].message,{role:'tool',tool_call_id:nativeCall.id,content:stdout.trim()}]});assert.equal(ack.mundusx.file_saved,true);
- } else {stdout=(await execute('/bin/sh',['-c',command],{encoding:'utf8'})).stdout;assert.match(stdout,/EHDA_ARTIFACT_SAVED/);await assert.rejects(execute('/bin/sh',['-c',command]));}
+ } else {stdout=(await execute('/bin/sh',['-c',command],{encoding:'utf8'})).stdout;assert.match(stdout,/EHDA_ARTIFACT_SAVED/);assert.match((await execute('/bin/sh',['-c',command])).stdout,/EHDA_ARTIFACT_SAVED/);}
  const bytes=await readFile(workspace+'/assets/cat.jpg');assert.equal(createHash('sha256').update(bytes).digest('hex'),artifact.sha256);assert.equal((await sharp(bytes).metadata()).format,'jpeg');
+ await writeFile(workspace+'/assets/cat.jpg','different existing file');
+ await assert.rejects(process.platform==='win32'?execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',command]):execute('/bin/sh',['-c',command]));
+ assert.equal(await readFile(workspace+'/assets/cat.jpg','utf8'),'different existing file');
  const outside=await mkdtemp(tmpdir()+'/ehda-outside-test-');await symlink(outside,workspace+'/linked',process.platform==='win32'?'junction':'dir');
  const linked=artifactSave(body,artifact,'linked/cat.jpg');const linkedCommand=JSON.parse(linked.choices[0].message.tool_calls[0].function.arguments).command;
  await assert.rejects(process.platform==='win32'?execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',linkedCommand]):execute('/bin/sh',['-c',linkedCommand]));
