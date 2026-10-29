@@ -9269,7 +9269,7 @@ fn handle_connection_with_streams(
                                             let _ = stream.write_all(chat_gateway::sse_frame(&format!("data: {event}\n\n")).as_bytes());
                                         }
                                         let reason = completion["choices"][0]["finish_reason"].as_str().unwrap_or("stop");
-                                        let _ = stream.write_all(chat_gateway::sse_end(&completion_id, created, public_model, reason).as_bytes());
+                                        let _ = stream.write_all(chat_gateway::sse_end_with_usage(&completion_id, created, public_model, reason, completion.get("usage")).as_bytes());
                                     }
                                     Err(error) => {
                                         let event = serde_json::json!({"error":{"message":error,"type":"stream_reconciliation_error"}});
