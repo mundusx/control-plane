@@ -15,7 +15,7 @@ test('ambiguous creation and format replies route together, unrelated PNG stays 
 });
 test('only explicit image work and its own save acknowledgements use the optional route',()=>{
  assert.equal(clientMediaRoute(body('Generate an image of blue mountains')),true);
- for(const text of ['Hello','How do I generate an image?','Write code to generate an image','Do not create an image','Create a video of a cat'])assert.equal(clientMediaRoute(body(text)),false,text);
+ for(const text of ['Hello','How do I generate an image?','Write code to generate an image','Do not create an image'])assert.equal(clientMediaRoute(body(text)),false,text);
  assert.equal(clientMediaRoute({...body('Create an image'),tools:[]}),false);
  assert.equal(clientMediaRoute({...body('Create an image'),tool_choice:'none'}),false);
  assert.equal(clientMediaRoute({messages:[{role:'tool',tool_call_id:'ordinary_call'}]}),false);
@@ -48,8 +48,8 @@ test('API itself asks without upstream work; PNG resumes explicitly against unch
  const messages=[...original.messages,question.choices[0].message,...body('PNG').messages];
  const jpgMessages=[...original.messages,question.choices[0].message,...body('jpg').messages];
  const jpg=await (await send({...original,messages:jpgMessages})).json();
- assert.match(jpg.choices[0].message.content,/JPG\/JPEG output is not connected/);assert.equal(hits.length,0);
- const resumedJpg=[...jpgMessages,jpg.choices[0].message,...body('PNG').messages];
+ assert.match(jpg.choices[0].message.content,/not configured/);assert.equal(hits.length,0);
+ const resumedJpg=[...jpgMessages.slice(0,-1),...body('PNG').messages];
  const {clientMediaClarification}=require('../src/client-clarification');
  assert.match(clientMediaClarification({...original,messages:resumedJpg}).prompt,/walking cat with hat/);
  await (await send({...original,messages})).text();

@@ -11,5 +11,13 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "fflate": "0.8.3",
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "@scratch/scratch-storage": "15.3.0",
+    "@scratch/scratch-vm": "15.3.0"
   }
 }

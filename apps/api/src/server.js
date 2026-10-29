@@ -7,6 +7,9 @@ const { interactiveDefaults } = require("./policy");
 const { responsesHandler } = require("./responses");
 const {clientMediaRoute,mediaHeaders}=require('./client-media');
 const {clientMediaClarification}=require('./client-clarification');
+const {Artifacts}=require('./artifacts');
+const {artifactSaveResult,completion:artifactCompletion}=require('./artifact-delivery');
+const pathUtil=require('node:path');
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -41,6 +44,20 @@ function createApi(options = {}) {
   const mediaUpstream=mediaUrl?new URL(mediaUrl):null;
   if(mediaUpstream && (!['http:','https:'].includes(mediaUpstream.protocol)||mediaUpstream.username||mediaUpstream.password||mediaUpstream.search||mediaUpstream.hash||!token))throw Error('Invalid image upstream configuration');
   const mediaAgent=mediaUpstream?(mediaUpstream.protocol==='https:'?new https.Agent({keepAlive:true}):new http.Agent({keepAlive:true})):null;
+  const artifactOrigin=options.artifactOrigin??process.env.MUNDUSX_API_PUBLIC_URL??(process.env.RAILWAY_PUBLIC_DOMAIN?'https://'+process.env.RAILWAY_PUBLIC_DOMAIN:null);
+  const artifacts=options.artifacts??(mediaUpstream&&artifactOrigin?new Artifacts({secret:token,root:pathUtil.join(process.env.MUNDUSX_API_HOME||'/data','artifacts'),origin:artifactOrigin.replace(/\/$/,''),mediaUpstream:mediaUpstream.href,plannerUrl:process.env.MUNDUSX_API_ARTIFACT_PLANNER_URL||'http://planner.railway.internal:8080/v1/artifacts/plan'}):null);
+  function sendCompletion(res,parsed,completion,started=false) {
+    if(parsed.stream) {
+      if(!started)res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
+      const message=completion.choices[0].message;
+      const delta={...message,...(message.tool_calls?{tool_calls:message.tool_calls.map((c,index)=>({...c,index}))}:{})};
+      const chunk={id:completion.id,object:'chat.completion.chunk',created:completion.created,model:parsed.model};
+      res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta,finish_reason:null}]})+'\n\n');
+      res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:completion.choices[0].finish_reason}],mundusx:completion.mundusx})+'\n\n');
+      return res.end('data: [DONE]\n\n');
+    }
+    res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(completion));
+  }
   const auth = options.authenticate || authenticate,
     usage = options.recordUsage || recordUsage;
   const maxConcurrent = limit(
@@ -185,6 +202,7 @@ function createApi(options = {}) {
     try {
       const url = new URL(req.url, "http://localhost");
       const path = url.pathname;
+      if(req.method==='GET'&&artifacts&&await artifacts.download(url,res))return;
       if (path === "/health" && req.method === "GET") {
         res.writeHead(200, {
           "Content-Type": "application/json",
@@ -279,26 +297,34 @@ function createApi(options = {}) {
           400,
           "Structured output formats are not supported by the current public router",
         );
+      const saved=artifactSaveResult(parsed);
+      if(saved)return sendCompletion(res,parsed,saved);
       const image = !!mediaUpstream && clientMediaRoute(parsed);
       const clarification = image ? clientMediaClarification(parsed) : null;
-      if (clarification && clarification.action !== 'image') {
+      if (clarification && !['image','artifact'].includes(clarification.action)) {
         const completion = {id:'chatcmpl-'+randomUUID(),object:'chat.completion',created:Math.floor(Date.now()/1000),model:parsed.model,
           choices:[{index:0,message:{role:'assistant',content:clarification.message},finish_reason:'stop'}],
           mundusx:{clarification_required:clarification.action==='ask',job_started:false,file_saved:false}};
-        if (parsed.stream) {
-          res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
-          const chunk={id:completion.id,object:'chat.completion.chunk',created:completion.created,model:parsed.model};
-          res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:completion.choices[0].message,finish_reason:null}]})+'\n\n');
-          res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:'stop'}],mundusx:completion.mundusx})+'\n\n');
-          return res.end('data: [DONE]\n\n');
-        }
-        res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});
-        return res.end(JSON.stringify(completion));
+        return sendCompletion(res,parsed,completion);
+      }
+      if(clarification?.action==='artifact'&&clarification.format!=='png') {
+        if(!artifacts){const result=artifactCompletion('Artifact conversion is not configured. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
+        const abort=new AbortController();res.once('close',()=>abort.abort());
+        let heartbeat;
+        try {
+          const plan=await artifacts.plan(clarification.format,clarification.prompt,abort.signal);
+          if(plan.action!=='generate'){const result=artifactCompletion(plan.reason+'. No job has been started.');result.mundusx.job_started=false;return sendCompletion(res,parsed,result)}
+          if(parsed.stream){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': artifact generation pending\n\n')},15000);heartbeat.unref();}
+          const result=await artifacts.generate(key,parsed,clarification,plan,abort.signal);
+          if(!res.destroyed)sendCompletion(res,parsed,result,parsed.stream===true);
+        }catch(e){if(!res.destroyed)sendCompletion(res,parsed,artifactCompletion(e.message+'; no successful local save is claimed.'),res.headersSent)}
+        finally{clearInterval(heartbeat)}
+        return;
       }
       // Resolve the format in the API only. Existing image backend and browser chat
       // remain unchanged; they receive an explicit image request with full history.
-      const resolved = clarification?.action === 'image' ? {...parsed,messages:[...parsed.messages,
-        {role:'user',content:clarification.prompt}]} : parsed;
+      const resolved = ['image','artifact'].includes(clarification?.action) ? {...parsed,messages:[...parsed.messages,
+        {role:'user',content:'Create an image in PNG format. Original request: '+clarification.prompt}]} : parsed;
       forward(req, res, key, JSON.stringify(interactiveDefaults(resolved)), path, image);
     } catch (e) {
       error(

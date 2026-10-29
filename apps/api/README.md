@@ -53,3 +53,29 @@ Deploy this app directory manually with its Dockerfile. `PORT` is respected and 
 An empty key store denies all callers. Client credentials are replaced by the backend credential before forwarding. Additional user keys can be created, listed and revoked through the operator terminal with `node src/keys.js create USERID`, `list`, and `revoke ID`. The creation command shows the new key once. Bootstrap key rotation updates its Railway hash; file-based revocation overrides bootstrap entries. IDs are administrative labels, not verified account identity. Usage metadata is recorded without prompts or answers; account billing integration is not included in this initial gateway.
 
 Streaming uses backpressure and keep-alive instead of final-reply buffering. Disconnects close the upstream connection. POSTs are not automatically replayed. Run `npm test` for compatibility checks and `npm start` for the service.
+# Generated artifacts for existing IDE clients
+
+The API recognizes explicit image file formats and adjacent clarification replies.
+PNG uses the existing image route. JPG/JPEG, WebP (including `webpn`), BMP, TIFF,
+AVIF and still GIF use the image queue for a PNG source, then encode and validate
+the requested output. GIF requests ask whether the output is still or animated.
+
+`.sb3` is a separate Scratch project workflow: one generated sprite with a costume
+and optional motion/bounce blocks, packaged with `project.json` and assets. Every
+archive gets structural/reference validation. Tests load the project in the
+official Scratch VM and execute its motion blocks; the production service does
+not include the Scratch VM. Complex Scratch programs and animation are unsupported.
+
+Before generation, `/v1/artifacts/plan` on the LangGraph planner checks capability.
+Unsupported types return a supported-format question before any job is submitted;
+they never silently become ordinary inference jobs. Unknown formats are never
+implemented by renaming a PNG. This gate is conservative and rule-based.
+
+Set `MUNDUSX_API_PUBLIC_URL` to the canonical public API origin and optionally
+`MUNDUSX_API_ARTIFACT_PLANNER_URL` (default private planner service). Artifacts
+are stored under the API data volume with signed 48-hour download links, a
+20 MiB file limit and 512 MiB storage limit. The client's existing terminal tool
+downloads and checks SHA-256 and file size, refuses overwrites and linked parent
+directories, and reports success only after reading back the saved bytes.
+Missing/ambiguous workspace context returns a URL with explicit unsaved status.
+No changes to VS Code, extensions, or chat.mundusx.ai are required.
