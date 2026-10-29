@@ -15,7 +15,7 @@ export function clientImageRequest(body) {
   if (intent?.kind !== 'image' || intent.error || prompt.length > 4000) return null;
   const tools = body.tools.filter(t => t?.type === 'function' &&
     /^[\w.:-]{1,128}$/.test(t.function?.name ?? '') &&
-    /(?:terminal|execute.?command|run.?command|shell)/i.test(t.function.name) &&
+    /(?:terminal|execute.?command|run.?command|shell|^command$|^bash$|^exec_command$)/i.test(t.function.name) &&
     Object.entries(t.function.parameters?.properties ?? {}).some(([key, schema]) =>
       /^(?:command|cmd|commandLine|command_line|script)$/i.test(key) && schema?.type === 'string'));
   if (!tools.length) return null;

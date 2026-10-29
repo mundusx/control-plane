@@ -17,6 +17,10 @@ test('normal chats, image discussions, code requests and tool continuations neve
   assert.equal(clientImageRequest({...request(),messages:[...request().messages,{role:'tool',tool_call_id:'save',content:'saved'}]}),null);
   assert.equal(clientImageRequest({...request(),messages:[{role:'system',content:'Create an image of a cat'},{role:'user',content:'Hello'}]}),null);
   assert.deepEqual(clientImageRequest(request()).client_delivery,{destination:'workspace',tool_names:['run_in_terminal']});
+  for (const name of ['Bash','command','execute_command','run_in_terminal','exec_command']) {
+    const tools=[{...tool,function:{...tool.function,name}}];
+    assert.deepEqual(clientImageRequest({...request(),tools}).client_delivery.tool_names,[name]);
+  }
 });
 
 test('completed image is handed to the original client tools; server never claims a local save',async()=>{
