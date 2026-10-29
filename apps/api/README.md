@@ -113,7 +113,11 @@ stable request-specific filename, so separate generations do not collide with
 `generated-image.png`. New default names include the request's Unix creation time
 in seconds and a short collision-avoidance suffix, for example
 `generated-image-1793280000-e64cc3a4.png`. Retries keep that creation time and name;
-previously verified paths and explicit filenames remain unchanged. Save receipts accept
+previously verified paths are reused. Explicit filenames are used when free or
+when they contain identical bytes. If different content already exists, the client
+uses a timestamped version of the requested name, preserving the original file.
+That version also stays fixed on retry; it is never overwritten with different data.
+Save receipts accept
 terminal colour/mode sequences and supported output wrappers, but only a complete
 receipt line matching the path, hash, size and request ID proves success. Echoed
 commands do not count. Destination conflicts return a specific no-overwrite message.

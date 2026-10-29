@@ -12,6 +12,7 @@ test('actual terminal receipt survives ANSI mode changes, colours, CRLF and outp
  for(const content of [receipt,'\x1b[97mse\x1b[37m()}\r\r\n\x1b[0m'+receipt+'\x1b[?1004h\r\n',JSON.stringify({output:'Terminal output:\r\n'+receipt+'\x1b[?1004h'}),[{type:'text',text:receipt}]]) {
   const result=ack(content);assert.equal(result.mundusx.file_saved,true);assert.equal(result.mundusx.artifact_request_id,id);
  }
+ const versioned={...target,path:target.alternate_path};assert.equal(ack('EHDA_ARTIFACT_SAVED:'+JSON.stringify(versioned)).mundusx.saved_path,target.alternate_path);
 });
 test('echoed commands, wrong hashes/requests and collisions never count as successful saves',()=>{
  assert.equal(ack(command+'\nDestination exists with different content; not overwritten\nCommand exited with code 1').mundusx.file_saved,false);

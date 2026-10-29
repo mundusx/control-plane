@@ -75,7 +75,9 @@ test('signed storage verifies links; client download saves exact bytes and refus
  } else {stdout=(await execute('/bin/sh',['-c',command],{encoding:'utf8'})).stdout;assert.match(stdout,/EHDA_ARTIFACT_SAVED/);assert.match((await execute('/bin/sh',['-c',command])).stdout,/EHDA_ARTIFACT_SAVED/);}
  const bytes=await readFile(workspace+'/assets/cat.jpg');assert.equal(createHash('sha256').update(bytes).digest('hex'),artifact.sha256);assert.equal((await sharp(bytes).metadata()).format,'jpeg');
  await writeFile(workspace+'/assets/cat.jpg','different existing file');
- await assert.rejects(process.platform==='win32'?execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',command]):execute('/bin/sh',['-c',command]));
+ const versioned=await (process.platform==='win32'?execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',command]):execute('/bin/sh',['-c',command]));
+ const versionedReceipt=JSON.parse(versioned.stdout.split('EHDA_ARTIFACT_SAVED:')[1]);assert.match(versionedReceipt.path,/cat-\d+-[a-z0-9]+\.jpg$/);assert.equal(createHash('sha256').update(await readFile(versionedReceipt.path)).digest('hex'),artifact.sha256);
+ const repeatVersioned=await (process.platform==='win32'?execute('powershell.exe',['-NoProfile','-NonInteractive','-Command',command]):execute('/bin/sh',['-c',command]));assert.equal(JSON.parse(repeatVersioned.stdout.split('EHDA_ARTIFACT_SAVED:')[1]).path,versionedReceipt.path);
  assert.equal(await readFile(workspace+'/assets/cat.jpg','utf8'),'different existing file');
  const outside=await mkdtemp(tmpdir()+'/ehda-outside-test-');await symlink(outside,workspace+'/linked',process.platform==='win32'?'junction':'dir');
  const linked=artifactSave(body,artifact,'linked/cat.jpg');const linkedCommand=JSON.parse(linked.choices[0].message.tool_calls[0].function.arguments).command;

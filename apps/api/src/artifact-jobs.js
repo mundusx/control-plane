@@ -90,7 +90,7 @@ class ArtifactJobs {
     if(job.state==='ready'&&Number(new URL(job.artifact.url).searchParams.get('expires'))>this.now()) {
       const workspace=workspaceOf(body);
       if(job.workspace&&workspaceKey(workspace)!==workspaceKey(job.workspace))result=completion(marker+' is ready. Reopen its original workspace to resume saving, or download it: '+job.artifact.url+'\nNo file has been saved in the current workspace.');
-      else result=artifactSave(body,{...job.artifact,request_id:job.id},destination(job));
+      else result=artifactSave(body,{...job.artifact,request_id:job.id,request_created_at:job.created_at},destination(job));
     } else if(job.state==='ready'||job.state==='expired')result=completion(marker+' has expired output. Its history remains; no replacement job was created. Explicitly request a new generation if needed.');
     else if(job.state==='failed')result=completion(marker+' failed: '+job.error+'. No successful local save is claimed. Explicitly request a new generation if you want a replacement.');
     else result=completion(marker+' is still pending, waiting for image generation or conversion. It will continue in the background even if this chat disconnects. Ask “check image status” in this conversation to resume saving. No file has been saved yet.');
