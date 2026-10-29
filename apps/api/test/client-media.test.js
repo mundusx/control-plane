@@ -47,6 +47,7 @@ test('API itself asks without upstream work; PNG resumes explicitly against unch
  const messages=[...original.messages,question.choices[0].message,...body('PNG').messages];
  await (await send({...original,messages})).text();
  assert.equal(hits.length,1);assert.match(hits[0].messages.at(-1).content,/Create an image in PNG format.*walking cat with hat/);
+ assert.deepEqual(hits[0].messages.slice(0,-1),messages);
  const unsupported=await (await send({...original,messages:[...messages.slice(0,-1),...body('sb3').messages]})).json();
  assert.equal(unsupported.mundusx.job_started,false);assert.equal(hits.length,1);
  const stream=await (await send({...original,stream:true})).text();assert.match(stream,/chat.completion.chunk/);assert.match(stream,/Are you trying to create an image/);assert.match(stream,/\[DONE\]/);assert.equal(hits.length,1);

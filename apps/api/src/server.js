@@ -297,7 +297,7 @@ function createApi(options = {}) {
       }
       // Resolve the format in the API only. Existing image backend and browser chat
       // remain unchanged; they receive an explicit image request with full history.
-      const resolved = clarification?.action === 'image' ? {...parsed,messages:[...parsed.messages.slice(0,-1),
+      const resolved = clarification?.action === 'image' ? {...parsed,messages:[...parsed.messages,
         {role:'user',content:clarification.prompt}]} : parsed;
       forward(req, res, key, JSON.stringify(interactiveDefaults(resolved)), path, image);
     } catch (e) {
