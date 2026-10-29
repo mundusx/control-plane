@@ -6,6 +6,7 @@ const { authenticate, recordUsage, load } = require("./keys-store");
 const { interactiveDefaults } = require("./policy");
 const { responsesHandler } = require("./responses");
 const {clientMediaRoute,mediaHeaders}=require('./client-media');
+const {clientMediaClarification}=require('./client-clarification');
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -278,7 +279,27 @@ function createApi(options = {}) {
           400,
           "Structured output formats are not supported by the current public router",
         );
-      forward(req, res, key, JSON.stringify(interactiveDefaults(parsed)), path, !!mediaUpstream && clientMediaRoute(parsed));
+      const image = !!mediaUpstream && clientMediaRoute(parsed);
+      const clarification = image ? clientMediaClarification(parsed) : null;
+      if (clarification && clarification.action !== 'image') {
+        const completion = {id:'chatcmpl-'+randomUUID(),object:'chat.completion',created:Math.floor(Date.now()/1000),model:parsed.model,
+          choices:[{index:0,message:{role:'assistant',content:clarification.message},finish_reason:'stop'}],
+          mundusx:{clarification_required:clarification.action==='ask',job_started:false,file_saved:false}};
+        if (parsed.stream) {
+          res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','X-Accel-Buffering':'no'});
+          const chunk={id:completion.id,object:'chat.completion.chunk',created:completion.created,model:parsed.model};
+          res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:completion.choices[0].message,finish_reason:null}]})+'\n\n');
+          res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:'stop'}],mundusx:completion.mundusx})+'\n\n');
+          return res.end('data: [DONE]\n\n');
+        }
+        res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});
+        return res.end(JSON.stringify(completion));
+      }
+      // Resolve the format in the API only. Existing image backend and browser chat
+      // remain unchanged; they receive an explicit image request with full history.
+      const resolved = clarification?.action === 'image' ? {...parsed,messages:[...parsed.messages.slice(0,-1),
+        {role:'user',content:clarification.prompt}]} : parsed;
+      forward(req, res, key, JSON.stringify(interactiveDefaults(resolved)), path, image);
     } catch (e) {
       error(
         res,

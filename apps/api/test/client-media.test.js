@@ -34,3 +34,20 @@ test('gateway keeps normal chat on the old upstream and signs only image forward
  const expected=mediaHeaders({id:'owner'},actual.raw,'test-server-secret',Number(actual.headers['x-mundusx-image-timestamp']));
  assert.equal(actual.headers['x-mundusx-image-signature'],expected['x-mundusx-image-signature']);
 });
+test('API itself asks without upstream work; PNG resumes explicitly against unchanged image backend',async t=>{
+ const hits=[];const upstream=http.createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;hits.push(JSON.parse(raw));res.setHeader('Content-Type','application/json');res.end('{"choices":[{"message":{"content":"image handoff"}}]}');});
+ await new Promise(r=>upstream.listen(0,'127.0.0.1',r));t.after(()=>{upstream.closeAllConnections();upstream.close()});
+ const url='http://127.0.0.1:'+upstream.address().port;
+ const gateway=createApi({upstreamUrl:url,mediaUpstreamUrl:url,upstreamToken:'server-only',authenticate:()=>({id:'owner'}),recordUsage:()=>{}});
+ await new Promise(r=>gateway.listen(0,'127.0.0.1',r));t.after(()=>{gateway.closeAllConnections();gateway.close()});
+ const send=b=>fetch('http://127.0.0.1:'+gateway.address().port+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ const original=body('create walking cat with hat');
+ const question=await (await send(original)).json();
+ assert.equal(question.mundusx.job_started,false);assert.equal(hits.length,0);
+ const messages=[...original.messages,question.choices[0].message,...body('PNG').messages];
+ await (await send({...original,messages})).text();
+ assert.equal(hits.length,1);assert.match(hits[0].messages.at(-1).content,/Create an image in PNG format.*walking cat with hat/);
+ const unsupported=await (await send({...original,messages:[...messages.slice(0,-1),...body('sb3').messages]})).json();
+ assert.equal(unsupported.mundusx.job_started,false);assert.equal(hits.length,1);
+ const stream=await (await send({...original,stream:true})).text();assert.match(stream,/chat.completion.chunk/);assert.match(stream,/Are you trying to create an image/);assert.match(stream,/\[DONE\]/);assert.equal(hits.length,1);
+});
