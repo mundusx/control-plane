@@ -15,15 +15,6 @@ Connected-agent requests already use their authenticated account. Anonymous mode
 access is never assigned an arbitrary media owner; it cannot create media through
 this route. Existing normal chat remains unchanged.
 
-Ambiguous visual creation requests such as `create walking cat with hat` return
-“Are you trying to create an image? Please specify the type: still image (PNG),
-animation, or Scratch (.sb3) project.” No job is submitted until the format is
-clear. A following `PNG` or `still image` reply resumes the original prompt and
-workspace context. Pending state is reconstructed from adjacent conversation
-turns, never shared across conversations. Animation and Scratch choices return
-an explicit unsupported response without starting an image job. This initial
-candidate gate is conservative and rule-based, not an unrestricted LLM classifier.
-
 The gate requires a final user message explicitly asking for image generation
 (plain text or Copilot's final `userRequest` block),
 plus an offered function tool with a terminal/command name and a string command
