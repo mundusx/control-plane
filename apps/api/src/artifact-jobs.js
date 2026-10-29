@@ -12,7 +12,9 @@ function destination(job) {
   const match=job.intent.prompt.match(/\bsave\s+(?:it\s+)?(?:in|to)\s+(?:the\s+)?[`"']?([\w./-]+)[`"']?(?:\s+(?:folder|directory)\b|[.!?]?\s*$)/i);
   const directory=match?.[1]?.replace(/\/$/,'');
   const {EXT}=require('./artifact-pack');
-  const filename='generated-'+(job.intent.format==='sb3'?'sprite':'image')+'-'+job.id.replaceAll('-','').slice(0,12)+'.'+(EXT[job.intent.format]||job.intent.format);
+  const created=Number(job.created_at??job.artifact?.created_at);
+  if(!Number.isFinite(created)||created<=0)throw Error('Artifact request creation time is unavailable');
+  const filename='generated-'+(job.intent.format==='sb3'?'sprite':'image')+'-'+Math.floor(created/1000)+'-'+job.id.replaceAll('-','').slice(0,8)+'.'+(EXT[job.intent.format]||job.intent.format);
   return directory?directory+'/'+filename:filename;
 }
 function identity(key,body,intent) {

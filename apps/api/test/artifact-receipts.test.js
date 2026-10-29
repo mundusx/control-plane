@@ -22,8 +22,10 @@ test('echoed commands, wrong hashes/requests and collisions never count as succe
  const result=ack('Destination exists with different content; not overwritten');assert.equal(result.mundusx.save_error,'destination_exists');assert.match(result.choices[0].message.content,/Choose a new filename/);
 });
 test('folder-only destination is honored, default names avoid collisions and verified paths stay stable',()=>{
- const job={id,workspace:'D:\\project',intent:{format:'png',prompt:'generate me an image of monkey d luffy save in assets folder'}};
- assert.equal(destination(job),'assets/generated-image-e64cc3a49458.png');
+ const job={id,created_at:1793280000123,workspace:'D:\\project',intent:{format:'png',prompt:'generate me an image of monkey d luffy save in assets folder'}};
+ assert.equal(destination(job),'assets/generated-image-1793280000-e64cc3a4.png');
+ assert.equal(destination({...job,updated_at:1793380000123}),destination(job));
+ assert.notEqual(destination(job),destination({...job,created_at:1793280001123}));
  assert.notEqual(destination(job),destination({...job,id:'f64cc3a4-9458-4f57-ac70-3131ea26ca03'}));
  assert.equal(destination({...job,intent:{...job.intent,path:'assets/luffy.png'}}),'assets/luffy.png');
  assert.equal(destination({...job,saved_path:'d:/project/already-saved.png'}),'already-saved.png');

@@ -110,7 +110,10 @@ are not imported into this API request history or deleted by this feature.
 
 Folder-only requests such as `save in assets folder` use that directory and a
 stable request-specific filename, so separate generations do not collide with
-`generated-image.png`. Explicit filenames remain unchanged. Save receipts accept
+`generated-image.png`. New default names include the request's Unix creation time
+in seconds and a short collision-avoidance suffix, for example
+`generated-image-1793280000-e64cc3a4.png`. Retries keep that creation time and name;
+previously verified paths and explicit filenames remain unchanged. Save receipts accept
 terminal colour/mode sequences and supported output wrappers, but only a complete
 receipt line matching the path, hash, size and request ID proves success. Echoed
 commands do not count. Destination conflicts return a specific no-overwrite message.
