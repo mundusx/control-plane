@@ -44,7 +44,7 @@ test('image handoff preserves native calls in JSON and SSE and never runs client
     let text='';for await(const chunk of req)text+=chunk;modelTurn=JSON.parse(text);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(completion));
   }));
   const mediaService={submit:async()=>{generated++;return {job_id:'image',state:'completed',client_delivery:{action:'download_to_workspace',execution_owner:'client',tool_names:['run_in_terminal']}};},result:async()=>({content_type:'image/png',download_url:'https://chat.example/generated.png',expires_at:'tomorrow'})};
-  const base=await start(t,createServerApp({...configFromEnv({MUNDUSX_CONTROL_PLANE_URL:upstream,MUNDUSX_CLIENT_IMAGE_DELIVERY_ENABLED:'true',MUNDUSX_CHAT_API_KEYS:JSON.stringify([{id:'test',key}]),MUNDUSX_CLIENT_IMAGE_OWNERS:JSON.stringify({test:owner})}),authStore:{},mediaService}));
+  const base=await start(t,createServerApp({...configFromEnv({MUNDUSX_CONTROL_PLANE_URL:upstream,MUNDUSX_CLIENT_IMAGE_DELIVERY_ENABLED:'true'}),authStore:{mcpSession:async request=>request.headers.authorization===`Bearer ${key}`?{id:owner}:null},mediaService}));
   for(const stream of [false,true]) {
     const body={tools,stream,messages:[{role:'user',content:'Generate an image of a cat in assets/cat.png'}]};
     const response=await fetch(base+'/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify(body)});

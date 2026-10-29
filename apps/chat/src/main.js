@@ -7066,7 +7066,8 @@ export function createServerApp(config = configFromEnv()) {
     if (!config.clientMediaEnabled || !clientImageRequest(body)) return false;
     // Account ownership comes only from authenticated server state, never from
     // prompt text, client metadata, workspace paths or an operator credential.
-    const owner = authenticatedOwner ?? config.clientMediaOwners?.[request.mundusxApiKeyId];
+    const owner = authenticatedOwner ?? config.clientMediaOwners?.[request.mundusxApiKeyId]
+      ?? (typeof authStore.mcpSession === 'function' ? (await authStore.mcpSession(request))?.id : null);
     if (!owner) throw httpError(403, 'This API key is not bound to a media account. Normal chat remains available.');
     const abort = new AbortController();
     const close = () => abort.abort();

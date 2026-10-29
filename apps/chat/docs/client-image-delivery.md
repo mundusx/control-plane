@@ -9,6 +9,8 @@ planner update. `MUNDUSX_MEDIA_PLANNER_URL` must point to `/v1/media/plan`.
 For static model API keys, configure `MUNDUSX_CLIENT_IMAGE_OWNERS` as a JSON object
 mapping an existing authenticated API-key **id** to its owning user UUID. This is
 server configuration, never a secret or account identifier supplied in a prompt.
+Existing personal access tokens are resolved directly to their owning account;
+they do not require an API-key-id binding or another client connection.
 Connected-agent requests already use their authenticated account. Anonymous model
 access is never assigned an arbitrary media owner; it cannot create media through
 this route. Existing normal chat remains unchanged.
