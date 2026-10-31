@@ -864,10 +864,12 @@ impl ControlPlaneState {
             const REASON: &str = "cancelled by client";
             job.status = JobStatus::Failed;
             job.completed_at = Some(completed_at.clone());
-            job.assigned_node_id = None;
-            job.assigned_at = None;
-            job.worker_id = None;
-            job.backend = None;
+            if job.graph_execution_enabled {
+                job.assigned_node_id = None;
+                job.assigned_at = None;
+                job.worker_id = None;
+                job.backend = None;
+            }
             job.error = Some(REASON.to_string());
             job.active_graph_node_id = None;
             if job.graph_execution_enabled {
@@ -3151,7 +3153,8 @@ impl ControlPlaneState {
 
     pub fn run_maintenance_with_nodes(&mut self, now: &str) -> MaintenanceResult {
         let changed_nodes = self.mark_stale_nodes_stopped(now);
-        let mut changed_jobs = self.release_expired_queued_jobs(now);
+        let mut changed_jobs = self.restore_terminal_assignment_history();
+        changed_jobs.extend(self.release_expired_queued_jobs(now));
         let (expired_direct_jobs, changed_events) = self.release_stale_direct_claims(now);
         changed_jobs.extend(expired_direct_jobs);
         changed_jobs.extend(self.release_stale_graph_claims(now));
@@ -3160,6 +3163,40 @@ impl ControlPlaneState {
             changed_nodes,
             changed_events,
         }
+    }
+
+    fn restore_terminal_assignment_history(&mut self) -> Vec<JobRecord> {
+        let mut changed=Vec::new();
+        let mut recorded:BTreeMap<&str,Vec<&JobEventRecord>>=BTreeMap::new();
+        for event in self.job_events.iter().filter(|event|
+            matches!(event.event_type.as_str(),"job_assignment_expired"|"job_claimed")) {
+            if let Some(id)=event.job_id.as_deref() {recorded.entry(id).or_default().push(event);}
+        }
+        for job in self.jobs.values_mut().filter(|job| !job.graph_execution_enabled
+            && job.status==JobStatus::Failed && job.assigned_node_id.is_none()) {
+            let Some(completed)=job.completed_at.as_deref().and_then(parse_unix_seconds) else {continue;};
+            let previous=recorded.get(job.job_id.as_str()).into_iter().flatten()
+                .filter(|event| {
+                    (event.event_type=="job_assignment_expired" && event.payload["status"]=="failed"
+                        && event.payload["completed_at"].as_str()==job.completed_at.as_deref()
+                        && event.payload["error"].as_str()==job.error.as_deref())
+                    || (event.event_type=="job_claimed" && job.error.as_deref()==Some("cancelled by client")
+                        && event.payload["status"]=="assigned"
+                        && event.payload["assigned_node_id"].as_str()==event.node_id.as_deref())
+                })
+                .filter_map(|event| {
+                    let node=event.node_id.as_deref().filter(|s|!s.is_empty())?;
+                    let assigned=event.payload["assigned_at"].as_str()?;
+                    let stamp=parse_unix_seconds(assigned)?;
+                    (stamp<=completed).then_some((stamp,node,assigned))
+                }).max_by_key(|(stamp,_,_)|*stamp);
+            if let Some((_,node,assigned))=previous {
+                job.assigned_node_id=Some(node.to_owned());
+                job.assigned_at=Some(assigned.to_owned());
+                changed.push(job.clone());
+            }
+        }
+        changed
     }
 
     pub fn complete_job(
@@ -3197,7 +3234,7 @@ impl ControlPlaneState {
                     compact_reducer_node,
                 )
             } else {
-                if job.assigned_node_id.as_deref() != Some(completion.node_id.as_str()) {
+                if job.status != JobStatus::Assigned || job.assigned_node_id.as_deref() != Some(completion.node_id.as_str()) {
                     return Some(job.clone());
                 }
                 let output = clean_direct_job_output(job, completion.output.clone());
@@ -3593,10 +3630,14 @@ impl ControlPlaneState {
             } else {
                 Some(now.to_string())
             };
-            job.assigned_node_id = None;
-            job.assigned_at = None;
-            job.worker_id = None;
-            job.backend = None;
+            // Terminal execution history must remain visible to that node.
+            // Only a requeued attempt relinquishes its assignment metadata.
+            if retrying {
+                job.assigned_node_id = None;
+                job.assigned_at = None;
+                job.worker_id = None;
+                job.backend = None;
+            }
             job.output = None;
             job.error = Some(error.clone());
             job.active_graph_node_id = None;
@@ -12270,8 +12311,8 @@ mod tests {
         let job = state.jobs.get("job-1").expect("expired direct job");
         assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.completed_at.as_deref(), Some("603"));
-        assert_eq!(job.assigned_node_id, None);
-        assert_eq!(job.assigned_at, None);
+        assert_eq!(job.assigned_node_id.as_deref(), Some("node-1"));
+        assert_eq!(job.assigned_at.as_deref(), Some("3"));
         assert!(job
             .error
             .as_deref()
@@ -12296,6 +12337,19 @@ mod tests {
             .expect("late completion returns the terminal job");
         assert_eq!(late.status, JobStatus::Failed);
         assert_eq!(late.output, None);
+        assert_eq!(late.completed_at.as_deref(), Some("603"));
+        assert_eq!(late.assigned_node_id.as_deref(), Some("node-1"));
+        assert_eq!(state.node_slot_occupancy("node-1"), (0, 1, 1));
+        // Older deployments erased this history. Recover only the matching
+        // server-recorded terminal event, without reactivating its lease.
+        let legacy=state.jobs.get_mut("job-1").unwrap();legacy.assigned_node_id=None;legacy.assigned_at=None;
+        let repaired=state.run_maintenance_with_nodes("605");
+        assert_eq!(repaired.changed_jobs.len(),1);
+        assert_eq!(state.jobs["job-1"].assigned_node_id.as_deref(),Some("node-1"));
+        assert_eq!(state.jobs["job-1"].assigned_at.as_deref(),Some("3"));
+        assert_eq!(state.jobs["job-1"].status,JobStatus::Failed);
+        assert_eq!(state.node_slot_occupancy("node-1"),(0,1,1));
+        assert!(state.run_maintenance_with_nodes("606").changed_jobs.is_empty());
     }
 
     #[test]
