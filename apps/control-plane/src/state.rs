@@ -3197,7 +3197,7 @@ impl ControlPlaneState {
                     compact_reducer_node,
                 )
             } else {
-                if job.assigned_node_id.as_deref() != Some(completion.node_id.as_str()) {
+                if job.status != JobStatus::Assigned || job.assigned_node_id.as_deref() != Some(completion.node_id.as_str()) {
                     return Some(job.clone());
                 }
                 let output = clean_direct_job_output(job, completion.output.clone());
@@ -3593,10 +3593,14 @@ impl ControlPlaneState {
             } else {
                 Some(now.to_string())
             };
-            job.assigned_node_id = None;
-            job.assigned_at = None;
-            job.worker_id = None;
-            job.backend = None;
+            // Terminal execution history must remain visible to that node.
+            // Only a requeued attempt relinquishes its assignment metadata.
+            if retrying {
+                job.assigned_node_id = None;
+                job.assigned_at = None;
+                job.worker_id = None;
+                job.backend = None;
+            }
             job.output = None;
             job.error = Some(error.clone());
             job.active_graph_node_id = None;
@@ -12270,8 +12274,8 @@ mod tests {
         let job = state.jobs.get("job-1").expect("expired direct job");
         assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.completed_at.as_deref(), Some("603"));
-        assert_eq!(job.assigned_node_id, None);
-        assert_eq!(job.assigned_at, None);
+        assert_eq!(job.assigned_node_id.as_deref(), Some("node-1"));
+        assert_eq!(job.assigned_at.as_deref(), Some("3"));
         assert!(job
             .error
             .as_deref()
@@ -12296,6 +12300,9 @@ mod tests {
             .expect("late completion returns the terminal job");
         assert_eq!(late.status, JobStatus::Failed);
         assert_eq!(late.output, None);
+        assert_eq!(late.completed_at.as_deref(), Some("603"));
+        assert_eq!(late.assigned_node_id.as_deref(), Some("node-1"));
+        assert_eq!(state.node_slot_occupancy("node-1"), (0, 1, 1));
     }
 
     #[test]

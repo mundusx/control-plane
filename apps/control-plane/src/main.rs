@@ -11453,7 +11453,8 @@ mod tests {
             (true,"node-a","node-a","assignment-test","lease-1",200,Some(false)),
             (true,"node-a","node-a","missing","lease-1",200,Some(false)),
         ].into_iter().enumerate() {
-            if index==5 {let mut guard=state.lock().unwrap();let job=guard.jobs.get_mut("assignment-test").unwrap();job.status=JobStatus::Failed;job.assigned_node_id=None;}
+            // Retained execution history is not an active lease.
+            if index==5 {let mut guard=state.lock().unwrap();let job=guard.jobs.get_mut("assignment-test").unwrap();job.status=JobStatus::Failed;}
             let body=serde_json::json!({"job_id":job_id,"node_id":body_node,"assignment_id":assignment}).to_string();
             let timestamp=now_unix_seconds().parse::<u64>().unwrap()+index as u64;
             let signature=hex::encode(if node=="node-b" {&other_key}else{&key}.sign(format!("POST\n/v1/jobs/assignment\n{timestamp}\n{body}").as_bytes()).to_bytes());
@@ -11466,6 +11467,9 @@ mod tests {
             if let Some(active)=active {let payload:serde_json::Value=serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();assert_eq!(payload,serde_json::json!({"active":active}));}
         }
         handler.join().unwrap();
+        let job=state.lock().unwrap().jobs["assignment-test"].clone();
+        let history=super::filter_json_items(vec![job],Some("node_id=node-a&status=failed"),"jobs");
+        assert_eq!(history.len(),1,"terminal history must remain visible to the contributor");
     }
 
     #[test]
