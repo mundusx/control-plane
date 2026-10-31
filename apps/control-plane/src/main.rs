@@ -11090,7 +11090,7 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(50));
         };
         handler.join().unwrap();assert!(cancelled,"native disconnect must cancel without a custom cancel API call");
-        let guard=state.lock().unwrap();assert!(guard.jobs[&id].assigned_node_id.is_none());assert_eq!(guard.nodes["disconnect-node"].reported_state,crate::contracts::AgentState::Ready);
+        let guard=state.lock().unwrap();assert_eq!(guard.jobs[&id].status,JobStatus::Failed);assert_eq!(guard.jobs[&id].assigned_node_id.as_deref(),Some("disconnect-node"));assert_eq!(guard.nodes["disconnect-node"].reported_state,crate::contracts::AgentState::Ready);
     }
     #[test]
     fn streaming_search_requests_reach_inference_without_gateway_tools() {
