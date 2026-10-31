@@ -10020,10 +10020,16 @@ fn handle_connection_with_streams(
                     match (body["job_id"].as_str(),body["node_id"].as_str(),body["assignment_id"].as_str()) {
                         (Some(job_id),Some(body_node),Some(assignment)) if !job_id.is_empty() && !assignment.is_empty() && node == body_node => {
                             let guard=state.lock().expect("state lock");
-                            let active=guard.jobs.get(job_id).is_some_and(|job| job.status==JobStatus::Assigned
+                            let owned=guard.jobs.get(job_id).filter(|job|
+                                job.assigned_node_id.as_deref()==Some(node) && job.assigned_at.as_deref()==Some(assignment));
+                            let active=owned.is_some_and(|job| job.status==JobStatus::Assigned
                                 && job.assigned_node_id.as_deref()==Some(node)
                                 && job.assigned_at.as_deref()==Some(assignment));
-                            json_response("200 OK",serde_json::json!({"active":active}))
+                            let mut response=serde_json::json!({"active":active});
+                            if let Some(job)=owned.filter(|job| matches!(job.status,JobStatus::Failed|JobStatus::Completed)) {
+                                response["terminal_status"]=serde_json::to_value(job.status).expect("status");
+                            }
+                            json_response("200 OK",response)
                         }
                         _ => json_response("400 Bad Request",openai_error("Valid job, signed node and assignment IDs are required")),
                     }
@@ -11464,7 +11470,7 @@ mod tests {
             let mut response=String::new();client.read_to_string(&mut response).unwrap();
             assert!(response.starts_with(&format!("HTTP/1.1 {status} ")),"case {index}: {response}");
             assert!(!response.contains("private prompt"));
-            if let Some(active)=active {let payload:serde_json::Value=serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();assert_eq!(payload,serde_json::json!({"active":active}));}
+            if let Some(active)=active {let payload:serde_json::Value=serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();assert_eq!(payload["active"],active);if index==5 {assert_eq!(payload["terminal_status"],"failed");}else {assert!(payload.get("terminal_status").is_none());}}
         }
         handler.join().unwrap();
         let job=state.lock().unwrap().jobs["assignment-test"].clone();
